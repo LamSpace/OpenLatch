@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package openlatch;
+
+option java_package = "io.github.lamspace.openlatch.protocol";
+option java_multiple_files = true;
+
+// 消息类型：Envelope.type 的取值。
+enum MessageType {
+  MESSAGE_TYPE_UNKNOWN = 0;
+  HELLO          = 1;   // 会话建立（连接后第一条消息）
+  LOCK_ACQUIRE   = 2;
+  LOCK_RELEASE   = 3;
+  LEASE_RENEW    = 4;
+  PING           = 5;   // 心跳，无 payload
+  AWAIT_NOTIFY   = 6;   // 服务器 → 客户端 推送
+}
+
+// 锁类型。
+enum LockType {
+  LOCK_TYPE_REENTRANT = 0;   // 默认：可重入互斥
+  LOCK_TYPE_SIMPLE    = 1;   // 不可重入互斥
+  LOCK_TYPE_READ      = 2;
+  LOCK_TYPE_WRITE     = 3;
+}
+
+// 状态码。
+enum StatusCode {
+  OK              = 0;
+  QUEUED          = 1;   // 已登记到等待队列
+  DENIED          = 2;   // 未排队直接拒绝（立即式 tryLock 且锁被占）
+  INVALID_TOKEN   = 3;   // leaseToken 不匹配（误释放/误续租）
+  NOT_HELD        = 4;   // 该会话未持有该锁
+  SESSION_EXPIRED = 5;   // 会话不存在（重连后的旧请求）
+  OVERLOADED      = 6;   // 触发服务端保护限额
+  KEY_TOO_LONG    = 7;
+  KEY_EMPTY       = 8;
+  INVALID_REQUEST = 9;   // 参数非法（如 lease 越界）
+  NOT_LEADER      = 10;  // Phase 2 预留，Phase 1 不使用
+  INTERNAL_ERROR  = 11;
+}
+
+// 统一封装。request_id 在单条连接内唯一；服务端推送（AWAIT_NOTIFY）时为 0。
+message Envelope {
+  int32       protocol_version = 1;   // Phase 1 固定为 1
+  MessageType type               = 2;
+  int64       request_id         = 3; // 服务端推送（AWAIT_NOTIFY）时为 0
+  oneof payload {
+    HelloRequest        hello_request        = 10;
+    HelloResponse       hello_response       = 11;
+    AcquireRequest      acquire_request      = 12;
+    AcquireResponse     acquire_response     = 13;
+    ReleaseRequest      release_request      = 14;
+    ReleaseResponse     release_response     = 15;
+    LeaseRenewRequest   lease_renew_request  = 16;
+    LeaseRenewResponse  lease_renew_response = 17;
+    AwaitNotify         await_notify         = 18;
+  }
+}
+
+message HelloRequest {
+  int32  client_protocol_version = 1;
+  string client_name             = 2;  // 诊断用（应用名/主机），可为空
+  string auth_token              = 3;  // Phase 3 预留，Phase 1 必须为空
+}
+
+message HelloResponse {
+  StatusCode status                  = 1;
+  int64      session_id              = 2;  // 服务端分配，连接生命周期内有效
+  int32      server_protocol_version = 3;
+  int64      default_lease_ms        = 4;
+  int64      leader_hint             = 5;  // Phase 2 预留
+}
+
+message AcquireRequest {
+  string   key       = 1;
+  LockType lock_type = 2;
+  int64    thread_id = 3;   // 客户端提供；与 session_id 共同构成锁归属
+  int64    lease_ms  = 4;   // 0 = 用服务端默认值；越界返回 INVALID_REQUEST
+  int64    wait_ms   = 5;   // -1 = 排队；0 = 立即式；>0 由客户端本地计时，语义等价于 -1
+}
+
+message AcquireResponse {
+  StatusCode status              = 1;  // OK=授予 / QUEUED=排队 / DENIED=拒绝 / 错误码
+  int64      lease_token         = 2;  // OK 时有效：解锁与续租凭证
+  int64      lease_expires_at_ms = 3;  // 服务端时钟，仅诊断参考
+  int32      queue_position      = 4;  // QUEUED 时有效
+  int64      granted_lease_ms    = 5;  // OK 时实际生效租约（客户端据此设定看门狗）
+}
+
+message ReleaseRequest {
+  string key         = 1;
+  int64  lease_token = 2;
+  int64  thread_id   = 3;
+}
+
+message ReleaseResponse {
+  StatusCode status          = 1;  // OK / INVALID_TOKEN / NOT_HELD
+  bool       fully_released  = 2;  // 可重入计数归零时为 true
+}
+
+message LeaseRenewRequest {
+  string key         = 1;
+  int64  lease_token = 2;
+  int64  lease_ms    = 3;   // 请求续到的时长（通常等于原租约）
+}
+
+message LeaseRenewResponse {
+  StatusCode status              = 1;  // OK / INVALID_TOKEN / NOT_HELD
+  int64      lease_expires_at_ms = 2;
+}
+
+message AwaitNotify {
+  string key            = 1;
+  int64  request_id_ref = 2;  // 指向原 ACQUIRE 的 request_id
+}
