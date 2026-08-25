@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.server;
 
 import io.github.lamspace.openlatch.core.CoreEngine;
@@ -28,6 +44,7 @@ import java.util.concurrent.TimeUnit;
  */
 public final class OpenLatchServer {
 
+    /** 服务器协议版本，握手时校验客户端版本一致性。 */
     public static final int PROTOCOL_VERSION = 1;
 
     private static final Logger log = LoggerFactory.getLogger(OpenLatchServer.class);
@@ -44,12 +61,21 @@ public final class OpenLatchServer {
     private EventLoopGroup workerGroup;
     private Channel serverChannel;
 
+    /**
+     * 构造服务器：组装锁语义核心与通知桥，不启动任何资源。
+     *
+     * @param config 服务器配置
+     */
     public OpenLatchServer(ServerConfig config) {
         this.config = config;
         this.core = new CoreEngine(config.toCoreConfig(), new SystemClock(), new NotifyEventBridge(sessions));
     }
 
-    /** 启动扫描调度与网络监听。端口冲突等失败抛出异常，调用方负责退出处理。 */
+    /**
+     * 启动扫描调度与网络监听。端口冲突等失败抛出异常，调用方负责退出处理。
+     *
+     * @throws IllegalStateException 启动被中断或监听失败（如端口被占用）
+     */
     public void start() {
         startScheduler();
         bossGroup = new NioEventLoopGroup(1);
@@ -77,19 +103,38 @@ public final class OpenLatchServer {
                 config.maxInflightPerConnection(), config.defaultLeaseMs());
     }
 
-    /** 实际监听端口（配置端口为 0 时返回操作系统分配的端口）。 */
+    /**
+     * 实际监听端口（配置端口为 0 时返回操作系统分配的端口）。
+     *
+     * @return 监听端口
+     */
     public int port() {
         return ((InetSocketAddress) serverChannel.localAddress()).getPort();
     }
 
+    /**
+     * 锁语义核心，供测试直接驱动。
+     *
+     * @return 核心引擎
+     */
     public CoreEngine core() {
         return core;
     }
 
+    /**
+     * 服务器配置。
+     *
+     * @return 配置
+     */
     public ServerConfig config() {
         return config;
     }
 
+    /**
+     * 会话注册表，供测试断言会话状态。
+     *
+     * @return 会话注册表
+     */
     public ServerSessionRegistry sessions() {
         return sessions;
     }
@@ -143,6 +188,11 @@ public final class OpenLatchServer {
         }, tickMs, tickMs, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * 进程入口：加载配置、注册关停钩子并启动服务器；配置或启动失败以非零码退出。
+     *
+     * @param args 命令行参数（当前不使用，配置路径经系统属性 {@code openlatch.config} 传入）
+     */
     public static void main(String[] args) {
         ServerConfig config;
         try {

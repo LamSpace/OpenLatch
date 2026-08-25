@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.server.dispatch;
 
 import io.github.lamspace.openlatch.core.CoreEngine;
@@ -32,6 +48,11 @@ public final class RequestDispatcher {
 
     private final CoreEngine core;
 
+    /**
+     * 构造分发器。
+     *
+     * @param core 锁语义核心
+     */
     public RequestDispatcher(CoreEngine core) {
         this.core = Objects.requireNonNull(core);
     }
@@ -40,6 +61,10 @@ public final class RequestDispatcher {
      * 分发一条已握手连接上的业务消息。返回要写回的响应；{@code PING} 返回
      * {@code null}（不回复）。未知类型与 payload 不匹配回 {@code INVALID_REQUEST}，
      * 不断连（规格"消息合法性校验"）。
+     *
+     * @param session 已握手会话（提供 sessionId）
+     * @param msg     入站消息信封
+     * @return 要写回的响应；{@code PING} 返回 {@code null}
      */
     public Envelope dispatch(ServerSession session, Envelope msg) {
         return switch (msg.getType()) {
@@ -89,7 +114,12 @@ public final class RequestDispatcher {
         return toRenewResponse(msg, core.renew(cmd));
     }
 
-    /** 协议锁类型 → core 锁类型；未知值返回 null。 */
+    /**
+     * 协议锁类型 → core 锁类型；未知值返回 null。
+     *
+     * @param type 协议锁类型
+     * @return core 锁类型；未知值返回 {@code null}
+     */
     static LockType toCoreLockType(io.github.lamspace.openlatch.protocol.LockType type) {
         return switch (type) {
             case LOCK_TYPE_REENTRANT -> LockType.REENTRANT;
@@ -100,7 +130,14 @@ public final class RequestDispatcher {
         };
     }
 
-    /** core 授予结果 → 协议响应（design.md D5 全表映射）。 */
+    /**
+     * core 授予结果 → 协议响应（design.md D5 全表映射）。
+     *
+     * @param request 原请求信封（回显 protocolVersion 与 requestId）
+     * @param result  core 获取结果
+     * @param nowMs   当前时刻，用于计算租约到期时刻（毫秒）
+     * @return 协议响应信封
+     */
     static Envelope toAcquireResponse(Envelope request, AcquireResult result, long nowMs) {
         AcquireResponse.Builder resp = AcquireResponse.newBuilder()
                 .setStatus(toAcquireStatus(result.outcome()));
@@ -114,6 +151,12 @@ public final class RequestDispatcher {
         return envelope(request, MessageType.LOCK_ACQUIRE, b -> b.setAcquireResponse(resp));
     }
 
+    /**
+     * core 获取结果状态 → 协议状态码（全表映射）。
+     *
+     * @param outcome core 获取结果状态
+     * @return 协议状态码
+     */
     static StatusCode toAcquireStatus(Outcome outcome) {
         return switch (outcome) {
             case GRANTED -> StatusCode.OK;
@@ -126,7 +169,13 @@ public final class RequestDispatcher {
         };
     }
 
-    /** core 释放结果 → 协议响应。 */
+    /**
+     * core 释放结果 → 协议响应。
+     *
+     * @param request 原请求信封（回显 protocolVersion 与 requestId）
+     * @param result  core 释放结果
+     * @return 协议响应信封
+     */
     static Envelope toReleaseResponse(Envelope request, ReleaseResult result) {
         ReleaseResponse.Builder resp = ReleaseResponse.newBuilder()
                 .setStatus(toCommonStatus(result.status()))
@@ -134,7 +183,13 @@ public final class RequestDispatcher {
         return envelope(request, MessageType.LOCK_RELEASE, b -> b.setReleaseResponse(resp));
     }
 
-    /** core 续租结果 → 协议响应。 */
+    /**
+     * core 续租结果 → 协议响应。
+     *
+     * @param request 原请求信封（回显 protocolVersion 与 requestId）
+     * @param result  core 续租结果
+     * @return 协议响应信封
+     */
     static Envelope toRenewResponse(Envelope request, RenewResult result) {
         LeaseRenewResponse.Builder resp = LeaseRenewResponse.newBuilder()
                 .setStatus(toCommonStatus(result.status()));
@@ -144,6 +199,12 @@ public final class RequestDispatcher {
         return envelope(request, MessageType.LEASE_RENEW, b -> b.setLeaseRenewResponse(resp));
     }
 
+    /**
+     * core 释放/续租状态 → 协议状态码（全表映射）。
+     *
+     * @param status core 释放/续租状态
+     * @return 协议状态码
+     */
     static StatusCode toCommonStatus(ReleaseStatus status) {
         return switch (status) {
             case OK -> StatusCode.OK;
@@ -166,6 +227,10 @@ public final class RequestDispatcher {
     /**
      * 构造与请求类型对应的最小错误响应，回显 {@code request_id}。
      * 未知类型返回无 payload 的信封（仍可被客户端按 {@code request_id} 关联）。
+     *
+     * @param request 原请求信封
+     * @param status  错误状态码
+     * @return 错误响应信封
      */
     public static Envelope errorResponse(Envelope request, StatusCode status) {
         Envelope.Builder b = Envelope.newBuilder()

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.core.lock;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
@@ -49,11 +65,27 @@ public final class LockEntry {
     /** FIFO 等待队列。 */
     private final ArrayDeque<Waiter> waiters = new ArrayDeque<>();
 
+    /**
+     * 构造锁条目。
+     *
+     * @param key       锁键
+     * @param reentrant 是否可重入（首次请求锁类型为 {@code SIMPLE} 时取 false，其余取 true）
+     */
     public LockEntry(String key, boolean reentrant) {
         this.key = key;
         this.reentrant = reentrant;
     }
 
+    /**
+     * 状态迁移：按锁类型与队列规则授予、排队或拒绝（设计说明书 §4.3 规则集）。
+     *
+     * @param cmd                获取锁命令
+     * @param now                当前时刻（毫秒）
+     * @param leaseTokenSupplier 新租约凭证供应器，仅授予新持有时消费
+     * @param effectiveLeaseMs   已夹取的实际租约时长（毫秒）
+     * @param cfg                限额配置（队列深度上限）
+     * @return 获取结果：授予（携带凭证与租约）、排队（携带位次）或拒绝
+     */
     public synchronized AcquireResult acquire(AcquireCommand cmd, long now,
             LongSupplier leaseTokenSupplier, long effectiveLeaseMs, CoreConfig cfg) {
         Owner owner = new Owner(cmd.sessionId(), cmd.threadId());
@@ -127,6 +159,15 @@ public final class LockEntry {
         return new AcquireResult(Outcome.QUEUED, 0, 0, waiters.size());
     }
 
+    /**
+     * 释放持有：写侧或读侧计数减一，归零时清除租约并推进队首。
+     *
+     * @param cmd                释放锁命令，凭证须与当前租约匹配
+     * @param now                当前时刻（毫秒）
+     * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
+     * @param notify             通知收集列表，由调用方在条目锁外触发
+     * @return 释放结果：状态与是否完全释放
+     */
     public synchronized ReleaseResult release(ReleaseCommand cmd, long now,
             long headReplyTimeoutMs, List<Waiter> notify) {
         Owner owner = new Owner(cmd.sessionId(), cmd.threadId());
@@ -168,6 +209,14 @@ public final class LockEntry {
         return new ReleaseResult(ReleaseStatus.NOT_HELD, false);
     }
 
+    /**
+     * 续租：凭证匹配时以新租约刷新到期时刻。
+     *
+     * @param cmd              续租命令，凭证须与当前租约匹配
+     * @param now              当前时刻（毫秒）
+     * @param effectiveLeaseMs 已夹取的实际租约时长（毫秒）
+     * @return 续租结果：{@link ReleaseStatus#OK} 时携带新到期时刻
+     */
     public synchronized RenewResult renew(RenewCommand cmd, long now, long effectiveLeaseMs) {
         if (leaseToken == 0) {
             return new RenewResult(ReleaseStatus.NOT_HELD, 0);
@@ -180,7 +229,13 @@ public final class LockEntry {
         return new RenewResult(ReleaseStatus.OK, leaseExpiresAtMs);
     }
 
-    /** 租约到期强制释放全部持有者并通知队首。 */
+    /**
+     * 租约到期强制释放全部持有者并通知队首。
+     *
+     * @param now                当前时刻（毫秒）
+     * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
+     * @param notify             通知收集列表，由调用方在条目锁外触发
+     */
     public synchronized void forceExpire(long now, long headReplyTimeoutMs, List<Waiter> notify) {
         writer = null;
         writeCount = 0;
@@ -189,7 +244,14 @@ public final class LockEntry {
         notifyHeadIfPossible(now, headReplyTimeoutMs, notify);
     }
 
-    /** 队首响应超时清扫：移除超时的已通知队首，并对新队首补通知。返回是否移除。 */
+    /**
+     * 队首响应超时清扫：移除超时的已通知队首，并对新队首补通知。
+     *
+     * @param now                当前时刻（毫秒）
+     * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
+     * @param notify             通知收集列表，由调用方在条目锁外触发
+     * @return 是否移除了超时队首
+     */
     public synchronized boolean sweepNotifiedHead(long now, long headReplyTimeoutMs, List<Waiter> notify) {
         Waiter head = waiters.peekFirst();
         if (head == null || !head.notified()) {
@@ -203,7 +265,14 @@ public final class LockEntry {
         return true;
     }
 
-    /** 会话清理：释放该会话的全部持有（写侧 + 读侧）、摘除其等待项，并做队首前进检查。 */
+    /**
+     * 会话清理：释放该会话的全部持有（写侧 + 读侧）、摘除其等待项，并做队首前进检查。
+     *
+     * @param sessionId          要清理的会话
+     * @param now                当前时刻（毫秒）
+     * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
+     * @param notify             通知收集列表，由调用方在条目锁外触发
+     */
     public synchronized void removeSession(long sessionId, long now,
             long headReplyTimeoutMs, List<Waiter> notify) {
         if (writer != null && writer.sessionId() == sessionId) {
@@ -258,20 +327,38 @@ public final class LockEntry {
         return writer == null && readers.isEmpty();
     }
 
-    // ---- 以下访问器需在持有条目锁时调用（CoreEngine 保证）----
-
+    /**
+     * 锁键。须在持有条目锁时调用（CoreEngine 保证）。
+     *
+     * @return 锁键
+     */
     public String key() {
         return key;
     }
 
+    /**
+     * 当前租约凭证，无持有者时为 0。须在持有条目锁时调用（CoreEngine 保证）。
+     *
+     * @return 租约凭证
+     */
     public long leaseToken() {
         return leaseToken;
     }
 
+    /**
+     * 当前租约到期时刻。须在持有条目锁时调用（CoreEngine 保证）。
+     *
+     * @return 到期时刻（毫秒）
+     */
     public long leaseExpiresAtMs() {
         return leaseExpiresAtMs;
     }
 
+    /**
+     * 是否无持有者且无等待者。须在持有条目锁时调用（CoreEngine 保证）。
+     *
+     * @return 条目为空返回 true
+     */
     public boolean isEmpty() {
         return writer == null && readers.isEmpty() && waiters.isEmpty();
     }

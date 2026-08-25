@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.server.net;
 
 import io.github.lamspace.openlatch.core.CoreEngine;
@@ -29,6 +45,14 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     private final ServerSessionRegistry registry;
     private final RequestDispatcher dispatcher;
 
+    /**
+     * 构造会话处理器（共享实例，无连接级可变状态）。
+     *
+     * @param core       锁语义核心
+     * @param config     服务器配置（限额）
+     * @param registry   会话注册表
+     * @param dispatcher 请求分发器
+     */
     public ServerSessionHandler(CoreEngine core, ServerConfig config,
                                 ServerSessionRegistry registry, RequestDispatcher dispatcher) {
         this.core = core;

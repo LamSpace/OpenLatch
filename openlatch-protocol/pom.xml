@@ -41,6 +41,14 @@
         </extensions>
         <plugins>
             <plugin>
+                <!-- 主源码为 protoc 生成代码，不做 Javadoc 校验 -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>
                 <configuration>

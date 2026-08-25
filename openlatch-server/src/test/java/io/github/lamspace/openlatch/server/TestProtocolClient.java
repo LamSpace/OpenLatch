@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.server;
 
 import io.github.lamspace.openlatch.protocol.Envelope;
@@ -45,6 +61,13 @@ public final class TestProtocolClient implements AutoCloseable {
     private Channel channel;
     private volatile long sessionId;
 
+    /**
+     * 建立连接并装配协议 pipeline。
+     *
+     * @param host 服务器地址
+     * @param port 服务器端口
+     * @throws InterruptedException 连接等待被中断
+     */
     public void connect(String host, int port) throws InterruptedException {
         Bootstrap bootstrap = new Bootstrap()
                 .group(group)
@@ -83,7 +106,12 @@ public final class TestProtocolClient implements AutoCloseable {
         channel = bootstrap.connect(host, port).sync().channel();
     }
 
-    /** 握手并返回服务端分配的 sessionId。 */
+    /**
+     * 握手并返回服务端分配的 sessionId。
+     *
+     * @return 服务端分配的 sessionId
+     * @throws Exception 握手失败（状态非 {@code OK}）或收发异常
+     */
     public long hello() throws Exception {
         Envelope request = Envelope.newBuilder()
                 .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
@@ -100,11 +128,27 @@ public final class TestProtocolClient implements AutoCloseable {
         return sessionId;
     }
 
-    /** 发送并等待同 {@code request_id} 的响应。 */
+    /**
+     * 发送并等待同 {@code request_id} 的响应（默认超时）。
+     *
+     * @param request 请求信封
+     * @return 响应信封
+     * @throws Exception 超时、中断或收发异常
+     */
     public Envelope sendAndAwait(Envelope request) throws Exception {
         return sendAndAwait(request, DEFAULT_TIMEOUT_MS);
     }
 
+    /**
+     * 发送并等待同 {@code request_id} 的响应。
+     *
+     * @param request   请求信封
+     * @param timeoutMs 等待超时（毫秒）
+     * @return 响应信封
+     * @throws InterruptedException 等待被中断
+     * @throws ExecutionException   收发异常
+     * @throws TimeoutException     等待超时
+     */
     public Envelope sendAndAwait(Envelope request, long timeoutMs)
             throws InterruptedException, ExecutionException, TimeoutException {
         CompletableFuture<Envelope> future = new CompletableFuture<>();
@@ -118,24 +162,49 @@ public final class TestProtocolClient implements AutoCloseable {
         }
     }
 
-    /** 仅发送，不等待响应（用于断连注入等场景）。 */
+    /**
+     * 仅发送，不等待响应（用于断连注入等场景）。
+     *
+     * @param request 请求信封
+     */
     public void send(Envelope request) {
         channel.writeAndFlush(request);
     }
 
-    /** 等待一条 AWAIT_NOTIFY 推送；超时返回 null。 */
+    /**
+     * 等待一条 AWAIT_NOTIFY 推送；超时返回 null。
+     *
+     * @param timeoutMs 等待超时（毫秒）
+     * @return 推送信封；超时返回 {@code null}
+     * @throws InterruptedException 等待被中断
+     */
     public Envelope awaitPush(long timeoutMs) throws InterruptedException {
         return pushes.poll(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * 生成下一个请求 id。
+     *
+     * @return 单调递增的请求 id
+     */
     public long nextRequestId() {
         return requestId.getAndIncrement();
     }
 
+    /**
+     * 握手后的会话 id。
+     *
+     * @return sessionId
+     */
     public long sessionId() {
         return sessionId;
     }
 
+    /**
+     * 连接是否存活。
+     *
+     * @return 连接存在且活跃返回 true
+     */
     public boolean isConnected() {
         return channel != null && channel.isActive();
     }

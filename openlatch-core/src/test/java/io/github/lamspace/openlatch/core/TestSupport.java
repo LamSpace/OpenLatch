@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.core;
 
 import java.util.ArrayList;
@@ -15,10 +31,20 @@ final class MutableClock implements Clock {
         return now;
     }
 
+    /**
+     * 向前推进时钟。
+     *
+     * @param ms 推进的毫秒数
+     */
     void advance(long ms) {
         now += ms;
     }
 
+    /**
+     * 直接设置当前时刻。
+     *
+     * @param ms 目标时刻（毫秒）
+     */
     void set(long ms) {
         now = ms;
     }
@@ -36,18 +62,34 @@ final class RecordingListener implements CoreEventListener {
         events.add(new Event(sessionId, requestId, key));
     }
 
+    /**
+     * 已记录的通知序列快照。
+     *
+     * @return 事件列表（副本）
+     */
     List<Event> events() {
         return List.copyOf(events);
     }
 
+    /**
+     * 已记录的通知数。
+     *
+     * @return 事件数量
+     */
     int count() {
         return events.size();
     }
 
+    /**
+     * 最近一条通知。
+     *
+     * @return 最后一条事件
+     */
     Event last() {
         return events.get(events.size() - 1);
     }
 
+    /** 清空记录。 */
     void clear() {
         events.clear();
     }
@@ -60,6 +102,12 @@ final class QueueingListener implements CoreEventListener {
 
     private final ConcurrentHashMap<Long, BlockingQueue<Event>> queues = new ConcurrentHashMap<>();
 
+    /**
+     * 为会话登记通知队列。
+     *
+     * @param sessionId 会话
+     * @return 该会话的通知队列，供阻塞等待
+     */
     BlockingQueue<Event> register(long sessionId) {
         BlockingQueue<Event> q = new LinkedBlockingQueue<>();
         queues.put(sessionId, q);

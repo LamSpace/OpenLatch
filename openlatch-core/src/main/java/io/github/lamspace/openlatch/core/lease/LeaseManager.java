@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.github.lamspace.openlatch.core.lease;
 
 import java.util.ArrayList;
@@ -10,7 +26,13 @@ import java.util.PriorityQueue;
  */
 public final class LeaseManager {
 
-    /** 堆记录：按到期时刻升序，到期时刻相同时以 key、token 稳定排序。 */
+    /**
+     * 堆记录：按到期时刻升序，到期时刻相同时以 key、token 稳定排序。
+     *
+     * @param expiresAtMs 租约到期时刻（毫秒）
+     * @param key         锁键
+     * @param leaseToken  登记时的租约凭证
+     */
     public record HeapEntry(long expiresAtMs, String key, long leaseToken)
             implements Comparable<HeapEntry> {
         @Override
@@ -27,16 +49,31 @@ public final class LeaseManager {
         }
     }
 
+    /** 构造空的到期堆。 */
+    public LeaseManager() {
+    }
+
     private final PriorityQueue<HeapEntry> heap = new PriorityQueue<>();
 
-    /** 登记一条租约记录。 */
+    /**
+     * 登记一条租约记录。
+     *
+     * @param key         锁键
+     * @param leaseToken  租约凭证
+     * @param expiresAtMs 到期时刻（毫秒）
+     */
     public void offer(String key, long leaseToken, long expiresAtMs) {
         synchronized (this) {
             heap.offer(new HeapEntry(expiresAtMs, key, leaseToken));
         }
     }
 
-    /** 取出所有 {@code expiresAtMs <= nowMs} 的记录（按到期升序）。 */
+    /**
+     * 取出所有 {@code expiresAtMs <= nowMs} 的记录（按到期升序）。
+     *
+     * @param nowMs 当前时刻（毫秒）
+     * @return 已到期的堆记录列表
+     */
     public List<HeapEntry> drainExpired(long nowMs) {
         List<HeapEntry> out = new ArrayList<>();
         synchronized (this) {
