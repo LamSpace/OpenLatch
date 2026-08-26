@@ -68,3 +68,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## 5. Java 注释约定
+
+1. **创建 Java 源文件时必须添加详细的 Javadoc**。深度按契约分量分级：承载行为契约、并发保证或协议可见语义的类与方法按 JDK `Lock` 接口级撰写（类级：职责、线程模型、状态机、契约边界；方法级：分支语义、判定顺序、幂等性、调用者义务）；简单访问器与数据载体保持简洁，不制造深度。私有方法、私有构造器与私有字段同样必须有 Javadoc（`maven-javadoc-plugin` 已配置 `show=private`，缺失即构建失败）。
+2. **任何 Java 源文件的变更必须同步修改对应的 Javadoc**。行为变化时注释一并更新，保持"只读注释即可懂契约"；注释语义以代码实现为准，写注释前先读懂代码。
