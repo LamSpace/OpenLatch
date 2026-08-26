@@ -29,6 +29,7 @@ public final class ServerSessionRegistry {
     public ServerSessionRegistry() {
     }
 
+    /** sessionId → 会话映射，并发容器承载。 */
     private final ConcurrentMap<Long, ServerSession> sessions = new ConcurrentHashMap<>();
 
     /**

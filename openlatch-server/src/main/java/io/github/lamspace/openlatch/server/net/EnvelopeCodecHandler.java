@@ -34,6 +34,7 @@ public final class EnvelopeCodecHandler extends ChannelInboundHandlerAdapter {
     public EnvelopeCodecHandler() {
     }
 
+    /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(EnvelopeCodecHandler.class);
 
     @Override

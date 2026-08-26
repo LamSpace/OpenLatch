@@ -46,6 +46,7 @@ import java.util.Objects;
  */
 public final class RequestDispatcher {
 
+    /** 锁语义核心，全部业务命令均委托其执行。 */
     private final CoreEngine core;
 
     /**
@@ -82,6 +83,16 @@ public final class RequestDispatcher {
         };
     }
 
+    /**
+     * 分发获取锁请求：协议 {@code AcquireRequest} → core {@code AcquireCommand}
+     * → 结果映射为协议响应。{@code wait_ms == 0} 映射为立即式（不排队），
+     * {@code -1} 与正数均映射为可排队（设计说明书 §3.2.2）；租约到期时刻
+     * 以映射时的 {@code System.currentTimeMillis()} 计算。
+     *
+     * @param session 已握手会话（提供 sessionId）
+     * @param msg     入站消息信封（已确认携带 {@code AcquireRequest}）
+     * @return 协议响应信封
+     */
     private Envelope dispatchAcquire(ServerSession session, Envelope msg) {
         AcquireRequest req = msg.getAcquireRequest();
         LockType lockType = toCoreLockType(req.getLockType());
@@ -100,6 +111,14 @@ public final class RequestDispatcher {
         return toAcquireResponse(msg, result, System.currentTimeMillis());
     }
 
+    /**
+     * 分发释放锁请求：协议 {@code ReleaseRequest} → core {@code ReleaseCommand}
+     * → 结果映射为协议响应（含 {@code fullyReleased} 标志）。
+     *
+     * @param session 已握手会话（提供 sessionId）
+     * @param msg     入站消息信封（已确认携带 {@code ReleaseRequest}）
+     * @return 协议响应信封
+     */
     private Envelope dispatchRelease(ServerSession session, Envelope msg) {
         ReleaseRequest req = msg.getReleaseRequest();
         ReleaseCommand cmd = new ReleaseCommand(
@@ -107,6 +126,14 @@ public final class RequestDispatcher {
         return toReleaseResponse(msg, core.release(cmd));
     }
 
+    /**
+     * 分发续租请求：协议 {@code LeaseRenewRequest} → core {@code RenewCommand}
+     * → 结果映射为协议响应（成功时携带新到期时刻）。
+     *
+     * @param session 已握手会话（提供 sessionId）
+     * @param msg     入站消息信封（已确认携带 {@code LeaseRenewRequest}）
+     * @return 协议响应信封
+     */
     private Envelope dispatchRenew(ServerSession session, Envelope msg) {
         LeaseRenewRequest req = msg.getLeaseRenewRequest();
         RenewCommand cmd = new RenewCommand(
@@ -214,6 +241,15 @@ public final class RequestDispatcher {
         };
     }
 
+    /**
+     * 构造响应信封骨架：回显请求的 {@code protocolVersion} 与 {@code requestId}，
+     * 设置响应类型，再交由调用方填充具体 payload。
+     *
+     * @param request 原请求信封（回显来源）
+     * @param type    响应消息类型
+     * @param payload payload 填充器
+     * @return 协议响应信封
+     */
     private static Envelope envelope(Envelope request, MessageType type,
                                      java.util.function.Consumer<Envelope.Builder> payload) {
         Envelope.Builder b = Envelope.newBuilder()

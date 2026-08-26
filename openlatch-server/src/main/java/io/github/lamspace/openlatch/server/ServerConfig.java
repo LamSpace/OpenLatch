@@ -147,10 +147,25 @@ public record ServerConfig(
                 headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey);
     }
 
+    /**
+     * worker 线程数默认值：2 × CPU 核数。
+     *
+     * @return 默认线程数
+     */
     private static int defaultWorkerThreads() {
         return Runtime.getRuntime().availableProcessors() * 2;
     }
 
+    /**
+     * 读取整数配置项：键缺省或值为空白时取回落值；值非整数时抛出
+     * {@link IllegalArgumentException} 并在消息中指明配置键与非法值。
+     *
+     * @param props    配置属性表
+     * @param key      配置键
+     * @param fallback 缺省回落值
+     * @return 配置值或回落值
+     * @throws IllegalArgumentException 值非整数
+     */
     private static int intOf(Properties props, String key, int fallback) {
         String v = props.getProperty(key);
         if (v == null || v.isBlank()) {
@@ -163,6 +178,16 @@ public record ServerConfig(
         }
     }
 
+    /**
+     * 读取长整数配置项：语义与 {@link #intOf} 相同，值非长整数时抛出
+     * {@link IllegalArgumentException} 并指明配置键与非法值。
+     *
+     * @param props    配置属性表
+     * @param key      配置键
+     * @param fallback 缺省回落值
+     * @return 配置值或回落值
+     * @throws IllegalArgumentException 值非长整数
+     */
     private static long longOf(Properties props, String key, long fallback) {
         String v = props.getProperty(key);
         if (v == null || v.isBlank()) {
@@ -175,6 +200,18 @@ public record ServerConfig(
         }
     }
 
+    /**
+     * 全量校验，任一非法即抛出 {@link IllegalArgumentException} 并在消息中
+     * 指明配置键：端口 1–65535；{@code workerThreads >= 1}；
+     * {@code idleTimeoutMs > 0}；租约三项均为正数且满足
+     * {@code min <= default <= max}；{@code leaseTickIntervalMs > 0}；
+     * {@code headReplyTimeoutMs > 0}；{@code maxKeyLength >= 1}；
+     * {@code maxQueueDepthPerKey >= 1}；{@code maxInflightPerConnection >= 1}。
+     * 仅由 {@link #load} 在构造后调用（{@link #defaults()} 的取值天然合法，
+     * 不经此校验）。
+     *
+     * @throws IllegalArgumentException 任一配置项非法
+     */
     private void validate() {
         if (port < 1 || port > 65535) {
             throw new IllegalArgumentException("配置项 openlatch.server.port 非法（应为 1-65535）: " + port);

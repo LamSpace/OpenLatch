@@ -34,32 +34,50 @@ import java.util.Map;
 import java.util.function.LongSupplier;
 
 /**
- * 单 key 状态：持有者（写侧 + 读侧）、计数、租约、FIFO 等待队列。
+ * 单 key 的锁状态机：持有者（写侧 + 读侧）、重入计数、租约、FIFO 等待队列。
  *
- * <p>并发模型（设计说明书 §4.9）：条目内所有状态迁移都在 {@code synchronized(this)}
- * 内完成，任何调用路径最多持有一个条目锁。{@link #acquire}/{@link #release} 等
- * 方法自带同步；外层调用者（CoreEngine）再以 {@code synchronized(entry)} 包裹以
- * 原子完成"成员回查 + 状态迁移 + 条目移除"。通知事件经 {@code notify} 参数收集，
+ * <p><b>状态要素</b>：
+ * <ul>
+ *   <li>写侧：{@code writer} + {@code writeCount}（互斥持有与重入层数）；</li>
+ *   <li>读侧：{@code readers}（各读者及其重入计数）；</li>
+ *   <li>租约三元组：凭证 {@code leaseToken}、时长 {@code leaseMs}、
+ *       到期时刻 {@code leaseExpiresAtMs}。整 key 共享单一租约——读锁的多个
+ *       读者也共用一个凭证，加入已有读者时复用凭证，避免新 token 使
+ *       旧读者的释放失效；</li>
+ *   <li>等待队列：{@code waiters}，FIFO；队首可能处于"已通知、待重发"状态。</li>
+ * </ul>
+ *
+ * <p><b>并发模型</b>（设计说明书 §4.9）：条目内所有状态迁移都在
+ * {@code synchronized(this)} 内完成，任何调用路径最多持有一个条目锁。
+ * {@link #acquire}/{@link #release} 等方法自带同步；外层调用者
+ * （{@code CoreEngine}）再以 {@code synchronized(entry)} 包裹以原子完成
+ * "成员回查 + 状态迁移 + 条目移除"。通知事件经 {@code notify} 参数收集，
  * 由调用者在条目锁外统一触发。
  *
- * <p>锁类型约定：同一 key 应使用一致的锁类型（与 Redisson 约定一致）。
- * {@code reentrant} 在建条目时由首次请求的锁类型确定（{@code SIMPLE} 为 false，其余为 true）。
+ * <p><b>锁类型约定</b>：同一 key 应使用一致的锁类型（与 Redisson 约定一致）。
+ * {@code reentrant} 在建条目时由首次请求的锁类型确定（{@code SIMPLE} 为 false，
+ * 其余为 true），建条目后不再变化。
  */
 public final class LockEntry {
 
+    /** 锁键。 */
     private final String key;
+    /** 是否可重入，建条目时由首次请求的锁类型确定，之后不变。 */
     private final boolean reentrant;
 
     /** 写侧/互斥侧持有者（REENTRANT / SIMPLE / WRITE 使用）。 */
     private Owner writer;
+    /** 写侧重入层数，归零表示写侧无持有。 */
     private int writeCount;
 
     /** 读锁持有者 → 各自重入计数。 */
     private final Map<Owner, Integer> readers = new HashMap<>();
 
-    /** 当前生效租约（无持有者时无效，token 为 0）。 */
+    /** 当前租约凭证，无持有者时为 0。 */
     private long leaseToken;
+    /** 当前租约到期时刻（毫秒）。 */
     private long leaseExpiresAtMs;
+    /** 当前租约时长（毫秒），续租/重入刷新时随之更新。 */
     private long leaseMs;
 
     /** FIFO 等待队列。 */
@@ -77,7 +95,32 @@ public final class LockEntry {
     }
 
     /**
-     * 状态迁移：按锁类型与队列规则授予、排队或拒绝（设计说明书 §4.3 规则集）。
+     * 状态迁移：按下列规则顺序授予、排队或拒绝（设计说明书 §4.3 规则集，
+     * 首个命中者即为结果）：
+     * <ol>
+     *   <li><b>写侧重入</b>：同归属已持有写侧且条目可重入——重入计数加一，
+     *       同一凭证，租约整段刷新（{@code now + leaseMs}）→ 授予；</li>
+     *   <li><b>读侧重入</b>：同归属已在读者表——该读者计数加一，同一凭证，
+     *       租约整段刷新 → 授予；</li>
+     *   <li><b>快路径</b>：无冲突持有者且队列空——读请求且已有其他读者时
+     *       加入读者表并复用现有凭证（避免新凭证使旧读者的释放失效），
+     *       否则签发新凭证 → 授予；</li>
+     *   <li><b>队首重发命中</b>：队首等待者与本次请求同属
+     *       {@code (sessionId, requestId)} 且与当前持有兼容——出队并授予
+     *       （这是 {@code AWAIT_NOTIFY} 后重发的幂等落地路径）；
+     *       理论不可达的不兼容兜底为保持排队；</li>
+     *   <li><b>不可排队</b>：{@code queueIfBusy} 为假（立即式）→ 拒绝
+     *       （{@code DENIED}）；</li>
+     *   <li><b>幂等去重</b>：同 {@code (sessionId, requestId)} 已在队——
+     *       不二次入队，返回当前位次（1 起）→ 排队；</li>
+     *   <li><b>队列已满</b>：等待数达到 {@code maxQueueDepthPerKey} →
+     *       拒绝（{@code REJECT_QUEUE_FULL}）；</li>
+     *   <li><b>入队</b>：追加至队尾 → 排队，位次为入队后队列长度。</li>
+     * </ol>
+     *
+     * <p>授予新持有时租约取 {@code effectiveLeaseMs}；重入与加入已有读者
+     * 不消费凭证供应器。会话有效性与条目存活校验由 {@code CoreEngine}
+     * 在本方法之外完成。
      *
      * @param cmd                获取锁命令
      * @param now                当前时刻（毫秒）
@@ -162,6 +205,21 @@ public final class LockEntry {
     /**
      * 释放持有：写侧或读侧计数减一，归零时清除租约并推进队首。
      *
+     * <p><b>判定顺序</b>（首个命中者即为结果）：
+     * <ol>
+     *   <li>无任何持有者 → {@code NOT_HELD}；</li>
+     *   <li>凭证与当前租约不匹配 → {@code INVALID_TOKEN}；</li>
+     *   <li>写侧持有者匹配：计数减一，归零时清除写侧与租约、对队首触发
+     *       通知收集 → {@code OK}（{@code fullyReleased} 为归零与否）；</li>
+     *   <li>读侧持有者匹配：该读者计数减一并从读者表移除（归零时），
+     *       最后一个读者移除时清除租约、对队首触发通知收集 → {@code OK}；</li>
+     *   <li>凭证匹配但归属均不匹配 → {@code NOT_HELD}（防御性保留，
+     *       正常路径下凭证匹配即归属匹配，理论不可达）。</li>
+     * </ol>
+     *
+     * <p>重入锁逐层释放：单次调用只减一层计数。通知仅收集到
+     * {@code notify} 列表，由调用方在条目锁外统一触发。
+     *
      * @param cmd                释放锁命令，凭证须与当前租约匹配
      * @param now                当前时刻（毫秒）
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
@@ -210,7 +268,13 @@ public final class LockEntry {
     }
 
     /**
-     * 续租：凭证匹配时以新租约刷新到期时刻。
+     * 续租：凭证匹配时以新租约时长刷新到期时刻。
+     *
+     * <p><b>判定顺序</b>：凭证为 0（无持有者）→ {@code NOT_HELD}；
+     * 凭证不匹配 → {@code INVALID_TOKEN}；否则以 {@code effectiveLeaseMs}
+     * 更新租约时长并令到期时刻为 {@code now + effectiveLeaseMs} → {@code OK}。
+     * 不更换凭证，续租前后持有者身份不变。到期堆中旧记录的清理由
+     * {@code CoreEngine.expireDue} 的陈旧校验负责，本方法不触及到期堆。
      *
      * @param cmd              续租命令，凭证须与当前租约匹配
      * @param now              当前时刻（毫秒）
@@ -230,7 +294,10 @@ public final class LockEntry {
     }
 
     /**
-     * 租约到期强制释放全部持有者并通知队首。
+     * 租约到期强制释放：清除全部持有者（写侧与读侧）与租约，并对队首
+     * 触发通知收集。由 {@code CoreEngine.expireDue} 在陈旧校验通过后调用——
+     * 即到期堆记录的凭证与到期时刻仍与条目当前值一致，确认期间无续租
+     * 或重新授予。等待队列不受影响：锁释放后等待者照常竞争获取。
      *
      * @param now                当前时刻（毫秒）
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
@@ -245,7 +312,10 @@ public final class LockEntry {
     }
 
     /**
-     * 队首响应超时清扫：移除超时的已通知队首，并对新队首补通知。
+     * 队首响应超时清扫：队首处于"已通知、待重发"状态且响应截止时刻
+     * 已过（{@code notifyDeadlineMs <= now}）时，将其出队（视为放弃），
+     * 并对新队首补发通知收集。队首未通知或未超时则不做任何变更。
+     * 由 {@code CoreEngine.sweepNotifiedHeads} 周期调用，是通知丢失的兜底。
      *
      * @param now                当前时刻（毫秒）
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
@@ -266,7 +336,11 @@ public final class LockEntry {
     }
 
     /**
-     * 会话清理：释放该会话的全部持有（写侧 + 读侧）、摘除其等待项，并做队首前进检查。
+     * 会话清理：移除该会话在本条目的全部痕迹——写侧持有（若是持有者）、
+     * 读侧持有（从读者表移除）、等待队列中的全部等待项；若清理后无任何
+     * 持有者则清除租约；最后对队首做前进检查（被移除者恰为已通知队首时，
+     * 新队首获得通知机会）。由 {@code CoreEngine.sessionClosed} 在断连
+     * 清理时逐 key 调用。
      *
      * @param sessionId          要清理的会话
      * @param now                当前时刻（毫秒）
@@ -287,6 +361,18 @@ public final class LockEntry {
         notifyHeadIfPossible(now, headReplyTimeoutMs, notify);
     }
 
+    /**
+     * 授予新持有：按读/写落入读者表或写侧（计数置 1），并以新凭证
+     * 建立整段租约（时长 {@code effectiveLeaseMs}，到期
+     * {@code now + effectiveLeaseMs}）。仅快路径与队首重发命中时调用，
+     * 重入与加入已有读者不经由此方法（它们复用凭证）。
+     *
+     * @param owner            被授予的归属
+     * @param isRead           true 为读锁授予，false 为写侧授予
+     * @param token            新签发的租约凭证
+     * @param effectiveLeaseMs 已夹取的实际租约时长（毫秒）
+     * @param now              当前时刻（毫秒）
+     */
     private void grant(Owner owner, boolean isRead, long token, long effectiveLeaseMs, long now) {
         if (isRead) {
             readers.put(owner, 1);
@@ -299,13 +385,27 @@ public final class LockEntry {
         leaseExpiresAtMs = now + effectiveLeaseMs;
     }
 
+    /**
+     * 清除租约三元组（凭证、时长、到期时刻全部归零），表示当前无有效租约。
+     * 仅在持有者计数全部归零或强制到期时调用。
+     */
     private void clearLease() {
         leaseToken = 0;
         leaseExpiresAtMs = 0;
         leaseMs = 0;
     }
 
-    /** 锁无冲突持有者且队列非空时，标记并通知队首（仅队首，不批量唤醒）。 */
+    /**
+     * 队首通知收集：锁无冲突持有者（写侧与读侧均空）且队列非空时，
+     * 将队首标记为"已通知、待重发"（写入响应截止时刻
+     * {@code now + headReplyTimeoutMs}，以新实例替换队首保持不可变），
+     * 并加入通知列表。仅通知队首一个，不批量唤醒。已处于待重发状态的
+     * 队首不重复通知。
+     *
+     * @param now                当前时刻（毫秒）
+     * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
+     * @param notify             通知收集列表，由调用方在条目锁外触发
+     */
     private void notifyHeadIfPossible(long now, long headReplyTimeoutMs, List<Waiter> notify) {
         if (writer != null || !readers.isEmpty() || waiters.isEmpty()) {
             return;
@@ -320,6 +420,14 @@ public final class LockEntry {
         notify.add(updated);
     }
 
+    /**
+     * 判定请求的锁类型与当前持有是否兼容，用于队首重发命中时的落地检查：
+     * 读请求只需写侧无人持有（可与其他读者共存）；写类请求须写侧与读侧
+     * 均无人持有。
+     *
+     * @param lockType 请求的锁类型
+     * @return 与当前持有兼容返回 true
+     */
     private boolean compatibleWithHold(LockType lockType) {
         if (lockType == LockType.READ) {
             return writer == null;

@@ -31,6 +31,7 @@ public final class LockTable {
     public LockTable() {
     }
 
+    /** key → 锁条目映射，并发容器承载。 */
     private final ConcurrentHashMap<String, LockEntry> entries = new ConcurrentHashMap<>();
 
     /**

@@ -53,6 +53,7 @@ public final class LeaseManager {
     public LeaseManager() {
     }
 
+    /** 到期最小堆，按到期时刻升序。 */
     private final PriorityQueue<HeapEntry> heap = new PriorityQueue<>();
 
     /**

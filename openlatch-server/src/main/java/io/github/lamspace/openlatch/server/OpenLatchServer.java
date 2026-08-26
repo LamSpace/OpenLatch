@@ -39,26 +39,53 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * OpenLatch 单节点服务器入口：加载配置 → 组装锁语义核心 → 启动租约扫描调度与 Netty 监听。
- * 业务逻辑在 IO 线程同步执行（设计说明书 §5.2）。
+ * OpenLatch 单节点服务器入口：加载配置 → 组装锁语义核心 → 启动租约扫描调度
+ * 与 Netty 监听（设计说明书 §5.2）。
+ *
+ * <p><b>线程模型</b>：
+ * <ul>
+ *   <li><b>业务逻辑在 Netty IO 线程同步执行</b>：握手、分发、锁操作均不切换
+ *       线程，单连接内请求天然串行；跨连接的并发由 {@link CoreEngine} 的
+ *       条目锁与并发容器保证安全；</li>
+ *   <li><b>租约扫描独立单线程</b>（守护线程 {@code openlatch-lease-sweeper}）：
+ *       周期调用 {@code expireDue} 与 {@code sweepNotifiedHeads}，
+ *       与业务线程并发进入 {@link CoreEngine}；</li>
+ *   <li><b>通知回调线程来源不定</b>：{@code AWAIT_NOTIFY} 推送可能来自
+ *       业务 IO 线程（释放触发）或扫描线程（到期/清扫触发），
+ *       {@link NotifyEventBridge} 对两者均安全。</li>
+ * </ul>
+ *
+ * <p><b>生命周期</b>：构造只组装不占资源；{@link #start} 启动调度与监听
+ * （失败抛出，调用方负责退出）；{@link #stop} 幂等，关停顺序见该方法。
  */
 public final class OpenLatchServer {
 
     /** 服务器协议版本，握手时校验客户端版本一致性。 */
     public static final int PROTOCOL_VERSION = 1;
 
+    /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(OpenLatchServer.class);
+    /** Netty 优雅关停的安静期（毫秒），取 0 表示立即进入关停。 */
     private static final long SHUTDOWN_QUIET_MS = 0;
+    /** Netty 优雅关停与调度器等待的超时（秒）。 */
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 5;
 
+    /** 服务器配置（不可变）。 */
     private final ServerConfig config;
+    /** 锁语义核心，构造时组装，生命周期与服务器相同。 */
     private final CoreEngine core;
+    /** sessionId → 会话反向索引，通知推送经此路由。 */
     private final ServerSessionRegistry sessions = new ServerSessionRegistry();
+    /** 全部活动连接，关停时统一关闭。 */
     private final ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 
+    /** 租约扫描调度器，启动后非空，关停后置回 {@code null}。 */
     private ScheduledExecutorService scheduler;
+    /** accept 线程组（1 线程）。 */
     private EventLoopGroup bossGroup;
+    /** IO 线程组。 */
     private EventLoopGroup workerGroup;
+    /** 监听 channel，未启动时为 {@code null}。 */
     private Channel serverChannel;
 
     /**
@@ -171,6 +198,13 @@ public final class OpenLatchServer {
         log.info("OpenLatch server stopped");
     }
 
+    /**
+     * 启动租约扫描调度器：单守护线程（{@code openlatch-lease-sweeper}），
+     * 以 {@code leaseTickIntervalMs} 为固定周期调用 {@code expireDue}
+     * （回收过期租约）与 {@code sweepNotifiedHeads}（清扫超时未重发的
+     * 已通知队首）。单次扫描抛出的运行时异常仅记日志，不中断后续调度。
+     * 仅由 {@link #start} 调用一次。
+     */
     private void startScheduler() {
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "openlatch-lease-sweeper");

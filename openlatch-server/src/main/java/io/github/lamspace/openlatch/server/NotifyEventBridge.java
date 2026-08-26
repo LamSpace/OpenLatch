@@ -35,8 +35,10 @@ import org.slf4j.LoggerFactory;
  */
 public final class NotifyEventBridge implements CoreEventListener {
 
+    /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(NotifyEventBridge.class);
 
+    /** 会话注册表，按 {@code sessionId} 反查连接。 */
     private final ServerSessionRegistry registry;
 
     /**

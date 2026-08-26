@@ -130,6 +130,7 @@
                     <configuration>
                         <doclint>all</doclint>
                         <failOnWarnings>true</failOnWarnings>
+                        <show>private</show>
                         <quiet>true</quiet>
                         <encoding>UTF-8</encoding>
                         <charset>UTF-8</charset>

@@ -30,6 +30,7 @@ public final class SessionRegistry {
     public SessionRegistry() {
     }
 
+    /** sessionId → 该会话触及的 key 集合。 */
     private final ConcurrentHashMap<Long, Set<String>> touchedKeys = new ConcurrentHashMap<>();
 
     /**

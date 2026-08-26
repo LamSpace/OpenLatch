@@ -31,10 +31,15 @@ public final class ServerSession {
     /** Channel 属性键：会话实例存于该属性，随连接生命周期。 */
     public static final AttributeKey<ServerSession> KEY = AttributeKey.valueOf("openlatch.session");
 
+    /** 绑定的连接，随连接生命周期。 */
     private final Channel channel;
+    /** 在途请求计数。 */
     private final AtomicInteger inflight = new AtomicInteger();
+    /** 会话 id，握手成功后有效。 */
     private volatile long sessionId;
+    /** 握手完成标记。 */
     private volatile boolean handshaken;
+    /** 关闭标记，保证断连清理只执行一次。 */
     private volatile boolean closed;
 
     /**

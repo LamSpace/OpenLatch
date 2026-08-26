@@ -41,8 +41,11 @@ public final class ServerChannelInitializer extends ChannelInitializer<SocketCha
     /** 最大帧长 1 MiB，超限断连（设计说明书 §3.1）。 */
     public static final int MAX_FRAME_LENGTH = 1024 * 1024;
 
+    /** 连接读空闲超时（毫秒）。 */
     private final long idleTimeoutMs;
+    /** 共享的会话业务处理器。 */
     private final ServerSessionHandler sessionHandler;
+    /** 连接组，新连接登记、关停时统一关闭。 */
     private final ChannelGroup channels;
 
     /**

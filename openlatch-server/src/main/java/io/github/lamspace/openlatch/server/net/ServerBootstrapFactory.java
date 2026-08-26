@@ -26,6 +26,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
  */
 public final class ServerBootstrapFactory {
 
+    /** 工具类禁止实例化。 */
     private ServerBootstrapFactory() {
     }
 
