@@ -12,5 +12,73 @@
 
     <artifactId>openlatch-client</artifactId>
     <name>openlatch-client</name>
-    <description>OpenLatch 客户端 SDK（M3 交付，占位）</description>
+    <description>OpenLatch 客户端 SDK（M3 交付）：异步内核 + 同步包装 + 看门狗 + 重连</description>
+
+    <dependencies>
+        <!-- 客户端仅依赖协议与 netty：锁语义裁决全部在服务端（详设 §2 约束 2） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-protocol</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 集成/故障注入测试（§10.3/§10.4）在测试作用域内启动真实服务器；
+             不构成运行时依赖，不违反"客户端不依赖 core"的模块约束 -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 集成与故障注入测试（*IT，§10.3/§10.4）：进程内真实服务器 /
+                 进程级杀服务端等重场景，独立于单测运行 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
