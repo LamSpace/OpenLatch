@@ -46,7 +46,7 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 class OpenLatchAspectConfiguration {
 
     /**
-     * 公开无参构造：Spring 实例化配置类所需，无额外装配语义。
+     * 无参构造（包私有，随包私有配置类）：Spring 实例化所需，无额外装配语义。
      */
     OpenLatchAspectConfiguration() {
     }

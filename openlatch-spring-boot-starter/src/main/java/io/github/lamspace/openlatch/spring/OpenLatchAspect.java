@@ -52,7 +52,7 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
  * {@link OpenLatch} 注解的锁切面（详设 §8.3，M4 定案见 design D7）。
  *
  * <p><b>职责与流程</b>：{@code @Around("@annotation(openLatch)")} 拦截标注
- * 方法，依次执行——①SpEL 求值锁键（编译结果按"方法 + 表达式"缓存）；
+ * 方法，依次执行——①SpEL 求值锁键（解析结果按"方法 + 表达式"缓存）；
  * ②经客户端异步内核获取锁（{@code waitTime} 三分支映射为
  * {@link AcquireSpec} 的 {@code waitMs}，总超时计时由客户端内部承担，
  * 本切面仅以本地兜底时限等待结果）；③执行业务方法；④finally 语义释放：
@@ -70,8 +70,9 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
  * 线程执行，锁归属线程 = 业务执行线程（{@code Thread.currentThread()
  * .threadId()}）。
  *
- * <p><b>使用约束</b>：基于 Spring AOP，自调用不拦截；获取失败一律抛
- * {@link LockAcquisitionTimeoutException} 且业务不执行。
+ * <p><b>使用约束</b>：基于 Spring AOP，自调用不拦截；获取超时或被拒一律抛
+ * {@link LockAcquisitionTimeoutException} 且业务不执行，其余获取错误
+ * （会话过期、服务不可达等）原样传播。
  */
 @Aspect
 @Order(0)
@@ -110,8 +111,9 @@ public class OpenLatchAspect {
      * @param pjp       连接点（业务方法）
      * @param openLatch 方法上的注解实例
      * @return 业务方法返回值
-     * @throws Throwable 业务方法自身异常原样传播；获取失败抛
-     *                   {@link LockAcquisitionTimeoutException}；
+     * @throws Throwable 业务方法自身异常原样传播；获取超时/被拒抛
+     *                   {@link LockAcquisitionTimeoutException}；key 求值非法、
+     *                   等待被中断抛 {@link OpenLatchException}；
      *                   业务成功但释放真实失败时抛 {@link OpenLatchException}
      */
     @Around("@annotation(openLatch)")

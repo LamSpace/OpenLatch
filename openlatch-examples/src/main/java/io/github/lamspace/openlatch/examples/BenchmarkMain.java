@@ -16,7 +16,6 @@
 
 package io.github.lamspace.openlatch.examples;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -218,8 +217,8 @@ public final class BenchmarkMain {
     }
 
     /**
-     * 合并各线程蓄水池样本并排序（总量按观测数缩放无意义——直接拼接样本，
-     * 分位数为近似值，报告已注明）。
+     * 合并各线程蓄水池样本并排序（直接拼接各池样本，分位数为近似值，
+     * 报告已注明）。
      *
      * @param reservoirs 每线程蓄水池
      * @return 排序后的合并样本（毫秒）
@@ -303,7 +302,7 @@ public final class BenchmarkMain {
         }
 
         /**
-         * 排序样本（毫秒，浮点以支持分位数插值输出）。
+         * 排序样本（毫秒；分位数按最近邻法取值）。
          *
          * @return 排序后毫秒样本
          */

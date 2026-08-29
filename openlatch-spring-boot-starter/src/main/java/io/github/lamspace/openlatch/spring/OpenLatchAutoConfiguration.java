@@ -53,7 +53,9 @@ public class OpenLatchAutoConfiguration {
      * 装配共享的 {@link OpenLatchClient} 单例。
      *
      * <p>属性映射：{@code server-host}/{@code server-port} 拼为 Builder 的
-     * {@code address}；四类超时/退避直传。{@code destroyMethod = "shutdown"}
+     * {@code address}；{@code openlatch.*} 表内四类时长直传，
+     * {@code connectTimeout}/{@code workerThreads} 不在 §8.2 属性表内，
+     * 取客户端 Builder 默认值。{@code destroyMethod = "shutdown"}
      * 使上下文关闭时客户端先尽力释放本地持有的全部锁（至多一个请求超时），
      * 再停止重连与网络资源。应用已自行定义客户端 Bean 时不创建。
      *

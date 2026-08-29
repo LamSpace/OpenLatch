@@ -63,8 +63,10 @@ class OpenLatchStarterIT {
     /** 共享工作线程池。 */
     private final ExecutorService pool = Executors.newFixedThreadPool(16);
 
+    /** 上下文装配的客户端 Bean。 */
     @Autowired
     private OpenLatchClient client;
+    /** 被注解服务 Bean（探针经 {@code probe()} 取回）。 */
     @Autowired
     private AnnotatedService service;
 

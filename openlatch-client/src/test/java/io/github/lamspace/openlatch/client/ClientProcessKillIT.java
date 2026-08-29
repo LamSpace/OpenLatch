@@ -158,7 +158,8 @@ class ClientProcessKillIT {
     }
 
     /**
-     * 定位服务器 shade jar：依次尝试 reactor 布局下的候选路径。
+     * 定位服务器可执行 uber-jar（shade {@code -executable} 分类器）：
+     * 依次尝试 reactor 布局下的候选路径。
      *
      * @return jar 路径；未找到返回 {@code null}
      */

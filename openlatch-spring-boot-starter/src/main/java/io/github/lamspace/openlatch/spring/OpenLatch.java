@@ -37,13 +37,15 @@ import io.github.lamspace.openlatch.client.LockType;
  *   <li>{@code = 0}：立即式尝试，锁被占直接判失败，不排队；</li>
  *   <li>{@code > 0}：限时等待 {@code waitTime(timeUnit)}，到时未授予判失败。</li>
  * </ul>
- * 获取失败一律抛
+ * 获取超时或被拒一律抛
  * {@link io.github.lamspace.openlatch.client.LockAcquisitionTimeoutException}
- * 且业务方法不执行。
+ * 且业务方法不执行；其余错误（如会话过期、服务不可达）原样抛出，
+ * 等待被中断抛 {@link io.github.lamspace.openlatch.client.OpenLatchException}。
  *
  * <p><b>租约</b>：{@link #leaseTime()} 为 0 时使用服务端默认租约（30s）并由
  * 看门狗自动续租；大于 0 时按请求值授予（服务端钳制到配置区间），看门狗
- * 按实际生效租约续租。长任务不主动释放时锁最迟在租约到期后被服务端回收。
+ * 按实际生效租约续租。客户端存活期间不主动释放的锁由看门狗持续续租；
+ * 续租中断（进程死亡、断连超时判定）时锁最迟在租约到期后被服务端回收。
  *
  * <p><b>使用约束</b>：
  * <ul>

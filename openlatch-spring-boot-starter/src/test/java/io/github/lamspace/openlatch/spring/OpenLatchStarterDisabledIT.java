@@ -50,10 +50,13 @@ class OpenLatchStarterDisabledIT {
     /** 临时端口内嵌服务器。 */
     private static final OpenLatchServer SERVER = startServer();
 
+    /** 上下文装配的客户端 Bean（enabled=false 下仍应存在）。 */
     @Autowired
     private OpenLatchClient client;
+    /** 被注解服务 Bean（本类中注解应不生效）。 */
     @Autowired
     private AnnotatedService service;
+    /** 测试上下文（断言切面 Bean 不存在）。 */
     @Autowired
     private ApplicationContext context;
 
