@@ -1,0 +1,1 @@
+{"oldLeader":1,"newLeader":2,"processExitMs":29,"tElectMs":401,"tServeMs":492,"recoveryTotalMs":492,"lockSurvived":true,"meta":{"candidate":"ratis","exp":"kill","round":0,"java":"25.0.3","cpus":8,"jar":"poc-ratis-1.0-SNAPSHOT-all.jar"},"endedAt":1788013593951,"invariantViolated":false,"invariantEvents":[]}

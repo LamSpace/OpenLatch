@@ -1,0 +1,1 @@
+{"oldLeader":3,"newLeader":1,"processExitMs":23,"tElectMs":1501,"tServeMs":1508,"recoveryTotalMs":1508,"lockSurvived":true,"meta":{"candidate":"jraft","exp":"kill","round":3,"java":"25.0.3","cpus":8,"jar":"poc-jraft-1.0-SNAPSHOT-all.jar"},"endedAt":1788018040535,"invariantViolated":false,"invariantEvents":[]}

@@ -1,0 +1,1 @@
+{"leaderElected":true,"acquireGranted":true,"mutexHeld":true,"releaseOk":true,"regainedAfterRelease":true,"allDigestsEqual":true,"pass":true,"meta":{"candidate":"noraft","exp":"smoke","round":0,"java":"25.0.3","cpus":8,"jar":"poc-harness-1.0-SNAPSHOT-all.jar"},"endedAt":1788011198242,"invariantViolated":false,"invariantEvents":[]}

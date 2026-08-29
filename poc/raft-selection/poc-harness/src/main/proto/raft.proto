@@ -1,0 +1,92 @@
+// Phase 2 S1 PoC 本地拷贝的 Raft 条目定义（详设 §4.2 子集，design D6）。
+// 定案后由 S2（P2-05）按正式形态入 openlatch-protocol，主干 protocol 不因 PoC 改动。
+syntax = "proto3";
+
+package openlatch.poc;
+
+option java_package = "io.github.lamspace.openlatch.poc.proto";
+option java_outer_classname = "RaftPoc";
+
+enum RaftEntryType {
+  RAFT_ENTRY_UNKNOWN = 0;
+  SESSION_OPEN       = 1;
+  SESSION_CLOSE      = 2;
+  LOCK_ACQUIRE_ENTRY = 3;
+  LOCK_RELEASE_ENTRY = 4;
+  NOOP               = 7;
+}
+
+// 与详设 §4.2 对齐的复制条目外壳
+message RaftLogEntry {
+  RaftEntryType type           = 1;
+  int64         seq            = 2;   // driver 分配的全局序号（幂等与诊断）
+  int64         wall_clock_ms  = 3;   // 发起时刻；apply 期间经 EntryClock 注入（§4.3）
+  bytes         command_payload = 4;  // 下列 payload 之一的序列化
+}
+
+message SessionPayload {
+  int64 session_id = 1;   // driver 侧逻辑会话 id（PoC 内跨节点一致；apply 时映射到本节点 engine sid）
+}
+
+message AcquirePayload {
+  int64  session_id         = 1;
+  int64  request_id         = 2;
+  string key                = 3;
+  int32  lock_type          = 4;   // LockType.values() 序：0 REENTRANT, 1 SIMPLE, 2 READ, 3 WRITE
+  int64  thread_id          = 5;
+  int64  requested_lease_ms = 6;
+  bool   queue_if_busy      = 7;
+}
+
+message ReleasePayload {
+  int64  session_id  = 1;
+  string key         = 2;
+  int64  lease_token = 3;
+  int64  thread_id   = 4;
+}
+
+// 应用回执（状态机 → driver），映射 core 的 AcquireResult/ReleaseResult
+message ApplyResult {
+  ResultStatus status   = 1;
+  int64        lease_token    = 2;
+  int64        lease_ms       = 3;
+  int32        queue_position = 4;
+}
+
+enum ResultStatus {
+  R_OK             = 0;   // GRANTED / RELEASE OK
+  R_QUEUED         = 1;
+  R_DENIED         = 2;
+  R_NOT_HELD       = 3;
+  R_INVALID_TOKEN  = 4;
+  R_REJECT_SESSION = 5;
+  R_ERROR          = 6;   // apply 异常
+}
+
+// 影子状态表（快照/追赶比对载体，design D9）
+message ShadowLock {
+  string key         = 1;
+  int32  lock_type   = 2;
+  int64  lease_token = 3;
+  int64  expires_at  = 4;   // 条目时刻 + 生效租期（EntryClock 确定化）
+  int64  lease_ms    = 5;   // 实际生效租期，快照重建回灌用
+  repeated ShadowHolder holders = 6;
+}
+
+message ShadowHolder {
+  int64 session_id = 1;   // 逻辑会话 id
+  int64 thread_id  = 2;
+  int32 count      = 3;   // 持有计数（PoC 数据恒为 1，重建断言）
+}
+
+message ShadowState {
+  repeated ShadowLock locks = 1;   // 授予顺序（token 单调）
+  repeated int64      sessions = 2;
+}
+
+// 快照文件封套（落盘载体：term/index + 影子表）
+message SnapshotFile {
+  int64 term   = 1;
+  int64 index  = 2;
+  bytes shadow = 3;   // ShadowState 序列化
+}

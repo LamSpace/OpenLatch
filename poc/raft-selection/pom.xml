@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OpenLatch Phase 2 / S1 Raft 选型 PoC —— 一次性评估工程（详设 §13.1 P2-01）。
+  独立 reactor：parent 指向根 pom 以继承 dependencyManagement，但本目录
+  不出现于根 pom <modules>，主干构建与发布链路零污染（design D2）。
+  PoC 代码不进主干；主干模块（core/protocol/server）在本变更期间必须零改动。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.lamspace</groupId>
+        <artifactId>openlatch</artifactId>
+        <version>1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>raft-selection-poc</artifactId>
+    <packaging>pom</packaging>
+    <name>OpenLatch Raft Selection PoC</name>
+    <description>Phase 2 S1：Ratis vs SOFAJRaft 选型 PoC（throwaway，不入主干）</description>
+
+    <modules>
+        <module>poc-harness</module>
+        <module>poc-ratis</module>
+        <module>poc-jraft</module>
+    </modules>
+
+    <properties>
+        <ratis.version>3.3.0</ratis.version>
+        <jraft.version>1.4.1</jraft.version>
+    </properties>
+
+    <build>
+        <plugins>
+            <!-- PoC 为一次性草稿代码，不纳入主干 Javadoc 契约校验（design D2）。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
