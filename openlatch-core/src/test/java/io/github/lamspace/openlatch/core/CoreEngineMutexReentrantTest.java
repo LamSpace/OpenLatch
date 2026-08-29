@@ -141,4 +141,35 @@ class CoreEngineMutexReentrantTest {
         AcquireResult r = engine.acquire(acquire(a, 1, "k", LockType.REENTRANT, 1, false));
         assertThat(r.outcome()).isEqualTo(Outcome.GRANTED);
     }
+
+    /** 重入按本次请求租约值整段刷新（design D2）：重入者可将租约改短/改长。 */
+    @Test
+    void reentrantRefreshesLeaseWithRequestedValue() {
+        long a = engine.sessionOpened();
+        AcquireResult g1 = engine.acquire(
+                new AcquireCommand(a, 1, "k", LockType.REENTRANT, 1, 30_000, true));
+        assertThat(g1.grantedLeaseMs()).isEqualTo(30_000);
+
+        clock.advance(10_000);
+        AcquireResult g2 = engine.acquire(
+                new AcquireCommand(a, 2, "k", LockType.REENTRANT, 1, 10_000, true));
+        assertThat(g2.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(g2.leaseToken()).isEqualTo(g1.leaseToken()); // 同一凭证
+        assertThat(g2.grantedLeaseMs()).isEqualTo(10_000);      // 按请求值，非条目旧值
+
+        // 刷新生效：t=20s 到期（而非原 30s 租期的 t=30s）。
+        clock.advance(10_000);
+        assertThat(engine.expireDue()).isEqualTo(1);
+    }
+
+    /** 重入请求值 0 取服务端默认租约整段刷新。 */
+    @Test
+    void reentrantWithZeroLeaseUsesDefault() {
+        long a = engine.sessionOpened();
+        engine.acquire(new AcquireCommand(a, 1, "k", LockType.REENTRANT, 1, 5_000, true));
+
+        AcquireResult g2 = engine.acquire(
+                new AcquireCommand(a, 2, "k", LockType.REENTRANT, 1, 0, true));
+        assertThat(g2.grantedLeaseMs()).isEqualTo(30_000); // CoreConfig 默认租约
+    }
 }

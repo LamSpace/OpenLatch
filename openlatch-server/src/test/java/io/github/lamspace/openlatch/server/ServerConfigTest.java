@@ -128,6 +128,29 @@ class ServerConfigTest {
                 .hasMessageContaining("port");
     }
 
+    /** 端口 0（OS 分配临时端口）经配置文件合法（变更 phase1-audit-remediation design D5）。 */
+    @Test
+    void port_zero_loads_for_ephemeral_bind() throws IOException {
+        Path file = tempDir.resolve("zero-port.properties");
+        Files.writeString(file, "openlatch.server.port = 0\n");
+
+        assertThat(ServerConfig.load(file.toString()).port()).isZero();
+    }
+
+    /** 端口 0 配置可真实启动：绑定到操作系统分配的临时端口。 */
+    @Test
+    void server_on_port_zero_binds_ephemeral_port() throws IOException {
+        Path file = tempDir.resolve("zero-bind.properties");
+        Files.writeString(file, "openlatch.server.port = 0\n");
+        OpenLatchServer server = new OpenLatchServer(ServerConfig.load(file.toString()));
+        try {
+            server.start();
+            assertThat(server.port()).isPositive();
+        } finally {
+            server.stop();
+        }
+    }
+
     @Test
     void lease_bounds_must_be_ordered() throws IOException {
         Path file = tempDir.resolve("bad-lease.properties");

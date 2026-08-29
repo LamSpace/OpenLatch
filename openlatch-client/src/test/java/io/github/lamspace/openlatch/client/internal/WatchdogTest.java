@@ -131,6 +131,36 @@ class WatchdogTest {
         assertThat(lostEntries.poll(2, TimeUnit.SECONDS)).isSameAs(entry);
     }
 
+    /** OVERLOADED 计为瞬时失败：单次重试，连续两次判定失锁（spec「过载错误计入连续失败」）。 */
+    @Test
+    void overloadedCountsTowardConsecutiveFailures() throws Exception {
+        HeldLockRegistry.HeldEntry entry = registerEntry();
+        watchdog.start(entry);
+
+        Envelope first = awaitOutboundRenew();
+        respondRenew(first.getRequestId(), StatusCode.OVERLOADED);
+        assertThat(lostEntries).isEmpty();
+
+        Envelope second = awaitOutboundRenew();
+        respondRenew(second.getRequestId(), StatusCode.OVERLOADED);
+        assertThat(lostEntries.poll(2, TimeUnit.SECONDS)).isSameAs(entry);
+    }
+
+    /** 瞬时失败被成功续租隔断：计数重置，非连续过载不失锁。 */
+    @Test
+    void transientFailureThenSuccessResetsCount() throws Exception {
+        HeldLockRegistry.HeldEntry entry = registerEntry();
+        watchdog.start(entry);
+
+        respondRenew(awaitOutboundRenew().getRequestId(), StatusCode.OVERLOADED);
+        respondRenew(awaitOutboundRenew().getRequestId(), StatusCode.OK);
+        respondRenew(awaitOutboundRenew().getRequestId(), StatusCode.OVERLOADED);
+        assertThat(lostEntries).isEmpty();
+
+        respondRenew(awaitOutboundRenew().getRequestId(), StatusCode.OK);
+        assertThat(lostEntries).isEmpty();
+    }
+
     /** 单次续租超时：下一周期重试，不失锁；恢复成功后计数重置。 */
     @Test
     void singleTimeoutRetriesNextCycle() throws Exception {

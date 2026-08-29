@@ -231,4 +231,55 @@ class OLockSyncWrapperTest {
         assertThat(grant.get().leaseToken()).isNotZero();
         lock.unlock();
     }
+
+    /** 锁完全释放后该键监听器登记被丢弃、重持不复活（design D4）。 */
+    @Test
+    void keyListenersDiscardedAfterFullRelease() throws Exception {
+        OLock lock = clientA.newReentrantLock("listener-lifecycle");
+        lock.onLockLost((k, cause) -> { });
+        assertThat(clientA.keyListenerCount()).isEqualTo(1);
+
+        lock.lock();
+        lock.unlock(); // fullyReleased → 清理该键监听登记
+        assertThat(clientA.keyListenerCount()).isZero();
+
+        lock.lock(); // 重新持有：旧监听不复活，表保持空
+        assertThat(clientA.keyListenerCount()).isZero();
+        lock.unlock();
+    }
+
+    /** 解锁前锁已在服务端到期释放：unlock 不抛异常，经监听器通知锁丢失。 */
+    @Test
+    void unlockAfterLockExpiryNotifiesLossWithoutThrowing() throws Exception {
+        OpenLatchServer fast = ClientTestServers.start(ClientTestServers.fastExpiryConfig(0));
+        OpenLatchClient c = OpenLatchClient.builder().address("127.0.0.1:" + fast.port()).build();
+        try {
+            c.connectAsync().get(5, TimeUnit.SECONDS);
+            OLock lock = c.newReentrantLock("expired-unlock");
+            CountDownLatch lostSignal = new CountDownLatch(1);
+            AtomicReference<LockLostException> lost = new AtomicReference<>();
+            lock.onLockLost((k, cause) -> {
+                lost.set(cause);
+                lostSignal.countDown();
+            });
+            lock.lock();
+
+            // 停掉看门狗：让服务端租约（200ms）自然到期，本地持锁登记保留，
+            // 使 unlock 直面服务端 INVALID_TOKEN/NOT_HELD 分支。
+            io.github.lamspace.openlatch.client.internal.HeldLockRegistry.HeldEntry entry =
+                    c.heldLockRegistry().get("expired-unlock", Thread.currentThread().threadId());
+            assertThat(entry).isNotNull();
+            c.watchdog().stop(entry);
+            Thread.sleep(1_000);
+
+            lock.unlock(); // 不得抛出
+
+            assertThat(lostSignal.await(2, TimeUnit.SECONDS)).isTrue();
+            assertThat(lost.get()).isNotNull();
+            assertThat(lock.isHeldByCurrentThread()).isFalse();
+        } finally {
+            c.shutdown();
+            fast.stop();
+        }
+    }
 }

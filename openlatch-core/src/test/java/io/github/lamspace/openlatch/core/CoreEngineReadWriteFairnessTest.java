@@ -180,4 +180,60 @@ class CoreEngineReadWriteFairnessTest {
         ReleaseResult rel2 = engine.release(new ReleaseCommand(r2, "k", g2.leaseToken(), 2));
         assertThat(rel2.fullyReleased()).isTrue();
     }
+
+    /** WRITE 类型两写者互斥（§10.1 读写组补强）：后到写者排队，立即式则 DENIED。 */
+    @Test
+    void twoWritersMutuallyExclude() {
+        long w1 = engine.sessionOpened();
+        long w2 = engine.sessionOpened();
+
+        AcquireResult g = engine.acquire(acquire(w1, 1, "k", LockType.WRITE, 1));
+        assertThat(g.outcome()).isEqualTo(Outcome.GRANTED);
+
+        AcquireResult q = engine.acquire(acquire(w2, 2, "k", LockType.WRITE, 2));
+        assertThat(q.outcome()).isEqualTo(Outcome.QUEUED);
+        assertThat(q.queuePosition()).isEqualTo(1);
+
+        AcquireResult denied = engine.acquire(
+                new AcquireCommand(w2, 3, "k", LockType.WRITE, 3, 30_000, false));
+        assertThat(denied.outcome()).isEqualTo(Outcome.DENIED);
+    }
+
+    /** 读侧重入按请求租约值整段刷新，与写侧口径一致（design D2）。 */
+    @Test
+    void readReentrantRefreshesLeaseWithRequestedValue() {
+        long a = engine.sessionOpened();
+        AcquireResult g1 = engine.acquire(acquire(a, 1, "k", LockType.READ, 1));
+        assertThat(g1.grantedLeaseMs()).isEqualTo(30_000);
+
+        clock.advance(10_000);
+        AcquireResult g2 = engine.acquire(
+                new AcquireCommand(a, 2, "k", LockType.READ, 1, 10_000, true));
+        assertThat(g2.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(g2.leaseToken()).isEqualTo(g1.leaseToken());
+        assertThat(g2.grantedLeaseMs()).isEqualTo(10_000);
+
+        clock.advance(10_000);
+        assertThat(engine.expireDue()).isEqualTo(1); // t=20s 到期：刷新生效
+    }
+
+    /** 新读者加入既有读者群：共享租约按请求值刷新，最后加入者决定全体到期（design D2 推论）。 */
+    @Test
+    void readerJoinRefreshesSharedLeaseWithRequestedValue() {
+        long a = engine.sessionOpened();
+        long b = engine.sessionOpened();
+        engine.acquire(acquire(a, 1, "k", LockType.READ, 1)); // 30s
+
+        clock.advance(10_000);
+        AcquireResult join = engine.acquire(
+                new AcquireCommand(b, 2, "k", LockType.READ, 2, 10_000, true));
+        assertThat(join.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(join.grantedLeaseMs()).isEqualTo(10_000);
+
+        clock.advance(10_000);
+        // a 的读者随共享租约在 t=20s 一并到期（请求值口径对加入路径同样生效）。
+        assertThat(engine.expireDue()).isEqualTo(1);
+        assertThat(engine.release(new ReleaseCommand(a, "k", join.leaseToken(), 1)).status())
+                .isEqualTo(ReleaseStatus.NOT_HELD);
+    }
 }

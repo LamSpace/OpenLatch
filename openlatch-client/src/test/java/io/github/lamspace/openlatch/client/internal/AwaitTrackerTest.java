@@ -186,18 +186,23 @@ class AwaitTrackerTest {
         assertThat(secondResend.getRequestId()).isEqualTo(requestId);
     }
 
-    /** 重复通知导致重复授予：首个交付调用方，重复者归还（D3）。 */
+    /** 重复通知导致重复授予：首个交付调用方，重复者归还（D3；经真实多路复用器 supersede 路径）。 */
     @Test
     void duplicateGrantCompensatedWithRelease() throws Exception {
+        tearDown();
+        setUpTracker(80); // 短每请求超时：收尾断言挂起表可自然清空
         CompletableFuture<LockGrant> future = startAcquire(30_000);
         Envelope out = channel.readOutbound();
         long requestId = out.getRequestId();
         multiplexer.onResponse(acquireResponse(requestId, StatusCode.QUEUED, 0, 0));
 
+        // 双通知：两次同 id 重发均经真实 sendWithId——第二次 supersede 第一次（design D3）。
         tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
         tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
         assertThat((Envelope) channel.readOutbound()).isNotNull();
         assertThat((Envelope) channel.readOutbound()).isNotNull();
+        // supersede 不变量：同 id 只保留一个新条目登记，被让位的旧条目已异常完成，无悬挂。
+        assertThat(multiplexer.inflightCount()).isEqualTo(1);
 
         multiplexer.onResponse(acquireResponse(requestId, StatusCode.OK, 55, 30_000));
         assertThat(future.get(1, TimeUnit.SECONDS).leaseToken()).isEqualTo(55);
@@ -210,6 +215,10 @@ class AwaitTrackerTest {
         assertThat(compensation.getReleaseRequest().getKey()).isEqualTo(KEY);
         assertThat(compensation.getReleaseRequest().getLeaseToken()).isEqualTo(55);
         assertThat(compensation.getReleaseRequest().getThreadId()).isEqualTo(THREAD_ID);
+
+        // 补偿释放请求超时后挂起表清空：全程无任何条目永久滞留。
+        Thread.sleep(250);
+        assertThat(multiplexer.inflightCount()).isZero();
     }
 
     /** 重发的请求超时后响应才到：等待仍活跃，按正常授予完成。 */

@@ -99,9 +99,10 @@ public final class LockEntry {
      * 首个命中者即为结果）：
      * <ol>
      *   <li><b>写侧重入</b>：同归属已持有写侧且条目可重入——重入计数加一，
-     *       同一凭证，租约整段刷新（{@code now + leaseMs}）→ 授予；</li>
+     *       同一凭证，租约按本次请求值整段刷新（{@code now + effectiveLeaseMs}，
+     *       重入者由此获得调整租约的通道）→ 授予；</li>
      *   <li><b>读侧重入</b>：同归属已在读者表——该读者计数加一，同一凭证，
-     *       租约整段刷新 → 授予；</li>
+     *       租约按本次请求值整段刷新（全体读者共享新到期时刻）→ 授予；</li>
      *   <li><b>快路径</b>：无冲突持有者且队列空——读请求且已有其他读者时
      *       加入读者表并复用现有凭证（避免新凭证使旧读者的释放失效），
      *       否则签发新凭证 → 授予；</li>
@@ -118,9 +119,10 @@ public final class LockEntry {
      *   <li><b>入队</b>：追加至队尾 → 排队，位次为入队后队列长度。</li>
      * </ol>
      *
-     * <p>授予新持有时租约取 {@code effectiveLeaseMs}；重入与加入已有读者
-     * 不消费凭证供应器。会话有效性与条目存活校验由 {@code CoreEngine}
-     * 在本方法之外完成。
+     * <p>一切授予路径（新持有、重入、加入已有读者）的租约均以
+     * {@code effectiveLeaseMs} 整段刷新，口径统一（design D2：请求值 0 取
+     * 默认、非 0 钳制到 [min,max]）；重入与加入已有读者不消费凭证供应器。
+     * 会话有效性与条目存活校验由 {@code CoreEngine} 在本方法之外完成。
      *
      * @param cmd                获取锁命令
      * @param now                当前时刻（毫秒）
@@ -134,19 +136,23 @@ public final class LockEntry {
         Owner owner = new Owner(cmd.sessionId(), cmd.threadId());
         boolean isRead = cmd.lockType() == LockType.READ;
 
-        // 规则 4：写侧重入（可重入类型）—— 计数 +1，租约整段刷新，同 token。
+        // 规则 4：写侧重入（可重入类型）—— 计数 +1，租约按本次请求值整段刷新，同 token。
+        // 口径与读侧重入、加入已有读者群一致：effectiveLeaseMs 已由 CoreEngine 按
+        // 请求值钳制（0 取默认），重入者由此获得延长/缩短租约的通道（design D2）。
         if (!isRead && writer != null && writer.equals(owner) && reentrant) {
             writeCount++;
-            leaseExpiresAtMs = now + leaseMs;
-            return new AcquireResult(Outcome.GRANTED, leaseToken, leaseMs, 0);
+            leaseMs = effectiveLeaseMs;
+            leaseExpiresAtMs = now + effectiveLeaseMs;
+            return new AcquireResult(Outcome.GRANTED, leaseToken, effectiveLeaseMs, 0);
         }
-        // 读锁重入 —— readers 计数 +1，租约整段刷新，同 token。
+        // 读锁重入 —— readers 计数 +1，租约按本次请求值整段刷新（全体读者共享），同 token。
         if (isRead) {
             Integer count = readers.get(owner);
             if (count != null) {
                 readers.put(owner, count + 1);
-                leaseExpiresAtMs = now + leaseMs;
-                return new AcquireResult(Outcome.GRANTED, leaseToken, leaseMs, 0);
+                leaseMs = effectiveLeaseMs;
+                leaseExpiresAtMs = now + effectiveLeaseMs;
+                return new AcquireResult(Outcome.GRANTED, leaseToken, effectiveLeaseMs, 0);
             }
         }
 

@@ -302,4 +302,21 @@ public final class HeldLockRegistry {
     public Collection<HeldEntry> entries() {
         return Collections.unmodifiableCollection(entries.values());
     }
+
+    /**
+     * 该锁键是否仍有任一线程的本地持有条目。锁完全释放（计数归零）后
+     * 判否，供客户端丢弃该键的附属登记（如锁丢失监听器，详设 §6.3、
+     * 变更 phase1-audit-remediation design D4）。
+     *
+     * @param key 锁键
+     * @return 仍存在任一持有条目返回 {@code true}
+     */
+    public boolean hasAnyFor(String key) {
+        for (HeldEntry entry : entries.values()) {
+            if (entry.key().equals(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

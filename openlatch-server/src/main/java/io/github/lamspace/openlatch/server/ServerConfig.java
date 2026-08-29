@@ -202,7 +202,9 @@ public record ServerConfig(
 
     /**
      * 全量校验，任一非法即抛出 {@link IllegalArgumentException} 并在消息中
-     * 指明配置键：端口 1–65535；{@code workerThreads >= 1}；
+     * 指明配置键：端口 0–65535（0 表示由操作系统分配临时端口，与记录级
+     * javadoc 及 {@code OpenLatchServer} 的实际端口日志输出一致）；
+     * {@code workerThreads >= 1}；
      * {@code idleTimeoutMs > 0}；租约三项均为正数且满足
      * {@code min <= default <= max}；{@code leaseTickIntervalMs > 0}；
      * {@code headReplyTimeoutMs > 0}；{@code maxKeyLength >= 1}；
@@ -213,8 +215,8 @@ public record ServerConfig(
      * @throws IllegalArgumentException 任一配置项非法
      */
     private void validate() {
-        if (port < 1 || port > 65535) {
-            throw new IllegalArgumentException("配置项 openlatch.server.port 非法（应为 1-65535）: " + port);
+        if (port < 0 || port > 65535) {
+            throw new IllegalArgumentException("配置项 openlatch.server.port 非法（应为 0-65535，0 取临时端口）: " + port);
         }
         if (workerThreads < 1) {
             throw new IllegalArgumentException(

@@ -134,4 +134,48 @@ class CoreEngineSessionIdempotencyLimitTest {
         engine.sessionClosed(a);
         engine.sessionClosed(a); // 第二次无副作用
     }
+
+    /** 已通知队首的等待项被会话清理摘除后，新队首获得补通知（§4.5/§4.7 补强）。 */
+    @Test
+    void sessionClosedRemovesNotifiedHeadAndRepromotesNewHead() {
+        long holder = engine.sessionOpened();
+        long first = engine.sessionOpened();
+        long second = engine.sessionOpened();
+
+        AcquireResult g = engine.acquire(acquire(holder, 1, "k", LockType.REENTRANT, 1));
+        engine.acquire(acquire(first, 2, "k", LockType.REENTRANT, 2));  // 队首
+        engine.acquire(acquire(second, 3, "k", LockType.REENTRANT, 3)); // 队尾
+        listener.clear();
+
+        engine.release(new ReleaseCommand(holder, "k", g.leaseToken(), 1));
+        assertThat(listener.count()).isEqualTo(1);
+        assertThat(listener.last().sessionId()).isEqualTo(first);
+
+        // 已通知队首静默放弃后断连：其等待项摘除，新队首立即获得补通知。
+        engine.sessionClosed(first);
+        assertThat(listener.count()).isEqualTo(2);
+        assertThat(listener.last().sessionId()).isEqualTo(second);
+        assertThat(listener.last().requestId()).isEqualTo(3);
+
+        // 新队首以同 requestId 重发 → 队首命中授予。
+        assertThat(engine.acquire(acquire(second, 3, "k", LockType.REENTRANT, 3)).outcome())
+                .isEqualTo(Outcome.GRANTED);
+    }
+
+    /** 队首以不同 requestId 重发不命中规则 7（匹配键为 sessionId+requestId），排队尾。 */
+    @Test
+    void headResendWithDifferentRequestIdEnqueuesAtTail() {
+        long holder = engine.sessionOpened();
+        long waiter = engine.sessionOpened();
+
+        AcquireResult g = engine.acquire(acquire(holder, 1, "k", LockType.REENTRANT, 1));
+        engine.acquire(acquire(waiter, 2, "k", LockType.REENTRANT, 2)); // 队首（r=2）
+        engine.release(new ReleaseCommand(holder, "k", g.leaseToken(), 1)); // 通知队首 r=2
+
+        // 换 requestId 重发：(sessionId, requestId) 不再是队首匹配键 → 排队尾（位次 2，
+        // 原队首 r=2 仍在其前），固化规则 7 的匹配键语义（详设 §4.4）。
+        AcquireResult r = engine.acquire(acquire(waiter, 3, "k", LockType.REENTRANT, 2));
+        assertThat(r.outcome()).isEqualTo(Outcome.QUEUED);
+        assertThat(r.queuePosition()).isEqualTo(2);
+    }
 }

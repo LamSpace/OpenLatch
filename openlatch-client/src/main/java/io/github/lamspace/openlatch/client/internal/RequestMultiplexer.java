@@ -16,6 +16,7 @@
 
 package io.github.lamspace.openlatch.client.internal;
 
+import io.github.lamspace.openlatch.client.OpenLatchException;
 import io.github.lamspace.openlatch.client.OpenLatchTimeoutException;
 import io.github.lamspace.openlatch.client.ServerUnavailableException;
 import io.github.lamspace.openlatch.protocol.Envelope;
@@ -38,7 +39,12 @@ import java.util.function.Supplier;
  *       {@code requestId → (future, deadline)}，并在共享定时器上挂超时任务；</li>
  *   <li>入站响应按 {@code request_id} 摘除并完成对应 future；</li>
  *   <li><b>每个请求必有超时</b>（概要设计 §4.3 标准 3）：超时任务触发时以
- *       {@link OpenLatchTimeoutException} 失败对应 future；</li>
+ *       {@link OpenLatchTimeoutException} 失败对应 future；超时摘除以条目身份
+ *       CAS（{@code remove(id, entry)}）执行，同 id 重复登记时旧条目的超时
+ *       任务不会误杀新条目；</li>
+ *   <li>同 id 重复登记（重发交叠）时，旧条目以 {@code superseded} 异常完成后
+ *       让位于新条目——任何已挂起调用方的 future 都不会被静默覆盖丢失
+ *       （变更 phase1-audit-remediation design D3）；</li>
  *   <li>无匹配挂起项的入站信封（孤儿响应）路由给孤儿下沉点，由等待跟踪
  *       组件处理补偿归还（详设 §6.5、design.md D3）。</li>
  * </ul>
@@ -113,8 +119,10 @@ public final class RequestMultiplexer {
 
     /**
      * 以信封自带的 {@code requestId} 发送（{@code AWAIT_NOTIFY} 后的同 id 重发
-     * 与握手请求使用），登记挂起项与超时任务。同 id 的旧挂起项若仍存在则被覆盖
-     * （重发前旧项已因超时摘除或响应完成，覆盖不丢失挂起）。
+     * 与握手请求使用），登记挂起项与超时任务。同 id 存在旧挂起项时不静默覆盖：
+     * 新条目替换登记，旧条目取消其超时任务并以 {@code superseded} 的
+     * {@link io.github.lamspace.openlatch.client.OpenLatchException} 完成，
+     * 保证两个调用方的 future 均有界完成（design D3）。
      *
      * @param envelope  完整信封（已含请求 id）
      * @param timeoutMs 该请求的超时（毫秒）
@@ -127,9 +135,21 @@ public final class RequestMultiplexer {
         }
         CompletableFuture<Envelope> future = new CompletableFuture<>();
         long requestId = envelope.getRequestId();
-        Timeout timeoutTask = timer.newTimeout(t -> onTimeout(requestId), timeoutMs,
+        // 超时回调持有本条目引用，摘除以 remove(id, entry) 身份 CAS 执行，
+        // 同 id 交叠时先到的超时不会误杀后登记的条目（design D3）。
+        PendingRequest[] holder = new PendingRequest[1];
+        Timeout timeoutTask = timer.newTimeout(t -> onTimeout(requestId, holder[0]), timeoutMs,
                 java.util.concurrent.TimeUnit.MILLISECONDS);
-        inflight.put(requestId, new PendingRequest(future, timeoutTask));
+        PendingRequest entry = new PendingRequest(future, timeoutTask);
+        holder[0] = entry;
+        PendingRequest previous = inflight.put(requestId, entry);
+        if (previous != null && previous != entry) {
+            // 同 id 重复登记（重发交叠）：旧条目以 superseded 完成后让位于新条目，
+            // 杜绝"覆盖后旧 future 永不完成"的悬挂（design D3）。
+            previous.timeoutTask().cancel();
+            previous.future().completeExceptionally(new OpenLatchException(
+                    "request " + requestId + " superseded by re-registration"));
+        }
         if (outboundGate.test(envelope)) {
             channel.writeAndFlush(envelope);
         }
@@ -197,14 +217,20 @@ public final class RequestMultiplexer {
     }
 
     /**
-     * 超时任务回调：摘除挂起项并以超时异常失败其 future。
+     * 超时任务回调：以条目身份 CAS 摘除挂起项并失败其 future。
+     * 同 id 已被重发条目替换时 CAS 落空，本回调无副作用（不误杀新条目）；
+     * {@code entry} 为 {@code null} 仅在定时器早于登记完成的病态窗口出现，
+     * 此时放弃摘除（条目的响应/failAll 路径仍会兜底完成）。
      *
      * @param requestId 超时的请求 id
+     * @param entry     登记时的挂起条目（身份比对基准）
      */
-    private void onTimeout(long requestId) {
-        PendingRequest pending = inflight.remove(requestId);
-        if (pending != null) {
-            pending.future().completeExceptionally(
+    private void onTimeout(long requestId, PendingRequest entry) {
+        if (entry == null) {
+            return;
+        }
+        if (inflight.remove(requestId, entry)) {
+            entry.future().completeExceptionally(
                     new OpenLatchTimeoutException("request " + requestId + " timed out"));
         }
     }

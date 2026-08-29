@@ -16,6 +16,7 @@
 
 package io.github.lamspace.openlatch.client.internal;
 
+import io.github.lamspace.openlatch.client.OpenLatchException;
 import io.github.lamspace.openlatch.client.OpenLatchTimeoutException;
 import io.github.lamspace.openlatch.client.ServerUnavailableException;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
@@ -170,6 +171,56 @@ class RequestMultiplexerTest {
         CompletableFuture<Envelope> future = multiplexer.send(acquireBuilder(), 1000);
         assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
                 .hasCauseInstanceOf(ServerUnavailableException.class);
+    }
+
+    /**
+     * 同 id 重复登记（design D3）：旧条目立即以 superseded 异常完成让位于
+     * 新条目，挂起表只保留新条目，响应完成的是新条目 future。
+     */
+    @Test
+    void reRegistrationSameIdSupersedesOldEntry() throws Exception {
+        Envelope env = Envelope.newBuilder()
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(7).build();
+        CompletableFuture<Envelope> first = multiplexer.sendWithId(env, 5000);
+        CompletableFuture<Envelope> second = multiplexer.sendWithId(env, 5000);
+
+        assertThatThrownBy(() -> first.get(1, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(OpenLatchException.class)
+                .cause().hasMessageContaining("superseded");
+        assertThat(multiplexer.inflightCount()).isEqualTo(1);
+
+        Envelope response = Envelope.newBuilder()
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(7)
+                .setAcquireResponse(AcquireResponse.newBuilder().setStatus(StatusCode.OK))
+                .build();
+        multiplexer.onResponse(response);
+        assertThat(second.get(1, TimeUnit.SECONDS)).isSameAs(response);
+        assertThat(multiplexer.inflightCount()).isZero();
+    }
+
+    /**
+     * 同 id 交叠的超时竞争（design D3）：旧条目的定时器先于新条目到期时，
+     * 身份 CAS 摘除落空，新条目不被误杀、future 不被提前完成。
+     */
+    @Test
+    void staleTimeoutOfReplacedEntryDoesNotKillCurrentEntry() throws Exception {
+        Envelope env = Envelope.newBuilder()
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(7).build();
+        CompletableFuture<Envelope> first = multiplexer.sendWithId(env, 20);
+        CompletableFuture<Envelope> second = multiplexer.sendWithId(env, 5000);
+
+        // 越过旧条目超时窗口：其定时器触发（或已被取消），均不应波及新条目。
+        Thread.sleep(200);
+        assertThat(second).isNotDone();
+        assertThat(multiplexer.inflightCount()).isEqualTo(1);
+
+        multiplexer.onResponse(Envelope.newBuilder()
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(7)
+                .setAcquireResponse(AcquireResponse.newBuilder().setStatus(StatusCode.OK))
+                .build());
+        assertThat(second.get(1, TimeUnit.SECONDS)).isNotNull();
+        assertThatThrownBy(() -> first.get(1, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(OpenLatchException.class);
     }
 
     /**

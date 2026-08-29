@@ -262,18 +262,24 @@ public final class RequestDispatcher {
 
     /**
      * 构造与请求类型对应的最小错误响应，回显 {@code request_id}。
-     * 未知类型返回无 payload 的信封（仍可被客户端按 {@code request_id} 关联）。
+     * 请求 {@code type} 为协议未定义数值（Protobuf 解析为 {@code UNRECOGNIZED}）时，
+     * 响应 type 以 {@code MESSAGE_TYPE_UNKNOWN} 占位并返回无 payload 的信封——
+     * MUST NOT 因回显未知类型抛异常而使请求静默悬挂（规格"消息合法性校验"）。
+     * 其余未知类型（{@code PING}/{@code AWAIT_NOTIFY}）同样返回无 payload 信封，
+     * 仍可被客户端按 {@code request_id} 关联。
      *
      * @param request 原请求信封
      * @param status  错误状态码
      * @return 错误响应信封
      */
     public static Envelope errorResponse(Envelope request, StatusCode status) {
+        MessageType requestType = request.getType();
         Envelope.Builder b = Envelope.newBuilder()
                 .setProtocolVersion(request.getProtocolVersion())
-                .setType(request.getType())
+                .setType(requestType == MessageType.UNRECOGNIZED
+                        ? MessageType.MESSAGE_TYPE_UNKNOWN : requestType)
                 .setRequestId(request.getRequestId());
-        switch (request.getType()) {
+        switch (requestType) {
             case HELLO -> b.setHelloResponse(HelloResponse.newBuilder().setStatus(status));
             case LOCK_ACQUIRE -> b.setAcquireResponse(AcquireResponse.newBuilder().setStatus(status));
             case LOCK_RELEASE -> b.setReleaseResponse(ReleaseResponse.newBuilder().setStatus(status));

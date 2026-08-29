@@ -254,6 +254,11 @@ public final class OpenLatchClient implements AutoCloseable {
                         if (entry != null) {
                             watchdog.stop(entry);
                         }
+                        // design D4：该键无人重持时丢弃监听器登记——监听表
+                        // 不随历史 key 基数无界增长；重持后需重新注册。
+                        if (!heldLockRegistry.hasAnyFor(key)) {
+                            keyLockLostListeners.remove(key);
+                        }
                     }
                     return null;
                 });
@@ -480,7 +485,19 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
-     * 登记锁键维度的锁丢失监听器。
+     * 锁键维度监听器表的当前登记键数，测试断言清理语义用
+     * （design D4：完全释放后丢弃登记）。
+     *
+     * @return 有监听器登记的锁键数量
+     */
+    int keyListenerCount() {
+        return keyLockLostListeners.size();
+    }
+
+    /**
+     * 登记锁键维度的锁丢失监听器。监听器随该键锁完全释放（计数归零且
+     * 本地无人重持）被丢弃：之后该键重新获取并丢锁时旧监听器不触发，
+     * 调用方需重新注册（详设 §6.3，design D4）。
      *
      * @param key      锁键
      * @param listener 监听器

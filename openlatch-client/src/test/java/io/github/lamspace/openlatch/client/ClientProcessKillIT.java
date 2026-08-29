@@ -34,7 +34,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 9.3 杀服务端进程（§10.4）：进程级终止后客户端持锁失锁回调、重启后自动
- * 重连并恢复服务。依赖 M2 可执行 shade jar，未构建时跳过。
+ * 重连并恢复服务。依赖 M2 可执行 shade jar——未构建时不静默跳过：向
+ * stderr 打印显式警告后再按 Assumption 跳过，提示 CI 需先
+ * {@code mvn -pl openlatch-server -am package}（或全仓 verify/package）
+ * 方可真正执行本用例（变更 phase1-audit-remediation，§11 标准 3 证据闭环）。
  */
 class ClientProcessKillIT {
 
@@ -47,6 +50,13 @@ class ClientProcessKillIT {
     @Test
     void serverProcessKillDetectedAndRecovered() throws Exception {
         Path jar = locateServerJar();
+        if (jar == null) {
+            // 显式警告而非静默跳过：确保 CI 中"§10.4 杀进程用例从未执行"可见。
+            System.err.println("[WARN] ClientProcessKillIT SKIPPED: openlatch-server "
+                    + "executable shade jar not found; run "
+                    + "'mvn -s <settings> -pl openlatch-server -am package' before "
+                    + "'mvn verify' to make this §10.4 fault-injection case effective.");
+        }
         Assumptions.assumeTrue(jar != null, "openlatch-server shaded jar not built; run 'mvn install' first");
 
         int port = freePort();

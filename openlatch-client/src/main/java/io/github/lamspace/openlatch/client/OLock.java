@@ -91,7 +91,9 @@ public interface OLock {
     boolean isHeldByCurrentThread();
 
     /**
-     * 登记单锁维度的锁丢失监听。
+     * 登记单锁维度的锁丢失监听。监听器按锁键归属：该键锁完全释放
+     * （服务端计数归零且本地无人重持）后登记被丢弃，之后重新获取并
+     * 丢锁时旧监听器不触发，需重新注册（详设 §6.3，design D4）。
      *
      * @param listener 监听器
      */

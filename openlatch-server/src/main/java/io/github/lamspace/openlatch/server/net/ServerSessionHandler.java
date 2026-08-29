@@ -32,6 +32,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 连接级业务入口：握手门闩（design.md D8）、请求分发、断连清理。
@@ -52,7 +54,10 @@ import io.netty.handler.timeout.IdleStateEvent;
  *   <li>在途请求超过 {@code maxInflightPerConnection}：回 {@code OVERLOADED}，
  *       不计入在途；</li>
  *   <li>{@code PING}：不回复（活动信号已被空闲检测计入）；</li>
- *   <li>其余业务消息：交 {@link RequestDispatcher} 分发并写回响应；</li>
+ *   <li>其余业务消息：交 {@link RequestDispatcher} 分发并写回响应；分发过程
+ *       抛出的未预期异常被兜底为 {@code INTERNAL_ERROR} 响应（回显请求类型
+ *       失败时以 {@code MESSAGE_TYPE_UNKNOWN} 占位）并记 WARN 日志，
+ *       MUST NOT 让异常沉到 pipeline 尾部造成"不回包、不断连"的静默悬挂；</li>
  *   <li>读空闲超时（由上游 {@code IdleStateHandler} 触发）：关闭连接，
  *       走与主动断连相同的清理路径。</li>
  * </ul>
@@ -65,6 +70,9 @@ import io.netty.handler.timeout.IdleStateEvent;
  */
 @ChannelHandler.Sharable
 public final class ServerSessionHandler extends SimpleChannelInboundHandler<Envelope> {
+
+    /** 日志器：分发兜底路径记 WARN（含堆栈），供运维定位未预期异常。 */
+    private static final Logger log = LoggerFactory.getLogger(ServerSessionHandler.class);
 
     /** 锁语义核心，会话开关与断连清理经此驱动。 */
     private final CoreEngine core;
@@ -114,7 +122,15 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.OVERLOADED));
             return;
         }
-        Envelope resp = dispatcher.dispatch(session, msg);
+        Envelope resp;
+        try {
+            resp = dispatcher.dispatch(session, msg);
+        } catch (RuntimeException e) {
+            // 分发兜底（design D1）：未预期异常回 INTERNAL_ERROR 并记 WARN 带堆栈，
+            // 绝不让异常沉到 pipeline 尾部造成不回包、不断连的静默悬挂。
+            log.warn("dispatch failure on request {} (type {})", msg.getRequestId(), msg.getType(), e);
+            resp = RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR);
+        }
         if (resp == null) {
             // PING：不回复（活动信号已被 IdleStateHandler 计入）。
             session.endRequest();
