@@ -122,15 +122,24 @@ class SmokeIT {
                 .build();
     }
 
+    /**
+     * 定位可执行 uber-jar（shade 以 {@code -executable} 分类器附带，
+     * main 制品为瘦库 jar）。
+     *
+     * @return 可执行 jar 路径
+     * @throws IOException 目录读取失败
+     */
     private static Path findShadedJar() throws IOException {
         Path target = Path.of("target");
         try (var stream = Files.list(target)) {
             return stream.filter(p -> {
                         String name = p.getFileName().toString();
-                        return name.startsWith("openlatch-server-") && name.endsWith(".jar");
+                        return name.startsWith("openlatch-server-")
+                                && name.endsWith("-executable.jar");
                     })
                     .findFirst()
-                    .orElseThrow(() -> new AssertionError("shaded jar not found in " + target.toAbsolutePath()));
+                    .orElseThrow(() -> new AssertionError("executable shaded jar not found in "
+                            + target.toAbsolutePath()));
         }
     }
 

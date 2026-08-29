@@ -12,5 +12,52 @@
 
     <artifactId>openlatch-examples</artifactId>
     <name>openlatch-examples</name>
-    <description>OpenLatch 示例与基准（M4 交付，占位）</description>
+    <description>OpenLatch 示例与基准（详设 §9，M4 交付；不发布到 Maven Central）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-spring-boot-starter</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- 日志实现由 starter 的 spring-boot-starter-logging（logback）提供，不重复引 slf4j-simple -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!-- SpringAnnotationExample 的 @OpenLatch SpEL 按参数名求值 -->
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

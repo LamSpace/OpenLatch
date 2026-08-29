@@ -1,0 +1,13 @@
+# SpringAnnotationExample 的 Boot 配置（openlatch.server-port 由 main 动态注入，
+# 故此处不写端口；本文件演示 §8.2 属性表的标准写法）
+openlatch:
+  enabled: true
+  request-timeout: 5s
+  default-wait-timeout: 30s
+  reconnect-initial-backoff: 200ms
+  reconnect-max-backoff: 10s
+
+spring:
+  main:
+    banner-mode: off
+    web-application-type: none

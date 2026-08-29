@@ -5,8 +5,8 @@
 | 项目名称 | **OpenLatch**                                                              |
 | 文档类型 | 详细设计说明书（Phase 1 / MVP）                                            |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0 |
-| 版本     | v1.0                                                                       |
-| 日期     | 2026-08-23                                                                 |
+| 版本     | v1.1（P1-27 定案修订：§8.4/§1.2/§11-4）                                   |
+| 日期     | 2026-08-29                                                                 |
 | 作者     | Lam Tong                                                                   |
 | 状态     | 待评审                                                                     |
 
@@ -37,7 +37,7 @@
 | groupId      | `io.github.lamspace`  | 包名根 `io.github.lamspace.openlatch`                |
 | Netty        | 4.1.x 当前稳定版      |                                                      |
 | Protobuf     | protobuf-java 3.x     |                                                      |
-| Spring Boot  | 3.5.x（starter 模块） | 需按实施计划风险 6 验证 Java 25 兼容性               |
+| Spring Boot  | 4.0.3（starter 模块） | P1-27 正向验证定案（见 §8.4 修订）                    |
 | 默认服务端口 | 9410                  | 可配置                                               |
 
 ### 1.3 与概要设计的追溯矩阵
@@ -708,7 +708,7 @@ acquireAsync(spec)
 
 ### 8.1 自动装配
 
-- 注册文件：`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`（Spring Boot 3 机制，概要设计 §5.3）；
+- 注册文件：`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`（Spring Boot 3+ 机制，概要设计 §5.3；Boot 4 延用同一注册文件，Java 25 × Boot 4.0.3 装配链路已于 P1-27 验证通过）；
 - `OpenLatchAutoConfiguration`：
     - `@EnableConfigurationProperties(OpenLatchProperties.class)`；
     - Bean `OpenLatchClient`（`@ConditionalOnMissingBean`，允许用户自定义覆盖）；
@@ -758,7 +758,9 @@ public @interface OpenLatch {
 
 ### 8.4 starter 模块的 Java 版本策略
 
-若风险 6 验证结果为 Spring Boot 3.5.x 不完全支持 Java 25：优先升级 Spring Boot 4.x；若仍不可行，starter 模块单独以 `--release 17` 编译（其余模块保持 25）。该决策在 M4 启动时记录于本文档修订版。
+~~若风险 6 验证结果为 Spring Boot 3.5.x 不完全支持 Java 25：优先升级 Spring Boot 4.x；若仍不可行，starter 模块单独以 `--release 17` 编译（其余模块保持 25）。该决策在 M4 启动时记录于本文档修订版。~~
+
+**定案（P1-27，2026-08-29，变更 `m4-starter-examples-docs` design D1）**：starter 基于 **Spring Boot 4.0.3**（Spring Framework 7.0.5）编译，全模块保持 Java 25，不启用 `--release 17`。验证方式为正向验证：`AutoConfiguration.imports` 注册链路 + full 模式 `@Configuration` 类的 CGLIB 字节码增强在 Java 25.0.3 × Boot 4.0.3 上上下文加载冒烟通过（`openlatch-spring-boot-starter` 的 `AutoConfigurationSmokeTest`）。理由：Boot 3.5 官方认证矩阵止于 Java 24，其字节码栈（Framework 6.2 CGLIB/ASM）对 Java 25 未经认证；Boot 4.0（Framework 7）官方支持 Java 25。后果：starter 按 Boot 4 编译，不向下兼容 Boot 3 应用；验收标准 §11-4 的"SB 3.2+"口径相应修订为"SB 4.0.x+"。
 
 ## 9. openlatch-examples
 
@@ -828,7 +830,7 @@ public @interface OpenLatch {
 | 1 | 互斥、重入计数、读写互斥、FIFO 公平、租约到期释放全部有自动化测试覆盖 | §10.1 用例组全绿（CI 报告）                               |
 | 2 | 故障注入：持锁断连→租约释放；等待断连→快速失败                        | §10.4 前两项通过                                          |
 | 3 | 客户端所有请求路径带超时，无死等                                      | §6.4/§6.7 超时参数 + 集成测试"杀服务端"用例（无挂起线程） |
-| 4 | SB 3.2+ 应用仅加依赖与注解即可使用                                    | §10.3 starter 集成测试 + examples 人工接入                |
+| 4 | SB 应用仅加依赖与注解即可使用（原"SB 3.2+"；M4 P1-27 定案后口径为 SB 4.0.x+，见 §8.4） | §10.3 starter 集成测试 + examples 人工接入                |
 
 ## 12. 已知局限与遗留项
 

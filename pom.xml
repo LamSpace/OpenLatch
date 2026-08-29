@@ -29,6 +29,7 @@
         <protobuf.version>3.25.5</protobuf.version>
         <netty.version>4.1.137.Final</netty.version>
         <slf4j.version>2.0.17</slf4j.version>
+        <spring-boot.version>4.0.3</spring-boot.version>
 
         <!-- 测试依赖 -->
         <junit.version>5.11.4</junit.version>
@@ -71,6 +72,17 @@
                 <artifactId>assertj-core</artifactId>
                 <version>${assertj.version}</version>
                 <scope>test</scope>
+            </dependency>
+            <!--
+              Spring Boot BOM 置于最后导入：dependencyManagement 的 import 冲突取先声明者，
+              保证 netty/protobuf/slf4j/junit/assertj 的既有 pin 不被 Boot 托管版本覆盖（design D8）。
+            -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

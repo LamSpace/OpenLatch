@@ -12,5 +12,93 @@
 
     <artifactId>openlatch-spring-boot-starter</artifactId>
     <name>openlatch-spring-boot-starter</name>
-    <description>OpenLatch Spring Boot 3 自动装配与注解（M4 交付，占位）</description>
+    <description>OpenLatch Spring Boot 自动装配与 @OpenLatch 声明式锁（详设 §8，M4 交付）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <!-- Boot 4 的 AOP 聚合（spring-aop + aspectjweaver），保证"仅加依赖"即得切面能力 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-test-autoconfigure</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 仅测试用：以事务通知验证"锁在事务外层"的事件序（design D9） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 集成测试（*IT）：进程内真实服务器（design D9） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Boot 4 将 @DynamicPropertySource 迁入 Framework 7 spring-test（org.springframework.test.context） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- starter 集成测试（*IT，§10.3）：内嵌真实服务器，独立于单测运行 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <!-- SpEL 按参数名求值的前置条件（详设 §8.3）；应用工程须同样开启 -->
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

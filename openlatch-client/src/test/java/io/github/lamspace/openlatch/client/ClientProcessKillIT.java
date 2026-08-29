@@ -164,8 +164,8 @@ class ClientProcessKillIT {
      */
     private static Path locateServerJar() {
         String[] candidates = {
-                "../openlatch-server/target/openlatch-server-1.0-SNAPSHOT.jar",
-                "openlatch-server/target/openlatch-server-1.0-SNAPSHOT.jar",
+                "../openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar",
+                "openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar",
         };
         for (String candidate : candidates) {
             Path path = Path.of(candidate);
