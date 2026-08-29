@@ -39,10 +39,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class HandshakeTest {
 
+    /** 被测嵌入通道：包裹 {@code ServerSessionHandler}，{@code setUp} 装配并触发 channelActive。 */
     private EmbeddedChannel ch;
+    /** 被测会话注册表：握手登记/摘除断言经此反查。 */
     private ServerSessionRegistry registry;
+    /** 被测默认配置：供 {@code ServerSessionHandler} 读取限额与默认租约。 */
     private ServerConfig config;
 
+    /**
+     * 装配单条嵌入通道：包裹 {@code ServerSessionHandler}（核心通知桥为 no-op），
+     * 并 fireChannelActive 触发 {@code channelActive} 以安装
+     * {@code ServerSession.KEY} 连接簿记属性——两者缺任一用例即失真。
+     */
     @BeforeEach
     void setUp() {
         config = ServerConfig.defaults();
@@ -53,6 +61,14 @@ class HandshakeTest {
         ch.pipeline().fireChannelActive();
     }
 
+    /**
+     * 构造 HELLO 信封，版本与认证令牌可指定（用于不匹配/令牌拒绝用例）。
+     *
+     * @param requestId 请求 id
+     * @param version   客户端协议版本
+     * @param authToken 认证令牌（Phase 1 合法值为空串）
+     * @return 信封
+     */
     private static Envelope hello(long requestId, int version, String authToken) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -64,6 +80,12 @@ class HandshakeTest {
                 .build();
     }
 
+    /**
+     * 构造携带 key="k" 的获取请求信封（本类仅用于握手门闩拒绝断言）。
+     *
+     * @param requestId 请求 id
+     * @return 信封
+     */
     private static Envelope acquire(long requestId) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -73,6 +95,11 @@ class HandshakeTest {
                 .build();
     }
 
+    /**
+     * 断言存在唯一出站信封并取出：读出一条出站消息、断言其为 Envelope 后强转返回。
+     *
+     * @return 出站信封
+     */
     private Envelope readOutboundEnvelope() {
         Object out = ch.readOutbound();
         assertThat(out).isInstanceOf(Envelope.class);

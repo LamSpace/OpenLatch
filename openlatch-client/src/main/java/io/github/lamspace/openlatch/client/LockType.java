@@ -23,7 +23,9 @@ package io.github.lamspace.openlatch.client;
  * <ul>
  *   <li>{@link #REENTRANT}：可重入互斥，重入计数由服务端维护；</li>
  *   <li>{@link #SIMPLE}：不可重入互斥，同持有者再次获取将排队等待自身
- *       直至租约到期（详设 §4.4"SimpleLock 的自锁问题"）；</li>
+ *       直至租约到期，队列满则直接拒绝（{@code REJECT_QUEUE_FULL}）；
+ *       立即式同归属重复获取直接拒绝（{@code DENIED}）
+ *       （详设 §4.4"SimpleLock 的自锁问题"）；</li>
  *   <li>{@link #READ}：共享读锁，多读者并发持有；</li>
  *   <li>{@link #WRITE}：互斥写锁。</li>
  * </ul>

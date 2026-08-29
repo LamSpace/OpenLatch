@@ -164,7 +164,9 @@ class OpenLatchStarterIT {
 
     /**
      * SpEL：相同参数求出同一 key，第二个调用必须排队——先持有者独自在
-     * 屏障内等到超时，证明第二次没有并发进入。
+     * 屏障内等到超时，证明第二次没有并发进入。第二个被授予时屏障已被
+     * 首个持有者的 2s 超时置 broken，其 await 当即以
+     * {@link BrokenBarrierException} 失败（而非再次超时）。
      */
     @Test
     void sameSpelKeySerializesCalls() throws Exception {
@@ -176,7 +178,7 @@ class OpenLatchStarterIT {
         // 第一个：屏障等不到第二个体内（第二个在锁外排队）→ await 超时并置断
         assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
                 .hasCauseInstanceOf(TimeoutException.class);
-        // 第二个随后被授予并独自超时
+        // 第二个被授予时屏障已被首个持有者 2s 超时置 broken → await 抛 BrokenBarrierException
         assertThatThrownBy(() -> second.get(15, TimeUnit.SECONDS))
                 .hasCauseInstanceOf(BrokenBarrierException.class);
         // 全程无并发进入违例

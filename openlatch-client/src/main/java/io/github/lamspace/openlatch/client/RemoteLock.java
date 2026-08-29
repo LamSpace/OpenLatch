@@ -29,7 +29,7 @@ import java.util.concurrent.TimeoutException;
  * {@link OLock} 的远程实现：全部语义裁决委托服务端，本地仅做归属簿记与
  * 阻塞桥接（详设 §6.3）。
  *
- * <p><b>阻塞桥接</b>：{@code lock}/{{@code tryLock}} 通过获取 future 的限时
+ * <p><b>阻塞桥接</b>：{@code lock}/{@code tryLock} 通过获取 future 的限时
  * {@code get} 实现；阻塞上界 = 等待时长 + 请求超时 + 1s 余量，杜绝死等。
  *
  * <p><b>中断处理</b>：等待中被中断时，若获取请求随后仍被服务端授予，
@@ -79,7 +79,7 @@ final class RemoteLock implements OLock {
     /**
      * {@inheritDoc}
      *
-     * <p>实现：以待等待总超时调用限时获取，到时未授予以超时异常结束。
+     * <p>实现：以等待总超时调用限时获取，到时未授予以超时异常结束。
      */
     @Override
     public void lock() throws InterruptedException {
@@ -93,7 +93,8 @@ final class RemoteLock implements OLock {
     /**
      * {@inheritDoc}
      *
-     * <p>实现：立即式获取（{@code waitMs = 0}），被拒返回 {@code false}。
+     * <p>实现：立即式获取（{@code waitMs = 0}），被拒返回 {@code false}，其余
+     * 失败按接口声明上抛；等待被中断时仅恢复中断标志并视为失败。
      */
     @Override
     public boolean tryLock() {
@@ -108,6 +109,9 @@ final class RemoteLock implements OLock {
 
     /**
      * {@inheritDoc}
+     *
+     * <p>实现：{@code waitTime} 为负先抛 {@link IllegalArgumentException}，
+     * 随后走限时获取公共路径。
      */
     @Override
     public boolean tryLock(long waitTime, TimeUnit unit) throws InterruptedException {

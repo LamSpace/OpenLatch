@@ -132,6 +132,8 @@ public final class OpenLatchServer {
 
     /**
      * 实际监听端口（配置端口为 0 时返回操作系统分配的端口）。
+     * 调用者义务：仅可在 {@link #start()} 成功后调用——启动前
+     * {@code serverChannel} 尚未创建，调用抛 {@link NullPointerException}。
      *
      * @return 监听端口
      */

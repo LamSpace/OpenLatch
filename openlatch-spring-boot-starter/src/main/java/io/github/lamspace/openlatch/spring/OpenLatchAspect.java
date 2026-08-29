@@ -57,9 +57,11 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
  * {@link AcquireSpec} 的 {@code waitMs}，总超时计时由客户端内部承担，
  * 本切面仅以本地兜底时限等待结果）；③执行业务方法；④finally 语义释放：
  * 释放失败分类处理——锁已丢失（{@code INVALID_TOKEN}/{@code NOT_HELD}/
- * 断连）静默跳过并记 debug 日志（丢失事件已由客户端锁丢失通道通知，
- * design D3），其余失败若业务已成功则抛出，业务已抛异常则仅记日志、
- * 不掩盖业务结果。
+ * {@code SESSION_EXPIRED}/断连）静默跳过并记 debug 日志（丢失事件已由
+ * 客户端锁丢失通道通知，design D3；会话过期仅计入释放侧，获取侧原样
+ * 传播，见使用约束），其余失败若业务已成功则抛出，业务已抛异常则仅记
+ * 日志、不掩盖业务结果；释放等待被中断时恢复中断标志并放行、不上抛
+ * （锁状态未确认，最坏随租约到期兜底）。
  *
  * <p><b>与事务的交互</b>：{@code @Order(0)} 使本切面排序先于事务通知
  * （默认 {@code LOWEST_PRECEDENCE}），即锁在事务外层——获取先于事务开启、
@@ -191,10 +193,12 @@ public class OpenLatchAspect {
     }
 
     /**
-     * 业务执行后的守卫式释放（design D3）：锁已丢失（明确失效状态码或
-     * 断连）时静默跳过——丢失事件已经客户端 {@code LockLostListener}
+     * 业务执行后的守卫式释放（design D3）：锁已丢失（失效状态码
+     * {@code INVALID_TOKEN}/{@code NOT_HELD}/{@code SESSION_EXPIRED} 或断连
+     * 不可达）时静默跳过——丢失事件已经客户端 {@code LockLostListener}
      * 通道通知，服务端以租约到期兜底；其余真实失败只在业务成功时抛出，
-     * 业务已失败时记日志让位业务异常。
+     * 业务已失败时记日志让位业务异常；等待释放被中断时恢复中断标志并记
+     * debug 日志、不抛出（锁状态未确认，最坏随租约到期消失）。
      *
      * @param key           锁键
      * @param grant         获取结果
@@ -224,8 +228,10 @@ public class OpenLatchAspect {
     }
 
     /**
-     * 判定"锁已丢失"类释放失败：租约凭证失效、未持有或断连导致的不可达。
-     * 这两类失败服务端语义上锁已不存在或必然随租约到期消失，无需上报。
+     * 判定"锁已丢失"类释放失败：租约凭证失效、未持有、会话过期或断连
+     * 导致的不可达。这些失败服务端语义上锁已不存在或必然随租约到期
+     * 消失，无需上报。注意 {@code SESSION_EXPIRED} 仅计入释放侧丢失路径，
+     * 获取侧的会话过期不经本判定、原样传播（见类注释使用约束）。
      *
      * @param cause 释放异常
      * @return 属于丢失路径返回 {@code true}
@@ -303,7 +309,7 @@ public class OpenLatchAspect {
     }
 
     /**
-     * 表达式缓存命中数（包内可见，仅测试观测缓存复用用）。
+     * 表达式缓存条目数（包内可见，仅测试观测缓存复用用）。
      *
      * @return 当前缓存条目数
      */

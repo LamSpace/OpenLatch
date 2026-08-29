@@ -20,7 +20,8 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 
 /**
- * 客户端测试的服务器夹具：一律绑定临时端口（0）避免端口竞争。
+ * 客户端测试的服务器夹具：默认建议绑定临时端口（0）避免端口竞争；
+ * 需固定端口的用例（如同端口重启重连）自行传入。
  */
 public final class ClientTestServers {
 

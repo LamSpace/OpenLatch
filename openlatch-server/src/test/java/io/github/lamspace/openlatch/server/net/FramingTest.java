@@ -31,10 +31,17 @@ import static io.github.lamspace.openlatch.server.net.ServerChannelInitializer.M
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 分帧行为（设计说明书 §3.1）：半包、粘包、超帧长断连。
+ * 分帧行为（设计说明书 §3.1）：入站半包、粘包、超帧长断连，
+ * 以及出站编码与长度前缀装配（编码器 → 前置器的写出序）。
  */
 class FramingTest {
 
+    /**
+     * 构造仅入站的分帧管线（长度前缀解码 → Protobuf 解码 → 合法性裁决），
+     * 故意不含出站编码器——出站编码用例因此自建通道。
+     *
+     * @return 嵌入通道
+     */
     private static EmbeddedChannel newFramingChannel() {
         return new EmbeddedChannel(
                 new LengthFieldBasedFrameDecoder(MAX_FRAME_LENGTH, 0, 4, 0, 4),
@@ -42,6 +49,14 @@ class FramingTest {
                 new EnvelopeCodecHandler());
     }
 
+    /**
+     * 手拼 §3.1 线格式帧：4 字节大端长度前缀 + Protobuf 序列化 payload，
+     * 与 {@link #newFramingChannel()} 解码器参数（lengthFieldOffset=0、
+     * lengthFieldLength=4、initialBytesToStrip=4）对应。
+     *
+     * @param envelope 待封装的信封
+     * @return 帧字节缓冲
+     */
     private static ByteBuf frame(Envelope envelope) {
         byte[] payload = envelope.toByteArray();
         ByteBuf buf = Unpooled.buffer(4 + payload.length);
@@ -50,6 +65,12 @@ class FramingTest {
         return buf;
     }
 
+    /**
+     * 构造 PING 信封（无 payload，作分帧用的最小合法消息体）。
+     *
+     * @param requestId 请求 id
+     * @return 信封
+     */
     private static Envelope ping(long requestId) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)

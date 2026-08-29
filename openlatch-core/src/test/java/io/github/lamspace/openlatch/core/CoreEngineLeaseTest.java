@@ -32,8 +32,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** §10.1 租约用例组（手工时钟，无 sleep）。 */
 class CoreEngineLeaseTest {
 
+    /** 手工时钟：用例以相对推进驱动租约到期，无 sleep。 */
     private MutableClock clock;
+    /** 记录型监听器：捕获队首通知事件供断言。 */
     private RecordingListener listener;
+    /** 被测引擎，每用例以默认 {@link CoreConfig} 重建。 */
     private CoreEngine engine;
 
     @BeforeEach
@@ -43,6 +46,10 @@ class CoreEngineLeaseTest {
         engine = new CoreEngine(new CoreConfig(), clock, listener);
     }
 
+    /**
+     * AcquireCommand 工厂：隐藏固定前提 {@code queueIfBusy=true}（排队式请求）。
+     * 租约由调用方传入——多数用例传 30_000，钳制用例传 0/上限外/下限外边界值。
+     */
     private AcquireCommand acquire(long s, long r, String key, LockType type, long tid, long leaseMs) {
         return new AcquireCommand(s, r, key, type, tid, leaseMs, true);
     }

@@ -38,8 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 请求多路复用单测（tasks 3.1–3.3）：响应关联、每请求超时、未知 id 路由与
- * 连接不可用快速失败。
+ * 请求多路复用单测（tasks 3.1–3.3）：响应关联、每请求超时、未知 id 路由、
+ * 连接不可用快速失败与同 id supersede 及超时竞争（design D3）。
  */
 class RequestMultiplexerTest {
 

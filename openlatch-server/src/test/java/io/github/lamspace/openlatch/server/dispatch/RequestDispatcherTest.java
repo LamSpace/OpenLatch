@@ -40,21 +40,39 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RequestDispatcherTest {
 
+    /** 被测独立核心（no-op 通知桥），会话登记与断言经此。 */
     private CoreEngine core;
+    /** 被测分发器：以独立核心构造。 */
     private RequestDispatcher dispatcher;
 
+    /** 以独立核心（no-op 通知桥）构造被测分发器。 */
     @BeforeEach
     void setUp() {
         core = new CoreEngine(new CoreConfig(), new SystemClock(), (s, r, k) -> { });
         dispatcher = new RequestDispatcher(core);
     }
 
+    /**
+     * 构造已握手的会话簿记：{@code activate(core.sessionOpened())} 同时向核心
+     * 登记会话——未登记的会话分发被短路为 {@code SESSION_EXPIRED}
+     * （{@code acquire_unknown_session_rejected} 故意绕过本夹具复现该路径）。
+     *
+     * @return 已握手的会话
+     */
     private ServerSession newSession() {
         ServerSession session = new ServerSession(null);
         session.activate(core.sessionOpened());
         return session;
     }
 
+    /**
+     * 构造获取请求信封（重入式、threadId=1、leaseMs=0 即服务端默认租约）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param waitMs    等待时长（-1/正值为排队式，0 为立即式）
+     * @return 信封
+     */
     private static Envelope acquire(long requestId, String key, long waitMs) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -69,6 +87,14 @@ class RequestDispatcherTest {
                 .build();
     }
 
+    /**
+     * 构造释放请求信封（threadId 固定 1，与 acquire 的持有线程一致）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param token     租约凭证
+     * @return 信封
+     */
     private static Envelope release(long requestId, String key, long token) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -79,6 +105,14 @@ class RequestDispatcherTest {
                 .build();
     }
 
+    /**
+     * 构造续租请求信封（固定 leaseMs=30_000）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param token     租约凭证
+     * @return 信封
+     */
     private static Envelope renew(long requestId, String key, long token) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)

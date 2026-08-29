@@ -30,8 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** §10.1 会话、幂等、限额用例组。 */
 class CoreEngineSessionIdempotencyLimitTest {
 
+    /** 手工时钟：本组用例不推进时间，注入仅为与其余套件一致的装配口径。 */
     private MutableClock clock;
+    /** 记录型监听器：捕获队首通知事件供断言。 */
     private RecordingListener listener;
+    /** 被测引擎，每用例以默认 {@link CoreConfig} 重建（限额用例另行自建受限引擎）。 */
     private CoreEngine engine;
 
     @BeforeEach
@@ -41,6 +44,10 @@ class CoreEngineSessionIdempotencyLimitTest {
         engine = new CoreEngine(new CoreConfig(), clock, listener);
     }
 
+    /**
+     * AcquireCommand 工厂：隐藏固定前提 {@code leaseMs=30_000} 与 {@code queueIfBusy=true}
+     * （排队式请求；本组用例无时钟推进，持有在场景跨度内不会到期）。
+     */
     private AcquireCommand acquire(long s, long r, String key, LockType type, long tid) {
         return new AcquireCommand(s, r, key, type, tid, 30_000, true);
     }
@@ -62,6 +69,7 @@ class CoreEngineSessionIdempotencyLimitTest {
                 .isEqualTo(Outcome.REJECT_KEY_TOO_LONG);
     }
 
+    /** 场景：单 key 等待队列深度超限拒绝——{@code CoreConfig} 第 6 位构造参 maxQueueDepthPerKey=2，q1/q2 排队占满后 q3 得 REJECT_QUEUE_FULL。 */
     @Test
     void queueDepthLimitRejected() {
         CoreConfig cfg = new CoreConfig(30_000, 1_000, 3_600_000, 5_000, 512, 2);
@@ -96,13 +104,19 @@ class CoreEngineSessionIdempotencyLimitTest {
         assertThat(listener.count()).isEqualTo(1);
     }
 
+    /**
+     * 会话关闭释放在手持有：本方法仅断言 k1 的持锁释放与队首通知（c 获通知并重发授予）
+     * 及关闭后该会话新请求被拒；名称中 "RemovesWaiters" 的另一面——a 在 k3 上的等待项被
+     * 摘除——未在此断言，等待项移除语义由
+     * {@link #sessionClosedRemovesNotifiedHeadAndRepromotesNewHead()} 覆盖。
+     */
     @Test
     void sessionClosedReleasesHoldsAndRemovesWaiters() {
         long a = engine.sessionOpened();
         long b = engine.sessionOpened();
         long c = engine.sessionOpened();
 
-        // a 持有 k1（写）、k2（读），并在 k3 上排队（k3 由 b 持有）。
+        // a 持有 k1（REENTRANT）、k2（读），并在 k3 上排队（k3 由 b 持有）。
         AcquireResult gk1 = engine.acquire(acquire(a, 1, "k1", LockType.REENTRANT, 1));
         AcquireResult gk2 = engine.acquire(acquire(a, 2, "k2", LockType.READ, 1));
         engine.acquire(acquire(b, 3, "k3", LockType.REENTRANT, 2));

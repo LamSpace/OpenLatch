@@ -25,6 +25,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Channel 绑定的会话簿记：握手状态、sessionId、inflight 计数（设计说明书 §5.1）。
  * 实例经 {@link #KEY} 存于 Channel 属性；握手成功后另行登记到
  * {@link ServerSessionRegistry} 供通知桥反查。
+ *
+ * <p><b>线程模型</b>：全部写方法（{@link #activate}、{@link #markClosed()}、
+ * {@link #tryBeginRequest}/{@link #endRequest()}）由所属连接的 EventLoop
+ * 串行调用——{@code channelInactive} 与写完成 listener 中的 {@code endRequest}
+ * 同为该 EventLoop 回调，单连接内不存在并发写。字段声明 volatile/AtomicInteger
+ * 是为跨线程<em>观察读</em>提供可见性：租约扫描线程经会话注册表反查读取
+ * {@link #channel()}/{@link #sessionId()}，{@link #inflight()} 亦可被任意
+ * 线程观测。构造与 {@link #KEY} 挂载在 accept 注册线程完成，先于一切事件
+ * 回调（发生-先于由 Netty 事件顺序保证）。
  */
 public final class ServerSession {
 
@@ -89,7 +98,10 @@ public final class ServerSession {
     }
 
     /**
-     * 幂等关闭标记：断连清理只执行一次。
+     * 幂等关闭标记：断连清理只执行一次。前提是所有调用点（通道失效、
+     * 空闲关闭）都在本连接所属 EventLoop 上串行——读-判-写在该前提下
+     * 即足够；若未来允许多线程并发调用，"首次"判定将不成立，须改用
+     * CAS 实现（代码侧待办，登记于变更 design D5）。
      *
      * @return true 表示本次调用是首次关闭
      */

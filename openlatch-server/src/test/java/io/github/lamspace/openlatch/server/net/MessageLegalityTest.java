@@ -44,7 +44,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class MessageLegalityTest {
 
-    /** 构造一个事件不抛错的静默监听核心 + 通道对。 */
+    /**
+     * 构造装配了会话处理器（含核心、注册表与分发器）的单条嵌入通道。
+     * 通知监听按 notifyThrows 分支：null 或 false 时静默；true 时抛出
+     * {@code IllegalStateException("simulated bridge failure")}，
+     * 用于模拟通知桥故障以驱动类注释第三维度（分发兜底 INTERNAL_ERROR）。
+     *
+     * @param notifyThrows 通知抛错开关（null/false 静默，true 抛错）
+     * @return 已装配会话处理器的嵌入通道
+     */
     private static EmbeddedChannel channel(AtomicBoolean notifyThrows) {
         CoreEngine core = new CoreEngine(new CoreConfig(), new SystemClock(),
                 (sessionId, requestId, key) -> {
@@ -57,6 +65,12 @@ class MessageLegalityTest {
                 core, config, new ServerSessionRegistry(), new RequestDispatcher(core)));
     }
 
+    /**
+     * 构造合法 HELLO 信封（版本 1、无认证令牌）。
+     *
+     * @param requestId 请求 id
+     * @return 信封
+     */
     private static Envelope hello(long requestId) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -66,6 +80,13 @@ class MessageLegalityTest {
                 .build();
     }
 
+    /**
+     * 构造排队式获取请求信封（wait_ms 取值见行内注释）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @return 信封
+     */
     private static Envelope acquire(long requestId, String key) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -76,6 +97,14 @@ class MessageLegalityTest {
                 .build();
     }
 
+    /**
+     * 构造释放请求信封。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param token     租约凭证
+     * @return 信封
+     */
     private static Envelope release(long requestId, String key, long token) {
         return Envelope.newBuilder()
                 .setProtocolVersion(1)
@@ -85,6 +114,12 @@ class MessageLegalityTest {
                 .build();
     }
 
+    /**
+     * 读出一条出站信封并断言其类型。
+     *
+     * @param ch 嵌入通道
+     * @return 出站信封
+     */
     private static Envelope readOut(EmbeddedChannel ch) {
         Object out = ch.readOutbound();
         assertThat(out).isInstanceOf(Envelope.class);

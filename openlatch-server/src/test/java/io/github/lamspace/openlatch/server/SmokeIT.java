@@ -39,7 +39,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 冒烟（规格"可执行交付形态"，设计说明书 §13.2 P1-17）：
  * {@code java -jar} 独立启动后完整执行 HELLO → ACQUIRE → LEASE_RENEW → RELEASE。
- * 由 failsafe 在 verify 阶段（shade 打包之后）运行。
+ * 由 failsafe 在 integration-test 阶段执行（package/shade 之后），
+ * verify 阶段校验其结果。
  */
 class SmokeIT {
 
@@ -108,6 +109,13 @@ class SmokeIT {
                 .contains("protocolVersion=" + OpenLatchServer.PROTOCOL_VERSION);
     }
 
+    /**
+     * 构造立即式获取请求信封（重入式、threadId=1、leaseMs=0 默认租约、wait_ms=0）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @return 信封
+     */
     private static Envelope acquire(long requestId, String key) {
         return Envelope.newBuilder()
                 .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
@@ -143,12 +151,27 @@ class SmokeIT {
         }
     }
 
+    /**
+     * 向操作系统申领一个空闲 TCP 端口（临时绑定 ServerSocket 后读取端口号）。
+     *
+     * @return 当前空闲的端口号
+     * @throws IOException 端口绑定失败
+     */
     private static int findFreePort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
         }
     }
 
+    /**
+     * 轮询 TCP 连通直至服务器开始监听：探测成功即静默返回；
+     * 每次探测被拒等 {@code IOException} 吞掉后间隔重试；超时抛
+     * {@code AssertionError}。
+     *
+     * @param port      目标端口
+     * @param timeoutMs 就绪等待上限（毫秒）
+     * @throws InterruptedException 重试间隔睡眠被中断
+     */
     private static void awaitListening(int port, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {

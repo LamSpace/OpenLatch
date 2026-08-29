@@ -39,6 +39,7 @@ class ClientReconnectTest {
     /** 持锁中断连且服务器重启：重连成功即触发旧锁丢失回调，本地状态清除。 */
     @Test
     void lockLostFiredOnReconnectAfterServerRestart() throws Exception {
+        // 固定端口：服务器须在原端口重启以验证同地址重连，不适用临时端口约定
         int port = 19410;
         OpenLatchServer server = ClientTestServers.start(ClientTestServers.config(port));
         OpenLatchClient client = OpenLatchClient.builder()

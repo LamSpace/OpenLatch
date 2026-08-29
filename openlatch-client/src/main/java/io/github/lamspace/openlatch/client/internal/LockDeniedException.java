@@ -22,9 +22,9 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
 /**
  * 立即式获取被拒（服务端回 {@code DENIED}）的内部标记异常。
  *
- * <p>同步包装层将其映射为 {@code tryLock() == false}；
- * {@code acquireAsync} 将其转换为携带 {@code DENIED} 状态码的
- * {@link OpenLatchException} 上抛。
+ * <p>同步包装层将其映射为 {@code tryLock() == false}；异步路径的调用方
+ * 以本异常原样收到（其本身即携带 {@code DENIED} 状态码的
+ * {@link OpenLatchException} 子类，无二次转换）。
  */
 public final class LockDeniedException extends OpenLatchException {
 

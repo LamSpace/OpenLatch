@@ -34,8 +34,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class NotifyEndToEndTest {
 
+    /** 被测内嵌服务器：各用例自行启动、{@code tearDown} 统一关停。 */
     private OpenLatchServer server;
 
+    /** 关停本用例启动的服务器（未启动时跳过）。 */
     @AfterEach
     void tearDown() {
         if (server != null) {
@@ -43,6 +45,16 @@ class NotifyEndToEndTest {
         }
     }
 
+    /**
+     * 构造获取请求信封：重入式、threadId=1；leaseMs 显式传入
+     * （短租约到期用例依赖此参数自设 100ms 租约）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param leaseMs   请求租约时长（0 为服务端默认）
+     * @param waitMs    等待时长（-1 为排队式）
+     * @return 信封
+     */
     private static Envelope acquire(long requestId, String key, long leaseMs, long waitMs) {
         return Envelope.newBuilder()
                 .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
@@ -57,6 +69,14 @@ class NotifyEndToEndTest {
                 .build();
     }
 
+    /**
+     * 构造释放请求信封（threadId 固定 1，与 acquire 的持有线程一致）。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param token     租约凭证
+     * @return 信封
+     */
     private static Envelope release(long requestId, String key, long token) {
         return Envelope.newBuilder()
                 .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)

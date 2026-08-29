@@ -63,6 +63,16 @@ public final class ServerChannelInitializer extends ChannelInitializer<SocketCha
         this.channels = channels;
     }
 
+    /**
+     * 新连接装配（accept 后在该 Channel 注册的 EventLoop 上调用一次）：
+     * 先登记进关停用连接组（{@code channels}，服务器关停时统一关闭全部
+     * 活跃连接），再按类注释的入站/出站顺序挂载 pipeline——其中
+     * {@code LengthFieldPrepender} 必须比 {@code ProtobufEncoder} 更靠近
+     * head（出站遍历序先编码再补长度头，见行内注释），顺序颠倒则分帧器
+     * 无从在编码产物之前补长度头，出站帧装配不成立。
+     *
+     * @param ch 新建立的连接通道
+     */
     @Override
     protected void initChannel(SocketChannel ch) {
         channels.add(ch);

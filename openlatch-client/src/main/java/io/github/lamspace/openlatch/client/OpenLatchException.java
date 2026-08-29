@@ -23,12 +23,15 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
  *
  * <p>所有客户端可预期失败均以本类或其子类抛出（或以其完成失败的
  * {@link java.util.concurrent.CompletableFuture}），并尽量携带服务端状态码
- * 以便调用方区分失败原因。客户端本地产生的失败（超时、断连、锁丢失）
- * 不携带状态码，{@link #status()} 返回 {@code null}。
+ * 以便调用方区分失败原因。超时、断连类本地失败不携带状态码
+ * （{@link #status()} 返回 {@code null}）；<b>锁丢失可能携带服务端状态码</b>
+ * （{@code INVALID_TOKEN}/{@code NOT_HELD}/{@code SESSION_EXPIRED}，来源为
+ * 续租被拒或解锁前发现丢失），仅断连/宽限到期路径为 {@code null}——
+ * 调用方不应以 {@code status() == null} 判别"非锁丢失"。
  */
 public class OpenLatchException extends RuntimeException {
 
-    /** 服务端状态码；客户端本地失败为 {@code null}。 */
+    /** 服务端状态码；纯本地失败（超时/断连）为 {@code null}，锁丢失可能携带。 */
     private final StatusCode status;
 
     /**
@@ -66,7 +69,8 @@ public class OpenLatchException extends RuntimeException {
     /**
      * 服务端状态码。
      *
-     * @return 状态码；客户端本地失败为 {@code null}
+     * @return 状态码；纯本地失败（超时/断连）为 {@code null}；锁丢失可能携带
+     *         服务端状态码（见类注释）
      */
     public StatusCode status() {
         return status;

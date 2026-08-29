@@ -43,6 +43,12 @@ import java.util.Objects;
 /**
  * 请求分发（设计说明书 §5.4）：{@code Envelope} → core 命令，core 结果 → {@code Envelope}。
  * 映射为纯函数（design.md D5），可脱离 Netty 单测；{@link #dispatch} 为入口。
+ *
+ * <p><b>线程模型</b>：{@link #dispatch} 由 {@code ServerSessionHandler} 在
+ * 连接所属 EventLoop 线程上同步调用（含 {@code core.acquire}/{@code release}/
+ * {@code renew} 的委托执行亦在该线程完成）。本类无可变状态（仅持有 final 的
+ * core 引用），可被多连接线程并发进入；单 key 状态的串行性由
+ * {@code CoreEngine} 的条目锁保证，不属本类职责。
  */
 public final class RequestDispatcher {
 

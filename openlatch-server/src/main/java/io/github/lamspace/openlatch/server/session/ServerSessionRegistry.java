@@ -22,6 +22,13 @@ import java.util.concurrent.ConcurrentMap;
 /**
  * sessionId → 会话的反向索引（design.md D2）：core 的队首通知事件只携带
  * {@code sessionId}，通知桥经此查得 Channel 写回 {@code AWAIT_NOTIFY}。
+ *
+ * <p><b>线程模型</b>：跨线程共享索引——{@link #register}/{@link #remove} 由
+ * 会话所属连接的 EventLoop 线程调用（握手登记、断连摘除），{@link #get} 由
+ * 任意通知来源线程（连接 IO 线程或租约扫描线程）调用。并发安全由内部
+ * {@link ConcurrentHashMap} 承载：register 返回后 get 立即可见（发生-先于经
+ * map 同步点）；remove 与 get 竞争时读方至多观察到摘除前的会话，由通知桥的
+ * "非活跃即丢弃"分支兜底。
  */
 public final class ServerSessionRegistry {
 

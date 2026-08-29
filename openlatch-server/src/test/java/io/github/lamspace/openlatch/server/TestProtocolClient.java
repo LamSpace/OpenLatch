@@ -51,14 +51,21 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class TestProtocolClient implements AutoCloseable {
 
+    /** {@code sendAndAwait(request)} 单参重载使用的默认等待超时（毫秒）。 */
     private static final long DEFAULT_TIMEOUT_MS = 5000;
 
+    /** 本客户端独占的单线程 EventLoop，close() 时优雅关停。 */
     private final EventLoopGroup group = new NioEventLoopGroup(1);
+    /** 请求 id 发号器，自 1 起单调递增。 */
     private final AtomicLong requestId = new AtomicLong(1);
+    /** {@code request_id} → 等待中响应 future 的关联表，响应到达时摘除并完成。 */
     private final ConcurrentMap<Long, CompletableFuture<Envelope>> pending = new ConcurrentHashMap<>();
+    /** {@code AWAIT_NOTIFY} 推送队列，与请求-响应关联通道分离。 */
     private final BlockingQueue<Envelope> pushes = new LinkedBlockingQueue<>();
 
+    /** 已建立的连接通道，{@code connect()} 成功后非 null。 */
     private Channel channel;
+    /** 握手成功后服务端分配的会话 id（volatile：握手在调用线程完成、后续可跨线程读）。 */
     private volatile long sessionId;
 
     /**

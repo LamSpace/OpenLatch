@@ -24,6 +24,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 /** 测试用手工时钟：推进租约无需 sleep。 */
 final class MutableClock implements Clock {
+    /** 当前时刻（毫秒）。初值 1_000_000 为任意非零基点：用例只经 {@link #advance} 相对推进，绝对值不承载语义。 */
     private long now = 1_000_000L;
 
     @Override
@@ -53,8 +54,10 @@ final class MutableClock implements Clock {
 /** 测试用记录型监听器：记录通知序列。 */
 final class RecordingListener implements CoreEventListener {
 
+    /** 一次 {@code notifyHead} 回调的入参快照（数据载体）。 */
     record Event(long sessionId, long requestId, String key) {}
 
+    /** 按通知到达顺序追加的事件流水。 */
     private final List<Event> events = new ArrayList<>();
 
     @Override
@@ -98,8 +101,10 @@ final class RecordingListener implements CoreEventListener {
 /** 测试用队列监听器：按 sessionId 路由到各线程的队列，供并发测试阻塞等待通知。 */
 final class QueueingListener implements CoreEventListener {
 
+    /** 一次 {@code notifyHead} 回调的入参快照（数据载体，投递到对应会话队列）。 */
     record Event(long sessionId, long requestId, String key) {}
 
+    /** sessionId → 该会话登记队列的登记表：{@link #register} 写入，{@code notifyHead} 按会话查投。 */
     private final ConcurrentHashMap<Long, BlockingQueue<Event>> queues = new ConcurrentHashMap<>();
 
     /**

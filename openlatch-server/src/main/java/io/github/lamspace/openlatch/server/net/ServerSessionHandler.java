@@ -40,6 +40,12 @@ import org.slf4j.LoggerFactory;
  * 共享实例（{@code @Sharable}，无可变实例状态），每连接状态存于
  * Channel 属性 {@link ServerSession#KEY}。
  *
+ * <p><b>线程模型</b>：本类全部入站回调（active/read/idle/inactive）只在
+ * 连接所属 EventLoop 上执行，单连接内串行；跨连接并发由 worker 线程组
+ * 提供。共享实例无可变状态，故无跨连接竞争；{@code ServerSession} 的
+ * {@code markClosed} 首次判定与 inflight 计数亦以"单连接 EventLoop 串行"
+ * 为成立前提。
+ *
  * <p><b>连接生命周期状态机</b>：
  * <pre>
  * 未握手 ──合法 HELLO──▶ 已握手（业务阶段）──断连/空闲──▶ 清理
@@ -99,12 +105,29 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
         this.dispatcher = dispatcher;
     }
 
+    /**
+     * 通道建立：为本连接挂载未握手的 {@link ServerSession} 簿记（Channel
+     * 属性），随后传播事件。在连接注册 EventLoop 上执行。
+     *
+     * @param ctx 通道上下文
+     */
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         ctx.channel().attr(ServerSession.KEY).set(new ServerSession(ctx.channel()));
         ctx.fireChannelActive();
     }
 
+    /**
+     * 入站信封裁决（处理矩阵见类注释）：未握手交握手门闩；重复 {@code HELLO}
+     * 拒绝不断连；在途超限直接回 {@code OVERLOADED}——计数未递增故不产生
+     * {@code endRequest}；其余同步分发：PING 丢弃并立即终结在途记账，响应
+     * 写回在写完成 listener 中 {@code endRequest}（写完成前请求持续计入在途，
+     * 这是 {@code OVERLOADED} 可达的来源之一）。在所属连接 EventLoop 上执行，
+     * 单连接内串行。
+     *
+     * @param ctx 通道上下文
+     * @param msg 解码后的请求信封
+     */
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Envelope msg) {
         ServerSession session = ctx.channel().attr(ServerSession.KEY).get();
@@ -139,6 +162,13 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
         ctx.writeAndFlush(resp).addListener(f -> session.endRequest());
     }
 
+    /**
+     * 断连清理：{@link ServerSession#markClosed} 去重（与空闲关闭路径重叠时
+     * 仅首次执行），清理顺序为先摘注册表、后清会话（见类注释）。仅在本连接
+     * 所属 EventLoop 上执行，markClosed 的读-判-写由此串行性保证安全。
+     *
+     * @param ctx 通道上下文
+     */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
         // 断连清理（design.md D3）：先摘注册表（通知不再路由到此连接），后清会话。
@@ -154,6 +184,14 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
         ctx.fireChannelInactive();
     }
 
+    /**
+     * 用户事件处理：{@code READER_IDLE} 关闭连接（清理归一到
+     * {@code channelInactive} 同一去重路径），其余事件向后传播。
+     * 在所属连接 EventLoop 上执行。
+     *
+     * @param ctx 通道上下文
+     * @param evt 入站用户事件
+     */
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
         if (evt instanceof IdleStateEvent idle && idle.state() == IdleState.READER_IDLE) {
@@ -197,9 +235,10 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     }
 
     /**
-     * 构造握手响应信封：回显请求的 {@code requestId}，携带服务端协议版本、
-     * 状态与分配的 sessionId；{@code OK} 时另携带默认租约时长供客户端参考，
-     * 失败路径（{@code INVALID_REQUEST}）sessionId 传 0。
+     * 构造握手响应信封：回显请求的 {@code requestId}；恒携带
+     * {@code server_protocol_version} 与 {@code default_lease_ms}
+     * （供客户端参考，与结果码无关）；失败路径（{@code INVALID_REQUEST}，
+     * 含版本不匹配断连）sessionId 为 0。
      *
      * @param requestId 原请求的请求 id（回显）
      * @param status    握手结果状态码

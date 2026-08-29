@@ -53,7 +53,8 @@ public final class SessionRegistry {
     }
 
     /**
-     * 原子地"会话仍存在则登记 key"。与 {@link #remove} 在同一 key 上原子互斥：
+     * 原子地"会话仍存在则登记 key"。与 {@link #remove} 对同一 sessionId 表项
+     * 原子互斥（互斥粒度是登记表的 map key，非锁键）：
      * 返回 {@code false} 表示会话已关闭（调用方必须拒绝该请求），
      * 返回 {@code true} 表示已登记，会话关闭时该 key 必会被清理。
      *

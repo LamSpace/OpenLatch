@@ -62,6 +62,16 @@ import java.util.function.Consumer;
  * 每次失败倍增，上限 {@code reconnectMaxBackoff}（默认 10s），
  * 每次延时附加 ±20% 随机抖动。重连成功后退避复位为初始值。
  *
+ * <p><b>线程模型</b>：状态迁移由三方线程发起——调用方线程
+ * （{@link #connectAsync()}/{@link #shutdown()}）、共享定时器线程（退避重连
+ * 触发 {@link #doConnect()}）与 EventLoop 线程（TCP 连接回调、通道失效）。
+ * {@code stateLock} 仅保护四个非 volatile 字段（{@code state}、
+ * {@code connectFuture}、{@code currentBackoffMs}、{@code reconnectTask}）；
+ * {@code channel}、{@code session}、{@code pendingSession} 为 volatile，
+ * {@link #activeChannel()}/{@link #session()} 不经锁读取，读方可能短暂
+ * 看到旧值——「读到 {@code null} 即视为非 ACTIVE」是调用方须容忍的窗口语义。
+ * 断连/握手回调中的用户级联动（断连回调、ACTIVE 监听）一律在锁外执行。
+ *
  * <p><b>断连处理</b>：通道失效时先调用断连回调（由客户端装配：挂起请求
  * 快速失败、等待清空、持锁失锁时刻登记），再进入退避重连。
  *
@@ -102,7 +112,12 @@ public final class ConnectionManager {
     private final EventLoopGroup group;
     /** 共享定时器：重连退避定时挂于此。 */
     private final HashedWheelTimer timer;
-    /** 状态迁移锁：全部状态字段的读写都在此锁内完成。 */
+    /**
+     * 状态迁移锁：仅保护 state、connectFuture、currentBackoffMs、reconnectTask
+     * 四个非 volatile 字段。channel/session/pendingSession 为 volatile，
+     * 读取不经本锁；connectDeadlineMs 由 doConnect 在锁内写、sendHello 在
+     * 连接回调线程锁外读（可见性由连接回调的同步点保证）。
+     */
     private final Object stateLock = new Object();
     /** 随机抖动源：退避延时 ±20%。 */
     private final ThreadLocalRandom jitter = ThreadLocalRandom.current();

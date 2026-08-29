@@ -28,7 +28,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 配置加载（设计说明书 §5.7）：默认值、空白路径回落、Properties 覆盖、缺省键回落、
- * 非法值快速失败（指明配置键）、租约序约束与 core 映射。
+ * 非法值快速失败（指明配置键）、配置文件缺失快速失败、port=0 临时端口绑定、
+ * 租约序约束与 core 映射。
  */
 class ServerConfigTest {
 

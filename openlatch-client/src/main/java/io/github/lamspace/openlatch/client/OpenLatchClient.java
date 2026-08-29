@@ -53,9 +53,11 @@ import java.util.concurrent.TimeUnit;
  * 执行器上调用。异步接口返回的 future 在网络/定时器线程上完成，
  * <b>用户链接的回调不得执行阻塞操作</b>，需要阻塞处理时应切换至调用方自己的执行器。
  *
- * <p><b>生命周期</b>：经 {@link #builder()} 构建，构建时创建后台资源；
- * {@link #shutdown()} 幂等关停全部资源并进入终态，终态后不再受理请求、
- * 不再重连。实现 {@link AutoCloseable}，{@code close()} 等价于 {@code shutdown()}。
+ * <p><b>生命周期</b>：经 {@link #builder()} 构建，构建时创建后台资源并发起
+ * 首次异步连接；{@link #shutdown()} 先对本地登记持锁尽力释放（单条目至多
+ * 一个 requestTimeout，失败以服务端租约到期兜底），再幂等关停全部资源并
+ * 进入终态，终态后不再受理请求、不再重连。实现 {@link AutoCloseable}，
+ * {@code close()} 等价于 {@code shutdown()}。
  */
 public final class OpenLatchClient implements AutoCloseable {
 
@@ -274,9 +276,12 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
-     * 关停客户端：停止全部后台资源（网络线程组、定时器、回调执行器），
-     * 置位终态标志。幂等，可重复调用；关停后新请求被拒绝、不再重连。
-     * 尽力释放持锁的扩展行为在持锁簿记引入后补齐（详设 §6.3）。
+     * 关停客户端。幂等，可重复调用；进入终态后新请求被拒绝、不再重连。
+     *
+     * <p>关停前对本地登记持锁尽力释放（详设 §6.3，见
+     * {@link #releaseAllHeldBestEffort()}）：逐条目发送释放请求，单条目至多
+     * 等待一个 requestTimeout；失败不阻塞关停，由服务端租约到期兜底。
+     * 随后停止全部后台资源（网络线程组、定时器、回调执行器）并置位终态标志。
      */
     public synchronized void shutdown() {
         if (closed) {

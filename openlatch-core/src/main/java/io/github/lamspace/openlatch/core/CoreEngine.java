@@ -149,11 +149,12 @@ public final class CoreEngine {
      * 重入获取（写侧或读侧）不换新凭证：持有计数加一、同一凭证、
      * 租约整段刷新；读锁加入已有读者时复用现有凭证。
      *
-     * <p><b>排队语义</b>：锁被占用且 {@code queueIfBusy} 为真时入队，
-     * 返回 {@link Outcome#QUEUED} 与 1 起的队列位次；同一
-     * {@code (sessionId, requestId)} 重复请求幂等去重——不二次入队，
-     * 返回当前位次。队列满返回 {@link Outcome#REJECT_QUEUE_FULL}；
-     * 锁被占用且 {@code queueIfBusy} 为假（立即式）返回 {@link Outcome#DENIED}。
+     * <p><b>排队语义</b>：不存在快路径——锁被占用，或虽无持有者但等待队列
+     * 非空（队首已通知、待重发窗口——规则 3 禁止越过在队者）——且
+     * {@code queueIfBusy} 为真时入队，返回 {@link Outcome#QUEUED} 与 1 起的
+     * 队列位次；同一 {@code (sessionId, requestId)} 重复请求幂等去重——
+     * 不二次入队，返回当前位次。队列满返回 {@link Outcome#REJECT_QUEUE_FULL}；
+     * 同条件下 {@code queueIfBusy} 为假（立即式）返回 {@link Outcome#DENIED}。
      *
      * <p><b>条目生命周期</b>：条目按需创建；操作完成后若无持有者且无等待者，
      * 立即从锁表移除，避免空条目滞留。
@@ -220,7 +221,8 @@ public final class CoreEngine {
      * <p>可重入锁需逐层释放：每次调用只减一层计数，
      * {@code fullyReleased} 仅在计数归零（锁完全释放）时为 {@code true}。
      *
-     * @param cmd 释放锁命令，携带获取时签发的租约凭证
+     * @param cmd 释放锁命令，携带获取时签发的租约凭证；key 须非 {@code null}
+     *            （协议层已校验），否则抛 {@link NullPointerException}
      * @return 释放结果：状态与是否完全释放
      */
     public ReleaseResult release(ReleaseCommand cmd) {
@@ -256,7 +258,9 @@ public final class CoreEngine {
      * 并向到期堆登记新记录。旧堆记录不作删除，由 {@link #expireDue} 的陈旧
      * 校验跳过。
      *
-     * @param cmd 续租命令，携带获取时签发的租约凭证与期望租约时长（0 表示默认）
+     * @param cmd 续租命令，携带获取时签发的租约凭证与期望租约时长（0 表示默认）；
+     *            key 须非 {@code null}（协议层已校验），否则抛
+     *            {@link NullPointerException}
      * @return 续租结果：{@link ReleaseStatus#OK} 时携带新的到期时刻
      */
     public RenewResult renew(RenewCommand cmd) {

@@ -27,6 +27,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class ProtocolCodecTest {
 
+    /**
+     * 序列化→反序列化回环：{@code toByteArray()} 后 {@code parseFrom} 还原。
+     * 解码失败（{@link InvalidProtocolBufferException}）转为 {@link AssertionError}，
+     * 使调用方直接对返回值做等值断言而无需处理受检异常。
+     *
+     * @param envelope 待回环的原信封
+     * @return 回环后的信封（应与入参等值）
+     */
     private static Envelope roundTrip(Envelope envelope) {
         try {
             return Envelope.parseFrom(envelope.toByteArray());
@@ -35,6 +43,7 @@ class ProtocolCodecTest {
         }
     }
 
+    /** 场景：HELLO 请求信封回环——协议版本、请求标识与客户端字段整体等值，还原后 payload 分支仍为 HELLO_REQUEST。 */
     @Test
     void helloRequestRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -54,6 +63,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getPayloadCase()).isEqualTo(Envelope.PayloadCase.HELLO_REQUEST);
     }
 
+    /** 场景：HELLO 响应信封回环——会话 ID、服务端协议版本、默认租约与 leader hint 字段等值保留。 */
     @Test
     void helloResponseRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -71,6 +81,7 @@ class ProtocolCodecTest {
         assertThat(roundTrip(envelope)).isEqualTo(envelope);
     }
 
+    /** 场景：LOCK_ACQUIRE 请求信封回环（含 wait_ms=-1 排队语义）——整体等值，key 与锁类型还原后逐字段可读。 */
     @Test
     void acquireRequestRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -91,6 +102,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getAcquireRequest().getLockType()).isEqualTo(LockType.LOCK_TYPE_REENTRANT);
     }
 
+    /** 场景：LOCK_ACQUIRE 的 QUEUED 响应信封回环——位次 3 与凭证/到期字段取 0 的口径等值保留。 */
     @Test
     void acquireResponseRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -111,6 +123,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getAcquireResponse().getQueuePosition()).isEqualTo(3);
     }
 
+    /** 场景：LOCK_RELEASE 请求信封回环——key、lease token 与 thread_id 等值保留。 */
     @Test
     void releaseRequestRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -126,6 +139,7 @@ class ProtocolCodecTest {
         assertThat(roundTrip(envelope)).isEqualTo(envelope);
     }
 
+    /** 场景：LOCK_RELEASE 的 OK 响应信封回环——整体等值且 fullyReleased=true 布尔字段保留。 */
     @Test
     void releaseResponseRoundTrip() {
         Envelope envelope = Envelope.newBuilder()
@@ -142,6 +156,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getReleaseResponse().getFullyReleased()).isTrue();
     }
 
+    /** 场景：LEASE_RENEW 请求与响应各自回环——含 leaseExpiresAtMs 毫秒纪元大值不截断，均保持等值。 */
     @Test
     void leaseRenewRoundTrip() {
         Envelope request = Envelope.newBuilder()
@@ -166,6 +181,7 @@ class ProtocolCodecTest {
         assertThat(roundTrip(response)).isEqualTo(response);
     }
 
+    /** 场景：无 payload 的 PING 信封回环——仅 type 与 request_id 承载信息，还原后 payload 分支为 PAYLOAD_NOT_SET。 */
     @Test
     void pingRoundTrip() {
         // PING 无 payload：Envelope 仅有 type 与 request_id。
@@ -180,6 +196,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getPayloadCase()).isEqualTo(Envelope.PayloadCase.PAYLOAD_NOT_SET);
     }
 
+    /** 场景：服务端推送 AWAIT_NOTIFY 信封回环——request_id=0、经 request_id_ref 关联原请求，两语义还原后不变。 */
     @Test
     void awaitNotifyPushRoundTrip() {
         // 服务端推送：Envelope.request_id 为 0，通过 request_id_ref 关联原请求。
@@ -198,6 +215,7 @@ class ProtocolCodecTest {
         assertThat(parsed.getAwaitNotify().getRequestIdRef()).isEqualTo(7L);
     }
 
+    /** 场景：未知字段前向兼容——带未知字段（field 999, varint）的字节流可解析、已知字段不受损，且未知字段跨再序列化仍保留。 */
     @Test
     void unknownFieldsAreToleratedAndPreserved() throws InvalidProtocolBufferException {
         Envelope original = Envelope.newBuilder()
@@ -233,6 +251,7 @@ class ProtocolCodecTest {
         assertThat(reparsed.getUnknownFields().hasField(999)).isTrue();
     }
 
+    /** 场景：MessageType/LockType/StatusCode 枚举编号与设计说明书 §3.2 逐项核对（抽查关键取值）。 */
     @Test
     void enumValuesMatchDesignSpecification() {
         // 字段/枚举取值与设计说明书 §3.2 逐项一致（抽查关键取值）。

@@ -30,8 +30,11 @@ import org.slf4j.LoggerFactory;
  * （design.md D2），写回 {@code AWAIT_NOTIFY}（{@code request_id = 0}，
  * {@code request_id_ref} 指向原获取请求）。
  * <p>
- * 回调可能来自租约扫描线程；连接不存在或写出失败时静默丢弃——队列位置由
- * core 的队首响应超时机制兜底回收（规格"队首通知推送"）。
+ * <b>线程模型</b>：回调线程不定——释放/会话清理触发的通知来自对应连接的 IO
+ * 线程，到期回收与队首清扫触发的通知来自租约扫描线程；注册表反查与
+ * {@code writeAndFlush} 均线程安全，写出由 Netty 投递到目标连接的 EventLoop
+ * 执行。连接不存在或写出失败时静默丢弃——队列位置由 core 的队首响应超时
+ * 机制兜底回收（规格"队首通知推送"）。
  */
 public final class NotifyEventBridge implements CoreEventListener {
 
@@ -50,6 +53,20 @@ public final class NotifyEventBridge implements CoreEventListener {
         this.registry = registry;
     }
 
+    /**
+     * 向目标会话推送 {@code AWAIT_NOTIFY}（协议推送唯一入口）：信封
+     * {@code request_id = 0}（推送无关联请求），{@code request_id_ref}
+     * 指向原 {@code ACQUIRE} 的 request id，供客户端关联挂起等待。
+     *
+     * <p>会话不存在或通道非活跃时静默丢弃（不重试、不报错——core 的队首
+     * 响应超时清扫兜底）；写出失败仅记 debug 日志，不向调用方抛出。
+     * 可被任意线程调用（IO 线程与租约扫描线程），线程安全依赖注册表与
+     * Netty 写投递。
+     *
+     * @param sessionId 被通知队首所属会话
+     * @param requestId 原获取请求的 request id（写入 request_id_ref）
+     * @param key       锁键
+     */
     @Override
     public void notifyHead(long sessionId, long requestId, String key) {
         ServerSession session = registry.get(sessionId);

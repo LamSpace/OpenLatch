@@ -21,6 +21,7 @@ package io.github.lamspace.openlatch.server;
  */
 final class TestServers {
 
+    /** 常量工具类，禁止实例化。 */
     private TestServers() {
     }
 

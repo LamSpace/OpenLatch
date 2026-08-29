@@ -32,8 +32,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class DisconnectEndToEndTest {
 
+    /** 被测内嵌服务器：各用例自行启动、{@code tearDown} 统一关停。 */
     private OpenLatchServer server;
 
+    /** 关停本用例启动的服务器（未启动时跳过）。 */
     @AfterEach
     void tearDown() {
         if (server != null) {
@@ -41,6 +43,15 @@ class DisconnectEndToEndTest {
         }
     }
 
+    /**
+     * 构造获取请求信封：硬编码重入式、threadId=1、leaseMs=0（交服务端默认
+     * 租约裁决）——"默认租约 30s 内即刻可获取"类断言因此成立。
+     *
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param waitMs    等待时长（-1 为排队式）
+     * @return 信封
+     */
     private static Envelope acquire(long requestId, String key, long waitMs) {
         return Envelope.newBuilder()
                 .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)

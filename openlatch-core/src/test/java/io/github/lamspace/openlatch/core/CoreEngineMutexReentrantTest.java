@@ -30,8 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** §10.1 互斥、重入用例组。 */
 class CoreEngineMutexReentrantTest {
 
+    /** 手工时钟：用例以相对推进驱动租约到期，无 sleep。 */
     private MutableClock clock;
+    /** 记录型监听器：捕获队首通知事件供断言。 */
     private RecordingListener listener;
+    /** 被测引擎，每用例以默认 {@link CoreConfig} 重建。 */
     private CoreEngine engine;
 
     @BeforeEach
@@ -41,6 +44,10 @@ class CoreEngineMutexReentrantTest {
         engine = new CoreEngine(new CoreConfig(), clock, listener);
     }
 
+    /**
+     * AcquireCommand 工厂：隐藏固定前提 {@code leaseMs=30_000}（本组用例不测租约边界，
+     * 30s 内无时钟推进则持有不过期）。queueIfBusy 由调用方传入（true=排队式，false=立即式 tryLock）。
+     */
     private AcquireCommand acquire(long s, long r, String key, LockType type, long tid, boolean queue) {
         return new AcquireCommand(s, r, key, type, tid, 30_000, queue);
     }

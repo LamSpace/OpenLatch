@@ -30,8 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** §10.1 读写、FIFO 公平、队首响应超时用例组。 */
 class CoreEngineReadWriteFairnessTest {
 
+    /** 手工时钟：用例以相对推进驱动到期/超时判定，无 sleep。 */
     private MutableClock clock;
+    /** 记录型监听器：捕获队首通知事件供断言（通知次序即公平性断言对象）。 */
     private RecordingListener listener;
+    /** 被测引擎，每用例以默认 {@link CoreConfig} 重建。 */
     private CoreEngine engine;
 
     @BeforeEach
@@ -41,6 +44,11 @@ class CoreEngineReadWriteFairnessTest {
         engine = new CoreEngine(new CoreConfig(), clock, listener);
     }
 
+    /**
+     * AcquireCommand 工厂：隐藏固定前提 {@code leaseMs=30_000} 与 {@code queueIfBusy=true}
+     * （排队式请求；30s 内有用例时钟推进，但均未越过到期点）。需要非 30s 租约（:211、:229）
+     * 或立即式拒绝分支（{@code queueIfBusy=false}，:198）的用例绕过本工厂直接构造 AcquireCommand。
+     */
     private AcquireCommand acquire(long s, long r, String key, LockType type, long tid) {
         return new AcquireCommand(s, r, key, type, tid, 30_000, true);
     }

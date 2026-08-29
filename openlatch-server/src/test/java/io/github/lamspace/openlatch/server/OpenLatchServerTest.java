@@ -34,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class OpenLatchServerTest {
 
+    /** 构造仅替换监听端口、其余取默认值的服务器配置。 */
     private static ServerConfig configOnPort(int port) {
         ServerConfig d = ServerConfig.defaults();
         return new ServerConfig(port, d.workerThreads(), d.idleTimeoutMs(), d.defaultLeaseMs(),
@@ -80,6 +81,11 @@ class OpenLatchServerTest {
         retry.stop();
     }
 
+    /**
+     * 关停幂等：重复 {@code stop()} 安全空转由第二次调用不断言异常承载；
+     * 名称中的 bounded 指本用例整体受 {@code @Timeout} 约束，
+     * 无逐次关停时长断言。
+     */
     @Test
     @Timeout(30)
     void stop_is_idempotent_and_bounded() {

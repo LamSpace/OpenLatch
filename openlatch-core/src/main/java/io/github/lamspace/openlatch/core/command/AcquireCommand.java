@@ -27,8 +27,11 @@ import io.github.lamspace.openlatch.core.LockType;
  * @param lockType         请求的锁类型
  * @param threadId         发起请求的客户端线程标识
  * @param requestedLeaseMs 期望租约时长（毫秒），{@code 0} 表示使用默认租约
- * @param queueIfBusy      是否在锁被占时排队。{@code false} 对应协议 {@code wait_ms == 0}
- *                         的立即式获取（忙则拒绝）；core 不感知等待时限（见设计说明书 D3）。
+ * @param queueIfBusy      无快路径（锁被占用，或虽无持有者但等待队列非空——队首
+ *                         已通知、待重发窗口，规则 3 禁止越过在队者）时是否排队。
+ *                         {@code false} 对应协议 {@code wait_ms == 0} 的立即式获取，
+ *                         无快路径即返回 {@code DENIED}；core 不感知等待时限
+ *                         （等待模式折算见详设 §3.2.2）。
  */
 public record AcquireCommand(
         long sessionId,

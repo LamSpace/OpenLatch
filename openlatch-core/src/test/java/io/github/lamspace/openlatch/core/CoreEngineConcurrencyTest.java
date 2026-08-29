@@ -32,9 +32,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** §10.1/10.3 并发不变量：互斥成立、授予无丢失、无重复入队、无孤儿等待者。 */
+/**
+ * §10.1/10.3 并发不变量校验。本文件仅断言两条不变量：互斥成立（临界区同时至多一个持有者）
+ * 与授予无丢失（排队请求者最终全部被授予）；无重复入队与无孤儿等待者两条不变量的真实覆盖
+ * 在 {@link CoreEngineSessionIdempotencyLimitTest#duplicateAcquireDoesNotEnqueueTwice()}。
+ *
+ * <p>两场景的交错维度：立即式 tryLock 快路径竞争（8 线程 × 500 轮，{@code queueIfBusy=false}，
+ * 未授予轮次直接跳过）；排队 + 通知重发路径竞争（8 线程 × 200 轮，{@code queueIfBusy=true}，
+ * QUEUED 后经监听器阻塞等待队首通知，再以同 requestId 重发直至 GRANTED）。
+ */
 class CoreEngineConcurrencyTest {
 
+    /** 本套件全体线程竞争的同一把锁的键。 */
     private static final String KEY = "k";
 
     @Test
@@ -103,10 +112,23 @@ class CoreEngineConcurrencyTest {
         assertThat(grants.get()).isEqualTo(threads * iterations);
     }
 
+    /** 并发测试体：由每个工作线程执行一次，抛出的异常交由 {@link #runConcurrent} 统一收集断言。 */
     private interface Body {
         void run() throws Exception;
     }
 
+    /**
+     * 以 {@code threads} 个线程并发执行 {@code body}。起跑协议：各线程先阻塞在单发
+     * {@link CountDownLatch} 起跑门上，全部线程启动后统一放行，以最大化交错竞争窗口。
+     * 失败处理：工作线程体内抛出的任何 {@link Throwable}（含断言失败的 {@link AssertionError}）
+     * 被收集到 synchronized 列表，待全部线程汇合后在调用方测试线程末尾统一断言为空——
+     * 错误以 AssertionError 在测试线程浮现，而非使工作线程静默崩溃。每线程 join 期限
+     * 60 秒，超时未结束的线程先行断言失败。
+     *
+     * @param threads 并发线程数
+     * @param body    每线程执行体
+     * @throws InterruptedException 等待线程汇合时被中断
+     */
     private static void runConcurrent(int threads, Body body) throws Exception {
         CountDownLatch start = new CountDownLatch(1);
         List<Thread> ts = new ArrayList<>();

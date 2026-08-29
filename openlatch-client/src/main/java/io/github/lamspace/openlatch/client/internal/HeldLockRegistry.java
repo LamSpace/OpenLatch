@@ -295,9 +295,11 @@ public final class HeldLockRegistry {
     }
 
     /**
-     * 全部条目的不可变快照：断连失锁登记、重连失锁裁决、关停释放遍历用。
+     * 全部条目的只读视图（弱一致遍历，并发登记/移除对遍历者可见）：
+     * 断连失锁登记、重连失锁裁决、关停释放遍历用。需一次性冻结集合的
+     * 调用方（如关停尽力释放）应自行拷贝。
      *
-     * @return 条目集合
+     * @return 条目只读视图
      */
     public Collection<HeldEntry> entries() {
         return Collections.unmodifiableCollection(entries.values());

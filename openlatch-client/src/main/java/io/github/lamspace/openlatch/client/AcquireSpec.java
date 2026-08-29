@@ -23,7 +23,8 @@ import java.util.Objects;
  *
  * <p><b>{@code waitMs} 语义</b>（详设 §3.2.2）：
  * <ul>
- *   <li>{@code 0}：立即式——锁被占时直接拒绝（{@code DENIED}），不排队；</li>
+ *   <li>{@code 0}：立即式——无快路径（锁被占用，或虽无持有者但等待队列非空）
+ *       时直接拒绝（{@code DENIED}），不排队；</li>
  *   <li>{@code -1}：排队等待，受客户端 {@code defaultWaitTimeout} 兜底；</li>
  *   <li>{@code >0}：限时等待该毫秒数，由客户端本地计时（对服务端等价于排队）。</li>
  * </ul>
@@ -37,7 +38,8 @@ import java.util.Objects;
 public record AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs) {
 
     /**
-     * 紧凑构造器：校验锁键非空、租约非负、等待模式不小于 -1。
+     * 紧凑构造器：校验锁键非空、锁类型非空、租约非负、等待模式不小于 -1
+     * （{@code -1} 合法，表示排队式）。
      */
     public AcquireSpec {
         Objects.requireNonNull(key, "key must not be null");
