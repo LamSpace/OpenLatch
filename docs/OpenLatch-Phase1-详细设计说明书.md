@@ -5,7 +5,7 @@
 | 项目名称 | **OpenLatch**                                                              |
 | 文档类型 | 详细设计说明书（Phase 1 / MVP）                                            |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0 |
-| 版本     | v1.1（P1-27 定案修订：§8.4/§1.2/§11-4）                                   |
+| 版本     | v1.2（变更 phase1-audit-remediation 回写：§3.2/§4/§5/§6/§8/§9 与实现对齐；修订记录见 §14）                                   |
 | 日期     | 2026-08-29                                                                 |
 | 作者     | Lam Tong                                                                   |
 | 状态     | 待评审                                                                     |
@@ -24,7 +24,7 @@
 | `openlatch-core`                | M1     | 纯 Java 锁语义核心（状态机、等待队列、租约、会话） |
 | `openlatch-server`              | M2     | Netty 单节点服务器                                 |
 | `openlatch-client`              | M3     | 客户端 SDK（异步内核 + 同步包装 + 看门狗 + 重连）  |
-| `openlatch-spring-boot-starter` | M4     | Spring Boot 3 自动装配 + 注解 + AOP                |
+| `openlatch-spring-boot-starter` | M4     | Spring Boot 4 自动装配 + 注解 + AOP（v1.2，§8.4 定案） |
 | `openlatch-examples`            | M4     | 示例与基准测试                                     |
 
 **不在范围内**：Raft 集群（Phase 2）、FairLock/Semaphore/CountDownLatch、监控、控制台、TLS/认证（Phase 3）。协议为这些能力预留字段，但不实现。
@@ -142,7 +142,7 @@ enum StatusCode {
   OVERLOADED      = 6;   // 触发服务端保护限额
   KEY_TOO_LONG    = 7;
   KEY_EMPTY       = 8;
-  INVALID_REQUEST = 9;   // 参数非法（如 lease 越界）
+  INVALID_REQUEST = 9;   // 参数非法（信封结构非法等；lease 越界不在此列，见 §4.6 钳制）
   NOT_LEADER      = 10;  // Phase 2 预留，Phase 1 不使用
   INTERNAL_ERROR  = 11;
 }
@@ -187,6 +187,7 @@ message HelloResponse {
 
 - 连接建立后，客户端必须先发 `HELLO`；服务端在收到合法 `HELLO` 前，对任何业务请求回 `INVALID_REQUEST`；
 - `client_protocol_version != 1` 时，服务端回 `INVALID_REQUEST` 并断连（不做隐式兼容，版本协商在 Phase 2 一并设计）；
+- `auth_token` 非空时（Phase 1 必须为空，§3.2.1 消息注释），按与版本不匹配同等处置：回 `INVALID_REQUEST` 并断连（v1.2 补记实现口径，防止携带凭据的客户端误以为已认证）；
 - `session_id` 为服务端 `ThreadLocalRandom` 生成的 long，连接断开即作废； **重连必然得到新 session**（概要设计 §6.4）。
 
 #### 3.2.2 获取与释放
@@ -196,7 +197,7 @@ message AcquireRequest {
   string   key       = 1;
   LockType lock_type = 2;
   int64    thread_id = 3;   // 客户端提供；与 session_id 共同构成锁归属
-  int64    lease_ms  = 4;   // 0 = 用服务端默认值；越界返回 INVALID_REQUEST
+  int64    lease_ms  = 4;   // 0 = 用服务端默认值；非 0 由服务端钳制到 [min,max]（§4.6，v1.2 口径统一）
   int64    wait_ms   = 5;   // -1 = 排队（受客户端总超时约束）；0 = 立即式；>0 由客户端本地计时，语义等价于 -1
 }
 
@@ -269,18 +270,25 @@ core/
 ├── CoreConfig            限额与默认租约配置（record）
 ├── Clock                 时间源接口；实现：SystemClock（生产）、测试用手工时钟
 ├── CoreEventListener     事件出口接口（通知队首等），由 server 层实现
+├── LockType              锁类型枚举（与 protocol 层一一对应，core 不依赖 protocol）
 ├── command/
-│   ├── AcquireCommand    (sessionId, requestId, key, LockType, threadId, requestedLeaseMs)
+│   ├── AcquireCommand    (sessionId, requestId, key, LockType, threadId, requestedLeaseMs,
+│   │                       queueIfBusy)——协议 wait_ms 由 server 层折算为 queueIfBusy
+│   │                       布尔（服务端不感知等待时限，§3.2.2）
 │   ├── ReleaseCommand    (sessionId, key, leaseToken, threadId)
 │   └── RenewCommand      (sessionId, key, leaseToken, requestedLeaseMs)
 ├── result/
 │   ├── AcquireResult     (Outcome, leaseToken, grantedLeaseMs, queuePosition)
-│   ├── ReleaseResult     (status, fullyReleased)
-│   ├── RenewResult       (status, newExpiresAtMs)
-│   └── Outcome           枚举：GRANTED / QUEUED / DENIED / REJECT_KEY / REJECT_QUEUE_FULL / REJECT_SESSION
+│   ├── ReleaseResult     (ReleaseStatus, fullyReleased)
+│   ├── ReleaseStatus     枚举：OK / INVALID_TOKEN / NOT_HELD / REJECT_SESSION
+│   ├── RenewResult       (ReleaseStatus, newExpiresAtMs)
+│   └── Outcome           枚举：GRANTED / QUEUED / DENIED / REJECT_KEY_EMPTY /
+│                          REJECT_KEY_TOO_LONG / REJECT_QUEUE_FULL / REJECT_SESSION
+│                          （key 两拒绝码分别映射协议 KEY_EMPTY / KEY_TOO_LONG）
 ├── lock/
 │   ├── LockTable         key → LockEntry 的映射与条目生命周期
 │   ├── LockEntry         单 key 状态：持有者、计数、租约、等待队列（条目内同步）
+│   ├── Owner             record(sessionId, threadId)——锁归属键（§4.4）
 │   └── Waiter            record(sessionId, requestId, lockType, threadId, enqueuedAtMs, notifyDeadlineMs)；
 │                          notifyDeadlineMs > 0 表示"已通知待重发"状态（§4.5）
 ├── lease/
@@ -347,19 +355,19 @@ public interface Clock {
 **判定规则（`acquire`，条目内同步执行）：**
 
 1. **会话校验**：`sessionId` 不在 `SessionRegistry` → `REJECT_SESSION`（对应协议 `SESSION_EXPIRED`）。
-2. **key 校验**：空 → `KEY_EMPTY`；超长（> `maxKeyLength`，默认 512 字节 UTF-8）→ `KEY_TOO_LONG`。
+2. **key 校验**：空 → `REJECT_KEY_EMPTY`（映射协议 `KEY_EMPTY`）；超长（> `maxKeyLength`，默认 512 字节 UTF-8）→ `REJECT_KEY_TOO_LONG`（映射 `KEY_TOO_LONG`）。
 3. **无持有者且等待队列为空**：直接授予。若条目无持有者但队列非空（队首正处于"已通知、待重发"窗口，见 §4.5），新请求者 **排队队尾**，不得越过在队者——FIFO 公平性优先于即时授予。
-4. **可重入再入**：写侧持有者 == 请求者且 `reentrant` → `writeCount++`， **租约刷新为整段新租期**，返回 `GRANTED`（同 token）。
-5. **读锁**：无写持有者 **且** 等待队列为空 → 加入 `readers` 授予。有写持有者或队列非空（哪怕队首是读者）→ 排队。该规则保证严格 FIFO，杜绝写者饥饿（概要设计 §4.1"服务器端 FIFO 公平等待"）。
-6. **其余情况**：`wait_ms == 0` → `DENIED`；否则入队，队列长度超过 `maxQueueDepthPerKey`（默认 4096）→ `REJECT_QUEUE_FULL`（对应 `OVERLOADED`）。
-7. **队首重发命中**：队列非空但请求者恰为队首、且与当前持有状态兼容（无冲突持有者）→ 出队并授予。这是 `AWAIT_NOTIFY → 重发 ACQUIRE` 的落地路径（§4.5）。
+4. **可重入再入**：写侧持有者 == 请求者且 `reentrant` → `writeCount++`， **租约刷新为整段新租期**——刷新值取本次请求的 `lease_ms`（0 用默认、非 0 钳制，同 §4.6；v1.2 按变更 phase1-audit-remediation design D2 定案：重入者由此获得调整租约的通道），返回 `GRANTED`（同 token）。
+5. **读锁**：无写持有者 **且** 等待队列为空 → 加入 `readers` 授予。有写持有者或队列非空（哪怕队首是读者）→ 排队。该规则保证严格 FIFO，杜绝写者饥饿（概要设计 §4.1"服务器端 FIFO 公平等待"）。**重入例外**：已在 `readers` 中的归属再入获取不受队列非空限制，直接计数加一并按规则 4 同一口径刷新全体读者共享租约（最后加入/再入者决定共享到期时刻；与 JUC 读写锁"读者重入不因写者等待而阻塞"惯例一致，v1.2 显式声明）。
+6. **其余情况**：`wait_ms == 0`（折算为 `queueIfBusy=false`）→ `DENIED`；否则入队，队列长度超过 `maxQueueDepthPerKey`（默认 4096）→ `REJECT_QUEUE_FULL`（对应 `OVERLOADED`）。
+7. **队首重发命中**：队列非空但请求的 `(sessionId, requestId)` 恰为队首等待者的 `(sessionId, requestId)`、且与当前持有状态兼容（无冲突持有者）→ 出队并授予（v1.2 明确匹配键为 `sessionId + requestId` 而非 Owner：队首若改换 requestId 重发将按普通新请求排队队尾，客户端契约 §3.2.3 要求同 id 重发）。这是 `AWAIT_NOTIFY → 重发 ACQUIRE` 的落地路径（§4.5）。命中时签发新凭证、新租期（按 `effectiveLeaseMs`）。
 
 **释放规则（`release`）：**
 
 1. token 不匹配 → `INVALID_TOKEN`（修复概要设计 §2.3 缺陷 1：任意客户端解锁）；
 2. 归属不匹配（理论上 token 匹配即归属匹配，防御性保留）→ `NOT_HELD`；
 3. 读锁：对应 reader 计数减一，归零移除；写侧：`writeCount` 减一；
-4. 计数归零 → 清除持有状态、从 `LeaseManager` 摘除租约，并对队首触发 `notifyHead` 事件；返回 `fullyReleased = true`。
+4. 计数归零 → 清除持有状态与条目内租约三元组（**不主动从 `LeaseManager` 堆中摘除**，其陈旧记录由到期扫描按 §4.6 的陈旧校验弹弃——v1.2 修正本条与 §4.6 的表述矛盾，以 §4.6 方案为准），并对队首触发 `notifyHead` 事件；返回 `fullyReleased = true`。
 
 **续租规则（`renew`）：** token 匹配 → `leaseExpiresAtMs = now + leaseMs`（受 `CoreConfig` 上下限钳制），更新 `LeaseManager`；否则 `INVALID_TOKEN` / `NOT_HELD`。
 
@@ -386,8 +394,8 @@ public interface Clock {
 
 ### 4.7 会话管理（服务端侧）
 
-- `SessionRegistry`：`sessionId → Set<String>`（该会话持有或等待过的 key）；`acquire`/排队时登记；
-- `sessionClosed(sessionId)`：遍历该会话的 key 集合（而非全表），逐条同步：写侧归属匹配 → 强制释放并通知队首；`readers` 中匹配 → 移除；等待队列中匹配 → 摘除并按 §4.5 规则补通知。清理完成后移除会话记录；
+- `SessionRegistry`：`sessionId → Set<String>`（该会话持有或等待过的 key）；凡通过会话与 key 校验的 `acquire` 均登记（v1.2 注明：立即式 `DENIED` 亦登记，清理集略大但无害）；
+- `sessionClosed(sessionId)`：**先原子移除会话记录**（此后新请求的会话权威校验必然失败，杜绝清理窗口内的漏登记），再遍历该会话的 key 集合（而非全表）逐条同步：写侧归属匹配 → 强制释放并通知队首；`readers` 中匹配 → 移除；等待队列中匹配 → 摘除并按 §4.5 规则补通知（v1.2 修正顺序表述：实现为"先移除记录、后清理"，与早期稿相反）；
 - 复杂度：O (会话触及的 key 数)，断连清理不随全局锁数退化；
 - 与租约构成双保险（概要设计 §6.4）：断连清理是即时主路径，租约到期覆盖"断连未检测到"（半开连接）的残余场景。
 
@@ -409,7 +417,7 @@ public interface Clock {
 
 1. `LockTable` 用 `ConcurrentHashMap`，条目创建用 `computeIfAbsent`，条目销毁惰性化——条目仅在"无持有者且无等待者"时从表中移除（在条目锁内做二次检查后 `remove(key, entry)`），避免移除/创建竞态；
 2. 单个条目的所有状态迁移（授予/排队/释放/到期/会话清理）都在该条目的内置锁（`synchronized(entry)`）内完成， **任何调用路径最多持有一个条目锁**，无锁序、无死锁；
-3. `LeaseManager` 内部自行同步（独立于条目锁；`expireDue` 先在堆内取出到期项，再逐条获取条目锁执行释放）；
+3. `LeaseManager` 内部自行同步（独立于条目锁；`expireDue` 先在堆内取出到期项，再逐条获取条目锁执行释放）。v1.2 补注：授予/续租路径存在 **条目锁 → 堆锁** 的嵌套获取（`expireDue` 方向相反：堆锁内不取条目锁），两向不成环、锁序全局一致，无死锁；
 4. `SessionRegistry` 用 `ConcurrentHashMap<Long, Set<String>>` + 并发 Set；
 5. `CoreEventListener` 回调在条目锁 **外**触发（先收集待通知列表，解锁后统一回调），防止回调路径（写 Channel）与条目锁交叉持有。
 
@@ -426,13 +434,18 @@ server/
 ├── net/
 │   ├── ServerBootstrapFactory   Netty ServerBootstrap 构建
 │   ├── ServerChannelInitializer pipeline 装配
-│   ├── IdleEventHandler         空闲检测 → 断连
-│   └── EnvelopeCodecHandler     编解码异常 → 错误响应/断连
+│   ├── EnvelopeCodecHandler     编解码异常 → 日志/断连
+│   └── ServerSessionHandler     连接级业务入口：握手门闩、分发、断连清理，
+│                                空闲检测（IdleStateHandler 事件在此消费→断连）
+│                                （v1.2：早期稿的 IdleEventHandler 不独立成类，
+│                                空闲裁决并入 ServerSessionHandler.userEventTriggered）
 ├── dispatch/
-│   ├── RequestDispatcher        Envelope → core 命令；core 结果 → Envelope
-│   └── IdempotencyWindow        （可选）已完成 requestId 的短缓存，见 §5.5
+│   └── RequestDispatcher        Envelope → core 命令；core 结果 → Envelope
+│                                （IdempotencyWindow 判定不实现，见 §5.5）
 ├── session/
-│   └── ServerSession            Channel 绑定：sessionId、inflight 计数
+│   ├── ServerSession            Channel 绑定：sessionId、inflight 计数
+│   └── ServerSessionRegistry    sessionId → ServerSession 反查表，
+│                                供 NotifyEventBridge 按 sessionId 定位 Channel
 └── NotifyEventBridge            CoreEventListener 实现：事件 → AWAIT_NOTIFY 写回
 ```
 
@@ -441,6 +454,8 @@ server/
 ```
 入站: LengthFieldBasedFrameDecoder(1MiB,0,4,0,4)
         → ProtobufDecoder(Envelope.getDefaultInstance())
+        → EnvelopeCodecHandler（编解码异常守卫，v1.2 补画：位于 decoder 之后，
+          先于业务 handler 捕获向 tail 传播的解码异常）
         → IdleStateHandler(read=60s)
         → ServerSessionHandler
 出站: ProtobufEncoder
@@ -478,9 +493,9 @@ server/
 | LOCK_RELEASE | 同上，`ReleaseResponse`                                                      |
 | LEASE_RENEW  | 同上，`LeaseRenewResponse`                                                   |
 | PING         | 不回复（活动信号已被 IdleStateHandler 计入）                                 |
-| 未知/不匹配  | `INVALID_REQUEST`；编解码失败 → 记录日志并断连                               |
+| 未知/不匹配  | `INVALID_REQUEST`；编解码失败 → 记录日志并断连；`type` 为协议未定义数值（枚举越界）→ 回 `INVALID_REQUEST`（响应 type 以 `MESSAGE_TYPE_UNKNOWN` 占位、回显 `request_id`）且 **不断连**（v1.2，变更 phase1-audit-remediation D1） |
 
-响应一律回显请求的 `request_id`。单连接未完成请求数超过 `maxInflightPerConnection`（默认 1024）→ 回 `OVERLOADED`（概要设计 §7 自我保护）。
+响应一律回显请求的 `request_id`。单连接未完成请求数超过 `maxInflightPerConnection`（默认 1024）→ 回 `OVERLOADED`（概要设计 §7 自我保护）。分发过程抛出的未预期异常兜底为 `INTERNAL_ERROR` 响应并记 WARN 日志，MUST NOT 造成"不回包、不断连"的静默悬挂（v1.2，design D1）。
 
 ### 5.5 幂等窗口（可选实现）
 
@@ -497,7 +512,7 @@ server/
 
 | 配置键                                               | 默认值             | 说明                                 |
 |------------------------------------------------------|--------------------|--------------------------------------|
-| `openlatch.server.port`                              | `9410`             | 监听端口                             |
+| `openlatch.server.port`                              | `9410`             | 监听端口；`0` 表示由操作系统分配临时端口，启动日志打印实际端口（v1.2） |
 | `openlatch.server.worker-threads`                    | `2 × CPU`          | Netty Worker 线程数                  |
 | `openlatch.server.session.idle-timeout-ms`           | `60000`            | 连接空闲断开                         |
 | `openlatch.server.lease.default-ms`                  | `30000`            | 默认租约（概要设计 §6.3）            |
@@ -525,17 +540,24 @@ client/
 ├── OpenLatchClient          入口：builder 构建；newXxxLock 工厂；shutdown
 ├── OLock                    同步锁接口（JUC 风格）
 ├── OReadWriteLock           读写锁门面：readLock() / writeLock()
+├── LockType                 公开锁类型枚举（映射协议 LockType；v1.2 补列）
+├── AcquireSpec              异步获取参数载体（§6.3 acquireAsync 入参；v1.2 补列）
 ├── LockGrant                record(leaseToken, grantedLeaseMs)
 ├── LockLostListener         函数式接口：锁丢失回调
-├── OpenLatchException       运行时异常基类
+├── OpenLatchException       运行时异常基类（携可选 StatusCode）
 │   ├── LockAcquisitionTimeoutException
 │   ├── ServerUnavailableException
-│   └── LockLostException
+│   ├── LockLostException
+│   └── OpenLatchTimeoutException 每请求超时（§6.4 点名类；v1.2 补列）
+├── RemoteLock               OLock 包私有实现（v1.2 补列）
+├── RemoteReadWriteLock      OReadWriteLock 包私有实现（v1.2 补列）
 └── internal/
     ├── ConnectionManager    连接与重连状态机
+    ├── ClientChannelHandler 入站收口 handler（响应/通知/断连事件转接；v1.2 补列）
     ├── SessionContext       当前 sessionId、requestId 分配器
     ├── RequestMultiplexer   requestId ↔ CompletableFuture 关联 + 请求超时
     ├── AwaitTracker         QUEUED 挂起 / AWAIT_NOTIFY 处理 / 重发
+    ├── LockDeniedException  DENIED 的内部标记异常（v1.2 补列）
     ├── Watchdog             持锁续租调度
     ├── HeldLockRegistry     本地持锁簿记（key → token/到期/监听器）
     └── ClientConfig         客户端配置
@@ -556,7 +578,7 @@ DISCONNECTED ──connect()──▶ CONNECTING ──成功──▶ HELLO_SEN
     1. 所有挂起中的获取/释放/续租 future → `ServerUnavailableException`（等待中快速失败，概要设计 §4.3 标准 2）；
     2. 每个本地持锁计算"失锁时刻" `lostAt = 上次成功续租 + grantedLeaseMs`；
     3. 若重连在 `lostAt` 前成功：旧 session 已被服务端清理，旧锁必然已失效 → 重连成功时 **立即**对全部旧持锁触发 `LockLostListener`；若到 `lostAt` 仍未重连成功 → 到时触发回调（覆盖半开连接场景，此时服务端也是靠租约释放）。
-- 重连成功后 `sessionId` 更换，`requestId` 重新从 1 分配；使用旧 session 的残留响应按 `requestId` 无法匹配，直接丢弃。
+- 重连成功后 `sessionId` 更换，`requestId` 重新从头分配（v1.2 细化：HELLO 占用首个 id，业务请求自 2 起）；断连瞬间 `failAll` 清空全部在途登记，因此旧会话残留响应不会与新会话挂起项误配——无匹配项的残留响应路由至等待跟踪组件的孤儿处理：与放弃/重复授予场景对应的授予按 §6.5 补偿 RELEASE 归还，其余忽略（v1.2 修正"直接丢弃"的早期表述，实际行为为其超集）。
 
 ### 6.3 公开 API
 
@@ -581,6 +603,8 @@ public final class OpenLatchClient {
     public void shutdown();                                // 尽力释放持锁后关闭
 }
 ```
+
+生命周期补全（v1.2，与实现对齐）：`build()` 即异步发起首次连接；`connectAsync()` 返回在首次进入 ACTIVE 时完成的 future；`isActive()` / `isClosed()` 观测状态；实现 `AutoCloseable`（`close()` 等价 `shutdown()`）。**未处于 ACTIVE 会话时 `acquireAsync` 立即以 `ServerUnavailableException` 失败**，不暂存待发（与 Redisson 惯例一致；等待中的请求经 §6.2 断连快速失败路径处理）。
 
 同步包装（JUC 风格）：
 
@@ -611,6 +635,7 @@ public interface OLock {
 - `lock()` = `tryLock(defaultWaitTimeout)`；`defaultWaitTimeout` 默认 30s，可配置——保证概要设计 §4.2"任何 API 不存在无限阻塞路径"；
 - `unlock()` 在本地非持锁线程调用 → 抛 `IllegalMonitorStateException`（与 JUC 一致）；
 - 可重入计数由服务端维护，客户端每次 `unlock()` 发送一次 RELEASE；本地 `HeldLockRegistry` 只记录首个 token 与监听器，不重复计数，避免双账本漂移；
+- `onLockLost` 登记的单锁监听按锁键归属：该键锁**完全释放**（服务端计数归零且本地无人重持）后登记被丢弃，之后该键重新获取并丢锁时旧监听器不触发，需重新注册（v1.2，design D4——监听表不随历史 key 基数无界增长）；
 - `tryLock(waitTime)` 到时未授予： **取消即放弃等待**，客户端仅将本地 future 置为超时失败，不向服务端发送取消消息。服务端的兜底机制：
     - 该等待项后续若轮到队首并被通知，因无人重发，将在 **队首响应超时**（§4.5，默认 5s）后被移出，队列继续前进；
     - 若该等待项尚未轮到队首，则保持排队，直到其成为队首后走同一路径被回收，或会话断连时被清理；
@@ -646,7 +671,8 @@ acquireAsync(spec)
 | 通知到达时 future 已超时/取消 | 按 `requestId` 找不到 tracker → 忽略该通知；不重发                                                                              |
 | 重发的 ACQUIRE 得到 QUEUED    | 正常：保持挂起等待下一次通知                                                                                                    |
 | 通知与断连同时发生            | 断连处理先行清空所有 tracker（§6.2），通知被忽略                                                                                |
-| 同一请求收到两次通知          | 重发幂等：第二次重发返回 QUEUED 或重复授予判定由服务端完成；客户端以首个 OK 为准，重复 OK 时释放（发送 RELEASE 归还）——测试覆盖 |
+| 同一请求收到两次通知          | 重发幂等：第二次重发返回 QUEUED 或重复授予判定由服务端完成；客户端以首个 OK 为准，重复 OK 时释放（发送 RELEASE 归还）——测试覆盖。两次重发在同 requestId 上交叠时，多路复用层将旧在途项以 superseded 异常完成后让位新项，任何登记均有界完成（v1.2，design D3 纵深防御） |
+| 重发请求自身超时/发送失败     | **不判等待失败**（v1.2，D1）：已 QUEUED 过的等待保持挂起，等待下一次通知（服务端队列位置仍有效，超时的只是一次探测）；从未排队过的首发请求失败则原样上抛 |
 
 ### 6.6 看门狗（Watchdog）
 
@@ -655,6 +681,8 @@ acquireAsync(spec)
 - 失败判定：
     - 响应 `INVALID_TOKEN` / `NOT_HELD` / `SESSION_EXPIRED` → **锁已失效**：停止续租，触发 `LockLostListener`（携带 `LockLostException` 原因）；
     - 请求超时 → 记录连续失败次数，下一周期重试； **连续 2 次超时** → 判定失效并触发回调；
+    - `OVERLOADED` / `INTERNAL_ERROR` 等瞬时状态 → 与超时同等计为一次连续失败（v1.2，与实现对齐；服务端过载不应立即判死锁）；
+    - 断连（连接非 ACTIVE）→ 本周期跳过且**不计数**（v1.2，D5）：失锁裁决归 §6.2 的 `lostAt` 机制，看门狗不与重连竞争判定权；
     - 成功 → 更新本地到期时间，重置失败计数；
 - `unlock()` 成功（`fullyReleased`）后注销续租任务；
 - 锁丢失回调在独立执行器上调用（默认单线程），用户回调异常被捕获并记日志，不影响其他续租任务。
@@ -712,7 +740,7 @@ acquireAsync(spec)
 - `OpenLatchAutoConfiguration`：
     - `@EnableConfigurationProperties(OpenLatchProperties.class)`；
     - Bean `OpenLatchClient`（`@ConditionalOnMissingBean`，允许用户自定义覆盖）；
-    - Bean `OpenLatchAspect`（`@ConditionalOnProperty("openlatch.enabled", default true)`）；
+    - Bean `OpenLatchAspect`（`@ConditionalOnProperty("openlatch.enabled", default true)`）——v1.2 注记：实现中切面 Bean 拆至 `OpenLatchAspectConfiguration`（另加 `@ConditionalOnClass(Aspect.class)` 与 `@ConditionalOnBean(OpenLatchClient.class)` 守卫），两个自动配置类均经 `AutoConfiguration.imports` 注册；
     - 应用关闭时调用 `client.shutdown()`（Bean destroy 回调）。
 
 ### 8.2 配置属性（`openlatch.*`）
@@ -734,7 +762,8 @@ acquireAsync(spec)
 public @interface OpenLatch {
     String key();                          // SpEL 表达式
 
-    LockMode type() default LockMode.REENTRANT;   // REENTRANT/SIMPLE/READ/WRITE
+    LockType type() default LockType.REENTRANT;   // REENTRANT/SIMPLE/READ/WRITE
+                                                  // 复用 client 公开枚举，不另造 LockMode（v1.2 定案）
 
     long waitTime() default -1;            // -1 = 用 lock()（受全局兜底超时）；0 = 立即式；>0 = 限时
 
@@ -746,13 +775,13 @@ public @interface OpenLatch {
 
 切面流程（`OpenLatchAspect`，`@Around("@annotation(openLatch)")`）：
 
-1. **key 求值**：SpEL `StandardEvaluationContext` 注入方法形参（`#paramName`）；表达式编译结果按"方法 + 表达式"缓存；
+1. **key 求值**：SpEL `StandardEvaluationContext` 注入方法形参（`#paramName`）；表达式的**解析结果**（SpelExpression 树，解释模式求值，非 SpEL Compiler 编译模式——v1.2 用词修正）按"方法 + 表达式"缓存；
     - 前置要求：编译开启 `-parameters`（Starter README 明示；参数名解析用 `DefaultParameterNameDiscoverer`）；
     - 求值结果必须为非空字符串，否则抛 `OpenLatchException`。
-2. **获取锁**：按 `(key, type)` 从 `OLock` 缓存取锁句柄；`waitTime < 0 → lock()`，`== 0 → tryLock()`，`> 0 → tryLock(waitTime)`；
-3. 获取失败（超时）→ 抛 `LockAcquisitionTimeoutException`，业务方法不执行；
-4. 获取成功 → `try { 执行业务 } finally { unlock() }`；
-5. READ/WRITE 类型映射到 `newReadWriteLock(key).readLock()/writeLock()`。
+2. **获取锁**（v1.2 按 design D7 定案改写）：切面**不维护 `OLock` 句柄缓存**，直接按 `(key, type, waitTime, leaseTime)` 构造 `AcquireSpec` 走 `client.acquireAsync`——单一路径避免句柄缓存与同步包装的双重簿记；`waitTime < 0 → 排队式获取，兜底超时 = defaultWaitTimeout`（等价 `lock()` 语义），`== 0 → 立即式`，`> 0 → 限时等待`；
+3. 获取失败（超时或立即式 DENIED）→ 抛 `LockAcquisitionTimeoutException`，业务方法不执行；
+4. 获取成功 → `try { 执行业务 } finally { 释放 }`（释放经 `releaseAsync`，携带获取返回的 `leaseToken`；丢锁在途的释放结果按锁丢失守卫处理）；
+5. READ/WRITE 类型：`LockType.READ/WRITE` 直接随 `AcquireSpec` 提交服务端裁决（v1.2，design D7——不再映射到 `newReadWriteLock(...).readLock()/writeLock()`；`OReadWriteLock` 门面保留给编程式 API，见 §9 `ReadWriteExample`）。
 
 **事务交互说明**：切面默认 Bean 方法级拦截；若业务同时用 `@Transactional`，锁切面的顺序（`@Order`）默认低于事务切面，即 **锁在事务外层**——保证事务提交后才释放锁。该顺序写入 README 并在测试中锁定。
 
@@ -770,7 +799,7 @@ public @interface OpenLatch {
 | `ConcurrencyExample`      | 多线程竞争同一互斥锁，打印授予顺序（FIFO 可观察）                |
 | `ReadWriteExample`        | 读写并发                                                         |
 | `WatchdogExample`         | 长任务 + 看门狗续租日志；人为停止续租观察锁丢失回调              |
-| `SpringAnnotationExample` | SB3 应用 + `@OpenLatch`（SpEL key）                              |
+| `SpringAnnotationExample` | Spring Boot 4.0.x 应用 + `@OpenLatch`（SpEL key；v1.2 按 §8.4 定案更新，原"SB3"）                              |
 | `BenchmarkMain`           | 单节点 `tryLock` 吞吐与授予延迟（JMH 或手写热身+计时，记录基线） |
 
 ---
@@ -893,7 +922,18 @@ public @interface OpenLatch {
 | P1-27 | Spring Boot 兼容性验证 | 最新 Spring Boot 3.5.x × Java 25 兼容矩阵（实施计划风险 6）；不兼容时定案备选方案并回写 §8.4 | M3    | 验证结论记录在案                            |
 | P1-28 | 自动装配               | `OpenLatchProperties`、`AutoConfiguration.imports`、client Bean、shutdown 回调               | P1-27 | 上下文加载、Bean 注入、enabled 开关测试通过 |
 | P1-29 | 注解与切面             | `@OpenLatch`、SpEL 求值与缓存、`-parameters` 要求、与 `@Transactional` 顺序                  | P1-28 | 切面行为单元测试通过（含锁在事务外层断言）  |
-| P1-30 | Starter 集成测试       | 内嵌 SB 3.2+ 上下文：互斥执行、SpEL 按参数求值、获取失败抛异常、READ/WRITE                   | P1-29 | 集成用例全绿                                |
+| P1-30 | Starter 集成测试       | 内嵌 SB 4.0.x+ 上下文（v1.2 口径修订，§8.4）：互斥执行、SpEL 按参数求值、获取失败抛异常、READ/WRITE                   | P1-29 | 集成用例全绿                                |
 | P1-31 | examples               | §9 六个示例全部可独立运行                                                                    | P1-30 | 逐示例运行通过                              |
 | P1-32 | 基准基线               | §10.5 指标：吞吐（无竞争/竞争）、授予延迟 P99；记录基线                                      | P1-31 | 基线报告存档                                |
 | P1-33 | 文档与验收闭环         | README、公开 API Javadoc 全覆盖、§11 四条验收证据收集                                        | P1-32 | §11 验收表逐项闭环；**Phase 1 发布**        |
+
+
+---
+
+## 14. 修订记录
+
+| 版本 | 日期 | 变更 | 关联 |
+|------|------|------|------|
+| v1.0 | 2026-08 | 初版（M1–M4 详设） | 概要设计 v1.0 |
+| v1.1 | 2026-08-29 | P1-27 定案修订：§8.4 Boot 4.0.3、§1.2 技术基线、§11-4 验收口径 | 变更 `m4-starter-examples-docs` design D1 |
+| v1.2 | 2026-08-29 | 核对回写（变更 `phase1-audit-remediation`）：修文档内部矛盾 2 处（§4.4/§4.6 堆摘除、§3.2.2/§4.6 lease 口径）；§4 实现对齐（Outcome 细分、`queueIfBusy`、Owner/ReleaseStatus 补列、重入刷新口径 D2、读侧重入 FIFO 例外、规则 7 匹配键、sessionClosed 顺序、堆锁嵌套论证补漏）；§5 类图/pipeline 对齐（IdleEventHandler 并入、EnvelopeCodecHandler/ServerSessionRegistry 补列、未知 type 数值与分发兜底 D1、port=0）；§6 类树补列与 D1/D3/D4/D5 定案回写；§8/§9 定案回写（`LockType` 命名、切面直通 `acquireAsync` D7、SpEL 解析缓存措辞、Boot 4 示例、§13 P1-30 口径） | 核对报告四路（core+protocol / server / client / starter+验收） |
