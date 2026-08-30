@@ -30,6 +30,8 @@
         <netty.version>4.1.137.Final</netty.version>
         <slf4j.version>2.0.17</slf4j.version>
         <spring-boot.version>4.0.3</spring-boot.version>
+        <!-- Phase 2 S1 定案的 Raft 库（详设 §2.1；传输层全着色，与主干 protobuf/netty 零类路径交集） -->
+        <ratis.version>3.3.0</ratis.version>
 
         <!-- 测试依赖 -->
         <junit.version>5.11.4</junit.version>
@@ -72,6 +74,40 @@
                 <artifactId>assertj-core</artifactId>
                 <version>${assertj.version}</version>
                 <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-server</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-server</artifactId>
+                <version>${ratis.version}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-common</artifactId>
+                <version>${ratis.version}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-grpc</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-client</artifactId>
+                <version>${ratis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ratis</groupId>
+                <artifactId>ratis-metrics-default</artifactId>
+                <version>${ratis.version}</version>
             </dependency>
             <!--
               Spring Boot BOM 置于最后导入：dependencyManagement 的 import 冲突取先声明者，

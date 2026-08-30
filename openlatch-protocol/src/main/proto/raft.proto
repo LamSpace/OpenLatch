@@ -1,0 +1,120 @@
+// OpenLatch Phase 2 服务端内部复制消息（详设 §4.2 / §7.1）。
+// 本文件的消息仅在 Raft 副本之间与状态机应用路径使用，客户端不收发：
+// MUST NOT 被引用进 Envelope oneof（客户端 wire format 零扰动）。
+// 编号纪律：已发布的字段号与枚举值即持久化日志格式的兼容性契约，
+// 后续变更 MUST NOT 变更或复用（协议层有冻结测试锁证）。
+syntax = "proto3";
+
+package openlatch.raft;
+
+import "openlatch.proto";
+
+option java_package = "io.github.lamspace.openlatch.protocol.raft";
+option java_multiple_files = true;
+option java_outer_classname = "RaftProto";
+
+// 复制条目类型（详设 §4.2）。编号稳定：0 保留为未知值。
+enum RaftEntryType {
+  RAFT_ENTRY_UNKNOWN   = 0;
+  SESSION_OPEN         = 1;  // 会话登记（接入节点 HELLO 时提交）
+  SESSION_CLOSE        = 2;  // 会话关闭（断连传播 / 失联批量清理）
+  LOCK_ACQUIRE_ENTRY   = 3;  // 获取锁（仅"经复制授予/排队裁决"语义）
+  LOCK_RELEASE_ENTRY   = 4;  // 释放锁
+  LEASE_RENEW_ENTRY    = 5;  // 续租
+  LEASE_EXPIRE_ENTRY   = 6;  // 到期释放（Leader 扫描驱动，回放按 token 幂等）
+  NOOP                 = 7;  // Leader 当选后确认提交位点；亦作失联探针载体
+}
+
+// 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
+message RaftLogEntry {
+  RaftEntryType type              = 1;
+  int64         seq               = 2;  // Leader 分配的全局序号，用于幂等与诊断
+  int64         wall_clock_ms     = 3;  // Leader 发起时刻；apply 期间经条目时刻注入（§4.3）
+  bytes         command_payload   = 4;  // 复用 Phase 1 请求消息序列化 + session_id 包装
+}
+
+// SESSION_OPEN / SESSION_CLOSE 载荷。session_id 为逻辑会话 id（nodeId<<32|localSeq）。
+message SessionPayload {
+  int64 session_id = 1;
+}
+
+// LOCK_ACQUIRE_ENTRY 载荷。request_id 显式携带（Phase 1 中位于 Envelope，
+// 条目无 Envelope 上下文）；queue_if_busy 由 request.wait_ms != 0 导出，
+// 条目内不重复存储；应用侧引擎调用恒不登记等待项（design D9/D12）。
+message AcquirePayload {
+  int64                session_id  = 1;
+  int64                request_id  = 2;
+  openlatch.AcquireRequest request = 3;
+}
+
+// LOCK_RELEASE_ENTRY 载荷。
+message ReleasePayload {
+  int64                  session_id  = 1;
+  openlatch.ReleaseRequest request   = 2;
+}
+
+// LEASE_RENEW_ENTRY 载荷。
+message RenewPayload {
+  int64                      session_id  = 1;
+  openlatch.LeaseRenewRequest request    = 2;
+}
+
+// LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
+// wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
+message ExpirePayload {
+  string key         = 1;
+  int64  lease_token = 2;
+}
+
+// 状态机应用回执：apply 结果（非复制状态，仅 Leader 用于应答客户端）。
+enum ApplyStatus {
+  APPLY_STATUS_UNKNOWN = 0;
+  OK                   = 1;  // 授予 / 释放 / 续租 / 会话与到期条目成功应用
+  QUEUED               = 2;  // 需排队（Leader 在应用点登记本地等待队列，§4.5/D3）
+  DENIED               = 3;  // 立即式获取被拒
+  NOT_HELD             = 4;
+  INVALID_TOKEN        = 5;
+  REJECT_SESSION       = 6;  // sessionId 未在复制状态中登记
+  QUEUE_FULL           = 7;  // 触发单 key 等待深度限额
+  INTERNAL_ERROR       = 8;  // 条目无法解析或应用异常
+}
+
+// 应用回执载荷。字段按条目类型择用：
+// 授予：lease_token/granted_lease_ms/lease_expires_at_ms；排队：queue_position；
+// 释放：fully_released；续租：lease_expires_at_ms；
+// 释放/到期/会话关闭（且实际释放了持锁）：freed_keys —— 双写核算给出的
+// "本次应用完全空出的 key"，Leader 侧等待队首唤醒的唯一依据（design D9，
+// 非复制状态，仅回执携带）。
+message ApplyResult {
+  ApplyStatus status              = 1;
+  int64       lease_token         = 2;
+  int64       granted_lease_ms    = 3;
+  int64       lease_expires_at_ms = 4;
+  int32       queue_position      = 5;
+  bool        fully_released      = 6;
+  repeated string freed_keys      = 7;
+}
+
+// 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
+// 内容 = 复制状态全集：锁条目 + 会话注册表；等待队列与本地配置不入快照。
+// 会话归属节点可由 session_id 高位（nodeId）导出，注册表即会话 id 集合。
+// 序列化序即语义序：锁条目按授予先后保持插入序，digest 跨节点可比。
+message SnapshotHolder {
+  int64 session_id = 1;  // 逻辑会话 id
+  int64 thread_id  = 2;
+  int32 count      = 3;  // 该 (session, thread) 的持有计数（重入）
+}
+
+message SnapshotLock {
+  string  key               = 1;
+  openlatch.LockType lock_type    = 2;
+  int64   lease_token       = 3;
+  int64   expires_at_ms     = 4;  // 条目时刻 + 生效租期（EntryClock 确定化语义的产物）
+  int64   lease_ms          = 5;  // 实际生效租期（快照重建回灌用）
+  repeated SnapshotHolder holders = 6;
+}
+
+message SnapshotState {
+  repeated SnapshotLock locks    = 1;
+  repeated int64        sessions = 2;  // 已登记逻辑会话 id 集合（含归属 nodeId 高位）
+}

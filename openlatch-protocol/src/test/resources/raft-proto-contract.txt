@@ -1,0 +1,64 @@
+# raft.proto 编号契约冻结基准（详设 §4.2 / §7.1）。
+# 由 RaftProtoContractFreezeTest 与生成描述符逐行比对。
+# 纪律：已发布字段的名称与编号 MUST NOT 变更或复用；新增字段只许追加并同步本文件。
+enum RaftEntryType
+  RAFT_ENTRY_UNKNOWN 0
+  SESSION_OPEN 1
+  SESSION_CLOSE 2
+  LOCK_ACQUIRE_ENTRY 3
+  LOCK_RELEASE_ENTRY 4
+  LEASE_RENEW_ENTRY 5
+  LEASE_EXPIRE_ENTRY 6
+  NOOP 7
+enum ApplyStatus
+  APPLY_STATUS_UNKNOWN 0
+  OK 1
+  QUEUED 2
+  DENIED 3
+  NOT_HELD 4
+  INVALID_TOKEN 5
+  REJECT_SESSION 6
+  QUEUE_FULL 7
+  INTERNAL_ERROR 8
+message RaftLogEntry
+  type 1
+  seq 2
+  wall_clock_ms 3
+  command_payload 4
+message SessionPayload
+  session_id 1
+message AcquirePayload
+  session_id 1
+  request_id 2
+  request 3
+message ReleasePayload
+  session_id 1
+  request 2
+message RenewPayload
+  session_id 1
+  request 2
+message ExpirePayload
+  key 1
+  lease_token 2
+message ApplyResult
+  status 1
+  lease_token 2
+  granted_lease_ms 3
+  lease_expires_at_ms 4
+  queue_position 5
+  fully_released 6
+  freed_keys 7
+message SnapshotHolder
+  session_id 1
+  thread_id 2
+  count 3
+message SnapshotLock
+  key 1
+  lock_type 2
+  lease_token 3
+  expires_at_ms 4
+  lease_ms 5
+  holders 6
+message SnapshotState
+  locks 1
+  sessions 2

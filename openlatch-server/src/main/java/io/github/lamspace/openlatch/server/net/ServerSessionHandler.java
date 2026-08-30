@@ -25,6 +25,7 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.server.raft.ClusterRuntime;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import io.netty.channel.ChannelHandler;
@@ -80,17 +81,19 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     /** 日志器：分发兜底路径记 WARN（含堆栈），供运维定位未预期异常。 */
     private static final Logger log = LoggerFactory.getLogger(ServerSessionHandler.class);
 
-    /** 锁语义核心，会话开关与断连清理经此驱动。 */
+    /** 锁语义核心，会话开关与断连清理经此驱动（单机模式；集群模式为 {@code null}）。 */
     private final CoreEngine core;
     /** 服务器配置，提供在途限额等自我保护参数。 */
     private final ServerConfig config;
     /** 会话注册表，断连时摘除 sessionId → 会话映射。 */
     private final ServerSessionRegistry registry;
-    /** 请求分发器，已握手业务消息经此映射为 core 命令。 */
+    /** 请求分发器，已握手业务消息经此映射为 core 命令（单机模式）。 */
     private final RequestDispatcher dispatcher;
+    /** 集群运行时（非空即集群模式：HELLO/写请求/断连全部改走复制路径）。 */
+    private final ClusterRuntime cluster;
 
     /**
-     * 构造会话处理器（共享实例，无连接级可变状态）。
+     * 构造会话处理器（共享实例，无连接级可变状态；单机模式）。
      *
      * @param core       锁语义核心
      * @param config     服务器配置（限额）
@@ -99,10 +102,27 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
      */
     public ServerSessionHandler(CoreEngine core, ServerConfig config,
                                 ServerSessionRegistry registry, RequestDispatcher dispatcher) {
+        this(core, config, registry, dispatcher, null);
+    }
+
+    /**
+     * 构造会话处理器（集群模式：{@code cluster} 非空时握手、写请求与断连
+     * 清理改走复制路径，{@code core}/{@code dispatcher} 不再被触碰）。
+     *
+     * @param core       锁语义核心（集群模式传 {@code null}）
+     * @param config     服务器配置（限额）
+     * @param registry   会话注册表
+     * @param dispatcher 请求分发器（集群模式传 {@code null}）
+     * @param cluster    集群运行时，{@code null} 表示单机模式
+     */
+    public ServerSessionHandler(CoreEngine core, ServerConfig config,
+                                ServerSessionRegistry registry, RequestDispatcher dispatcher,
+                                ClusterRuntime cluster) {
         this.core = core;
         this.config = config;
         this.registry = registry;
         this.dispatcher = dispatcher;
+        this.cluster = cluster;
     }
 
     /**
@@ -145,6 +165,24 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.OVERLOADED));
             return;
         }
+        if (cluster != null) {
+            // 集群路径：应答异步于应用回执（design D4），endRequest 由
+            // ClusterRequestHandler 在写完成处终结；PING 仍即时终结记账。
+            switch (msg.getType()) {
+                case LOCK_ACQUIRE -> cluster.requestHandler()
+                        .handleAcquire(session, msg, ctx);
+                case LOCK_RELEASE -> cluster.requestHandler()
+                        .handleRelease(session, msg, ctx);
+                case LEASE_RENEW -> cluster.requestHandler()
+                        .handleRenew(session, msg, ctx);
+                case PING -> session.endRequest();
+                default -> {
+                    ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST))
+                            .addListener(f -> session.endRequest());
+                }
+            }
+            return;
+        }
         Envelope resp;
         try {
             resp = dispatcher.dispatch(session, msg);
@@ -178,7 +216,13 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             long sessionId = session.sessionId();
             registry.remove(sessionId);
             if (session.isHandshaken()) {
-                core.sessionClosed(sessionId);
+                if (cluster != null) {
+                    // 集群路径：断连清理经 SESSION_CLOSE 条目传播到全副本
+                    // （§5.2 规则 3，含失败退避重试）。
+                    cluster.sessionCoordinator().submitClose(sessionId);
+                } else {
+                    core.sessionClosed(sessionId);
+                }
             }
         }
         ctx.fireChannelInactive();
@@ -226,6 +270,11 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             // 版本不匹配或携带认证令牌（Phase 1 必须为空）：拒绝并断连（设计说明书 §3.2.1）。
             ctx.writeAndFlush(helloResponse(msg.getRequestId(), StatusCode.INVALID_REQUEST, 0));
             ctx.close();
+            return;
+        }
+        if (cluster != null) {
+            // 集群路径：SESSION_OPEN 经共识确认后回响应（design D12）。
+            cluster.sessionCoordinator().handleHello(ctx, session, msg);
             return;
         }
         long sessionId = core.sessionOpened();
