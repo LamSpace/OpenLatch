@@ -21,9 +21,7 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -62,7 +60,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *       P2-19 混沌测试横扩（此处以单驱动串行 + token 审计覆盖最小面）。</li>
  * </ol>
  *
- * <p>产物：结构化演练报告写入 {@code docs/failover-drill-<日期>.md}。
+ * <p>产物：结构化演练报告追加写入仓库根 {@code docs/failover-drill-<日期>.md}
+ * （failsafe 工作目录为模块域，故落盘路径取 {@code ../docs/}）；节点子进程
+ * 日志落 {@code target/drill-logs/} 供失败复盘；杀点前打印三节点角色快照。
  */
 @Tag("drill")
 @Timeout(value = 180, unit = TimeUnit.SECONDS)
@@ -102,6 +102,7 @@ class LeaderKillDrillIT {
                     Thread.currentThread().threadId(), 3_000, -1)).get(WAIT_SECONDS, TimeUnit.SECONDS);
 
             // ——计时开始：kill -9 当值 Leader（不触发优雅让位）——
+            logRoles("A:kill前", nodes);
             long t0 = System.currentTimeMillis();
             leader.process().destroyForcibly();
             leader.process().waitFor(10, TimeUnit.SECONDS);
@@ -189,6 +190,7 @@ class LeaderKillDrillIT {
             Node victim = nodes.stream()
                     .filter(n -> n != leader && !isLeaderNode(n))
                     .findFirst().orElseThrow();
+            logRoles("B:kill前", nodes);
             victim.process().destroyForcibly();
             victim.process().waitFor(10, TimeUnit.SECONDS);
 
@@ -209,6 +211,20 @@ class LeaderKillDrillIT {
                 }
             }
         }
+    }
+
+    /**
+     * 杀点前角色快照：逐节点 HELLO 自报 hint，供失败复盘（判杀对象角色、
+     * 定位提示漂移；打印走 stdout 入 failsafe 日志）。
+     */
+    private static void logRoles(String phase, List<Node> nodes) {
+        StringBuilder sb = new StringBuilder("[DRILL] ").append(phase).append(" roles:");
+        for (Node n : nodes) {
+            sb.append(" node").append(n.id()).append("(port=").append(n.accessPort())
+                    .append(" alive=").append(n.process().isAlive())
+                    .append(" selfLeader=").append(isLeaderNode(n)).append(')');
+        }
+        System.out.println(sb);
     }
 
     /** 单键混合负载驱动：rounds 轮「获取→释放」，任一失败即断言失败。 */
@@ -236,9 +252,9 @@ class LeaderKillDrillIT {
         return jar;
     }
 
-    /** 演练报告追加（同日单文件，两场景各写一节）。 */
+    /** 演练报告追加（同日单文件，两场景各写一节；入库仓库根 docs/）。 */
     private static void appendReport(String section) throws IOException {
-        Path out = Path.of("docs", "failover-drill-"
+        Path out = Path.of("..", "docs", "failover-drill-"
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {
@@ -284,32 +300,19 @@ class LeaderKillDrillIT {
                     openlatch.cluster.data-dir=%s
                     openlatch.cluster.election-timeout-ms=800
                     """.formatted(access[i], i + 1, peers, addrs, raft[i], dir));
+            // 子进程日志落盘（target/drill-logs/，端口命名防多场景覆写）：
+            // 失败复盘取证用（选举窗口、角色变更时间点），兼防管道缓冲满阻塞。
+            Path nodeLog = Path.of("target", "drill-logs", "node" + (i + 1) + "-" + access[i] + ".log");
+            Files.createDirectories(nodeLog.getParent());
             Process p = new ProcessBuilder("java", "-Dopenlatch.config=" + cfg,
                     "-jar", jar.toAbsolutePath().toString())
                     .redirectErrorStream(true)
+                    .redirectOutput(nodeLog.toFile())
                     .start();
-            // 排空子进程输出，防管道缓冲满阻塞被杀进程。
-            drain(p);
             waitForPort(access[i]);
             nodes.add(new Node(i + 1, p, access[i], raft[i]));
         }
         return nodes;
-    }
-
-    /** 异步排空进程 stdout/stderr。 */
-    private static void drain(Process p) {
-        Thread t = new Thread(() -> {
-            try (BufferedReader r = new BufferedReader(
-                    new InputStreamReader(p.getInputStream()))) {
-                while (r.readLine() != null) {
-                    // 丢弃（演练不解析日志）
-                }
-            } catch (IOException ignored) {
-                // 进程终止即结束
-            }
-        }, "drill-drain-" + p.pid());
-        t.setDaemon(true);
-        t.start();
     }
 
     /** 轮询探测当前 Leader（HELLO 提示自报：hint>0 且地址为本节点接入地址）。 */
