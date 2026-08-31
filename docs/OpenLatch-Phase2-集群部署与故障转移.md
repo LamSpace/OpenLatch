@@ -102,6 +102,6 @@ mvn -s <settings> -pl openlatch-server -am package
 mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=LeaderKillDrillIT
 ```
 
-演练产出 `docs/failover-drill-<日期>.md`，覆盖验收清单 §11-2（杀 Leader 恢复 < 10s、存活会话锁不丢）与 §8 行为表双场景。
+演练产出 `docs/failover-drill-<日期>.md`，覆盖验收清单 §11-2（杀 Leader 恢复 < 10s、存活会话锁不丢）与 §8 行为表双场景。S3 退出取证报告见 `docs/failover-drill-2026-08-31.md`（全量 4/4 通过，实测恢复 1.6–1.8s）。
 
-> **已知限制（诚实标注）**：`kill -9` 真实崩溃路径下，恢复依赖 Raft 崩溃选举（非优雅让位）；在高并发/共享 CI 环境上偶发恢复超过 10s 目标（选举窗口 + 客户端种子轮询叠加）。确定性语义正确性以进程内 3 节点集成测试（`ClientClusterIT`，含"home=被杀 Leader"恢复、存活让位锁不丢、隔离判丢、等待重排）为准；kill -9 的 <10s 数值门建议在独占硬件上验证。此限制在评审中作为 S3 退出门的开放项跟踪。
+> **已知限制（诚实标注）**：`kill -9` 真实崩溃路径下，恢复依赖 Raft 崩溃选举（非优雅让位）；在高并发/共享 CI 环境上偶发恢复超过 10s 目标（选举窗口 + 客户端种子轮询叠加）。确定性语义正确性以进程内 3 节点集成测试（`ClientClusterIT`，含"home=被杀 Leader"恢复、存活让位锁不丢、隔离判丢、等待重排）为准；kill -9 的 <10s 数值门**发布级复核建议在独占硬件上执行**（本机 8 核 quiet 态已 4/4 通过，余量 ≥5 倍；重载瞬态下仍观察到过超时），S3 退出门已据此关闭。
