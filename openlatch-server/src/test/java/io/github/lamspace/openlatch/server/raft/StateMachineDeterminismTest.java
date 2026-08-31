@@ -7,7 +7,7 @@ import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +16,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -126,11 +128,19 @@ class StateMachineDeterminismTest {
         assertThat(digest).isEqualTo(new LockStateMachineCore(new CoreConfig()).digest());
     }
 
+    // 属性测试组数 ≥100（P2-06/2.4 口径）：8 个手工边界 seed + 101..200
+    // 连续 seed，每组生成一条随机混排序列并两次回放比对 digest。
     @ParameterizedTest(name = "随机混排序列 seed={0}")
-    @ValueSource(longs = {1L, 7L, 42L, 1337L, 20260830L, 9001L, 555L, 31L})
+    @MethodSource("randomSequenceSeeds")
     void randomMixedSequenceIsDeterministic(long seed) {
         List<RaftLogEntry> seq = randomSequence(new Random(seed));
         assertThat(replay(seq)).isEqualTo(replay(seq));
+    }
+
+    static Stream<Long> randomSequenceSeeds() {
+        return Stream.concat(
+                Stream.of(1L, 7L, 42L, 1337L, 20260830L, 9001L, 555L, 31L),
+                LongStream.rangeClosed(101L, 200L).boxed());
     }
 
     @Test
