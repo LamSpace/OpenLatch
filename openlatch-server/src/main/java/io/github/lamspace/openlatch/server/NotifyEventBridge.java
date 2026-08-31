@@ -74,7 +74,7 @@ public final class NotifyEventBridge implements CoreEventListener {
             return; // 连接已不存在：静默丢弃
         }
         Envelope notify = Envelope.newBuilder()
-                .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
+                .setProtocolVersion(session.protocolVersion())
                 .setType(MessageType.AWAIT_NOTIFY)
                 .setRequestId(0)
                 .setAwaitNotify(AwaitNotify.newBuilder()

@@ -6,6 +6,8 @@ OpenLatch is a lightweight distributed lock service (Phase 1 / MVP): a single-no
 
 **Not in Phase 1**: clustering/Raft (Phase 2), FairLock/Semaphore/CountDownLatch, monitoring console, TLS and authentication (Phase 3). The protocol reserves fields for these.
 
+> Phase 2 (Raft cluster) is being delivered in stages (S1 selection / S2 replicated state machine / S3 leader discovery & client failover complete; S4 snapshot & resilience in progress). See the [Phase 2 cluster deployment & failover guide](docs/OpenLatch-Phase2-集群部署与故障转移.md).
+
 ## Modules
 
 | Module | Purpose |

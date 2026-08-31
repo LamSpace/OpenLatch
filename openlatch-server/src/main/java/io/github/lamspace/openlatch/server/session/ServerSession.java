@@ -46,6 +46,12 @@ public final class ServerSession {
     private final AtomicInteger inflight = new AtomicInteger();
     /** 会话 id，握手成功后有效。 */
     private volatile long sessionId;
+    /**
+     * 握手协商的客户端协议版本（应答信封回显来源，v2 起服务端按连接协商版本
+     * 出站）。未握手连接的兜底值为 1（Phase 1 默认；推送仅可能发生在握手后，
+     * 兜底值实际不可观察）。
+     */
+    private volatile int protocolVersion = 1;
     /** 握手完成标记。 */
     private volatile boolean handshaken;
     /** 关闭标记，保证断连清理只执行一次。 */
@@ -88,13 +94,25 @@ public final class ServerSession {
     }
 
     /**
-     * 握手成功时调用：激活会话。仅由单 IO 线程调用，无需同步。
+     * 握手成功时调用：激活会话并记录协商的客户端协议版本（后续应答与推送
+     * 的回显依据）。仅由单 IO 线程调用，无需同步。
      *
-     * @param sessionId 服务端分配的会话 id
+     * @param sessionId       服务端分配的会话 id
+     * @param protocolVersion 握手信封携带的客户端协议版本（服务端已校验在支持区间内）
      */
-    public void activate(long sessionId) {
+    public void activate(long sessionId, int protocolVersion) {
         this.sessionId = sessionId;
+        this.protocolVersion = protocolVersion;
         this.handshaken = true;
+    }
+
+    /**
+     * 握手协商的客户端协议版本。
+     *
+     * @return 握手时记录的版本；未握手连接为兜底值 1
+     */
+    public int protocolVersion() {
+        return protocolVersion;
     }
 
     /**

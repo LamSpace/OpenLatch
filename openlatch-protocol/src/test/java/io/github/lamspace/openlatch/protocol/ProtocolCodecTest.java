@@ -261,6 +261,8 @@ class ProtocolCodecTest {
         assertThat(MessageType.LEASE_RENEW.getNumber()).isEqualTo(4);
         assertThat(MessageType.PING.getNumber()).isEqualTo(5);
         assertThat(MessageType.AWAIT_NOTIFY.getNumber()).isEqualTo(6);
+        // v2：CLUSTER_VIEW 启用。
+        assertThat(MessageType.CLUSTER_VIEW.getNumber()).isEqualTo(7);
 
         assertThat(LockType.LOCK_TYPE_REENTRANT.getNumber()).isZero();
         assertThat(LockType.LOCK_TYPE_SIMPLE.getNumber()).isEqualTo(1);
@@ -272,5 +274,87 @@ class ProtocolCodecTest {
         assertThat(StatusCode.OVERLOADED.getNumber()).isEqualTo(6);
         assertThat(StatusCode.KEY_EMPTY.getNumber()).isEqualTo(8);
         assertThat(StatusCode.INVALID_REQUEST.getNumber()).isEqualTo(9);
+        // Phase 1 预留、v2 启用：编号不变。
+        assertThat(StatusCode.NOT_LEADER.getNumber()).isEqualTo(10);
+    }
+
+    /** 场景：v2 CLUSTER_VIEW 响应信封回环——成员表逐项等值，payload 分支为 cluster_view。 */
+    @Test
+    void clusterViewResponseRoundTrip() {
+        Envelope envelope = Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.CLUSTER_VIEW)
+                .setRequestId(5L)
+                .setClusterView(ClusterView.newBuilder()
+                        .setStatus(StatusCode.OK)
+                        .addNodes(NodeInfo.newBuilder()
+                                .setNodeId(1).setAddress("10.0.0.1:9410").setIsLeader(true))
+                        .addNodes(NodeInfo.newBuilder()
+                                .setNodeId(2).setAddress("10.0.0.2:9410").setIsLeader(false))
+                        .addNodes(NodeInfo.newBuilder()
+                                .setNodeId(3).setAddress("").setIsLeader(false))
+                        .build())
+                .build();
+
+        Envelope parsed = roundTrip(envelope);
+        assertThat(parsed).isEqualTo(envelope);
+        assertThat(parsed.hasClusterView()).isTrue();
+        assertThat(parsed.getClusterView().getNodesCount()).isEqualTo(3);
+    }
+
+    /** 场景：v2 leader 提示字段回环——HELLO 提示与三类写响应随附的 hint 字段整体等值。 */
+    @Test
+    void v2LeaderHintFieldsRoundTrip() {
+        Envelope hello = Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.HELLO)
+                .setRequestId(1L)
+                .setHelloResponse(HelloResponse.newBuilder()
+                        .setStatus(StatusCode.OK)
+                        .setSessionId(7L)
+                        .setServerProtocolVersion(2)
+                        .setDefaultLeaseMs(30_000L)
+                        .setLeaderHint(-1L)
+                        .setLeaderAddress("127.0.0.1:9410")
+                        .build())
+                .build();
+        assertThat(roundTrip(hello).getHelloResponse().getLeaderHint()).isEqualTo(-1L);
+        assertThat(roundTrip(hello)).isEqualTo(hello);
+
+        Envelope acquire = Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.LOCK_ACQUIRE)
+                .setRequestId(2L)
+                .setAcquireResponse(AcquireResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setLeaderNodeId(3L)
+                        .setLeaderAddress("10.0.0.3:9410")
+                        .build())
+                .build();
+        assertThat(roundTrip(acquire).getAcquireResponse().getLeaderNodeId()).isEqualTo(3L);
+        assertThat(roundTrip(acquire)).isEqualTo(acquire);
+
+        Envelope release = Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.LOCK_RELEASE)
+                .setRequestId(3L)
+                .setReleaseResponse(ReleaseResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setLeaderNodeId(-1L)
+                        .build())
+                .build();
+        assertThat(roundTrip(release)).isEqualTo(release);
+
+        Envelope renew = Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.LEASE_RENEW)
+                .setRequestId(4L)
+                .setLeaseRenewResponse(LeaseRenewResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setLeaderNodeId(2L)
+                        .setLeaderAddress("10.0.0.2:9410")
+                        .build())
+                .build();
+        assertThat(roundTrip(renew)).isEqualTo(renew);
     }
 }

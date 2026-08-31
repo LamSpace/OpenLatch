@@ -52,7 +52,7 @@ import org.slf4j.LoggerFactory;
  * 未握手 ──合法 HELLO──▶ 已握手（业务阶段）──断连/空闲──▶ 清理
  *   │  畸形/提前业务请求：回 INVALID_REQUEST，不断连，
  *   │  连接仍可补发合法 HELLO（门闩语义）
- *   └─ 版本不匹配或携带认证令牌：回 INVALID_REQUEST 并断连
+ *   └─ 版本不在支持区间 [1,2] 或携带认证令牌：回 INVALID_REQUEST 并断连
  * </pre>
  *
  * <p><b>业务阶段处理矩阵</b>：
@@ -175,6 +175,17 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                         .handleRelease(session, msg, ctx);
                 case LEASE_RENEW -> cluster.requestHandler()
                         .handleRenew(session, msg, ctx);
+                case CLUSTER_VIEW -> {
+                    // 只读查询：任意节点以 LeaderTracker 单源 + 本地配置作答，
+                    // 不产生日志条目（v2 客户端种子发现/诊断）。
+                    ctx.writeAndFlush(Envelope.newBuilder()
+                            .setProtocolVersion(msg.getProtocolVersion())
+                            .setType(MessageType.CLUSTER_VIEW)
+                            .setRequestId(msg.getRequestId())
+                            .setClusterView(cluster.leaderTracker().clusterView())
+                            .build())
+                            .addListener(f -> session.endRequest());
+                }
                 case PING -> session.endRequest();
                 default -> {
                     ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST))
@@ -249,10 +260,10 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     /**
      * 握手门闩：未握手连接上的首条消息在此裁决。非 {@code HELLO} 或
      * 畸形 {@code HELLO}（无 payload）回 {@code INVALID_REQUEST} 但不断连；
-     * 协议版本不匹配或携带认证令牌（Phase 1 必须为空）回
-     * {@code INVALID_REQUEST} 并断连；合法 {@code HELLO} 则经
-     * {@code CoreEngine.sessionOpened} 分配会话、激活连接簿记、登记注册表，
-     * 并回 {@code OK} 与 sessionId。
+     * 客户端协议版本不在支持区间（v2 起为 [1,2]）或携带认证令牌（Phase 1
+     * 必须为空）回 {@code INVALID_REQUEST} 并断连；合法 {@code HELLO} 则经
+     * {@code CoreEngine.sessionOpened} 分配会话、激活连接簿记（记录协商
+     * 版本）、登记注册表，并回 {@code OK} 与 sessionId。
      *
      * @param ctx     连接上下文
      * @param session 该连接的会话簿记（未握手状态）
@@ -265,10 +276,10 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             return;
         }
         HelloRequest hello = msg.getHelloRequest();
-        if (hello.getClientProtocolVersion() != OpenLatchServer.PROTOCOL_VERSION
+        if (!OpenLatchServer.isClientVersionSupported(hello.getClientProtocolVersion())
                 || !hello.getAuthToken().isEmpty()) {
-            // 版本不匹配或携带认证令牌（Phase 1 必须为空）：拒绝并断连（设计说明书 §3.2.1）。
-            ctx.writeAndFlush(helloResponse(msg.getRequestId(), StatusCode.INVALID_REQUEST, 0));
+            // 版本越界或携带认证令牌：拒绝并断连（不做隐式兼容，设计说明书 §3.2.1）。
+            ctx.writeAndFlush(helloResponse(msg, StatusCode.INVALID_REQUEST, 0));
             ctx.close();
             return;
         }
@@ -278,27 +289,30 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             return;
         }
         long sessionId = core.sessionOpened();
-        session.activate(sessionId);
+        session.activate(sessionId, msg.getProtocolVersion());
         registry.register(session);
-        ctx.writeAndFlush(helloResponse(msg.getRequestId(), StatusCode.OK, sessionId));
+        ctx.writeAndFlush(helloResponse(msg, StatusCode.OK, sessionId));
     }
 
     /**
-     * 构造握手响应信封：回显请求的 {@code requestId}；恒携带
-     * {@code server_protocol_version} 与 {@code default_lease_ms}
-     * （供客户端参考，与结果码无关）；失败路径（{@code INVALID_REQUEST}，
-     * 含版本不匹配断连）sessionId 为 0。
+     * 构造握手响应信封：回显请求的 {@code requestId} 与请求的
+     * {@code protocol_version}（v1 客户端因此看到与 Phase 1 同形的响应）；
+     * 恒携带 {@code server_protocol_version}（服务端自身版本）与
+     * {@code default_lease_ms}（供客户端参考，与结果码无关）；失败路径
+     * （{@code INVALID_REQUEST}，含版本越界断连）sessionId 为 0。
+     * 单机模式不填 leader 提示字段（集群路径的 OK 应答由
+     * {@code SessionCoordinator} 构造并填提示）。
      *
-     * @param requestId 原请求的请求 id（回显）
+     * @param msg       原请求信封（requestId 与协议版本回显来源）
      * @param status    握手结果状态码
      * @param sessionId 分配的会话 id，失败时传 0
      * @return 握手响应信封
      */
-    private Envelope helloResponse(long requestId, StatusCode status, long sessionId) {
+    private Envelope helloResponse(Envelope msg, StatusCode status, long sessionId) {
         return Envelope.newBuilder()
-                .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
+                .setProtocolVersion(msg.getProtocolVersion())
                 .setType(MessageType.HELLO)
-                .setRequestId(requestId)
+                .setRequestId(msg.getRequestId())
                 .setHelloResponse(HelloResponse.newBuilder()
                         .setStatus(status)
                         .setSessionId(sessionId)

@@ -70,6 +70,10 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <!-- 进程级演练（@Tag("drill")）默认排除，-Pdrill 时纳入 -->
+                    <excludedGroups>drill</excludedGroups>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>
@@ -81,4 +85,23 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 杀 Leader 演练 profile（P2-14）：仅运行 @Tag("drill") 用例，
+             需先 `mvn -pl openlatch-server -am package` 产出 shaded jar -->
+        <profile>
+            <id>drill</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <groups>drill</groups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

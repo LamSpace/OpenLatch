@@ -62,6 +62,11 @@ import java.util.function.Consumer;
  * 每次失败倍增，上限 {@code reconnectMaxBackoff}（默认 10s），
  * 每次延时附加 ±20% 随机抖动。重连成功后退避复位为初始值。
  *
+ * <p><b>目标选择（S3，详设 §6.3）</b>：连接目标为可轮换的 {@code (currentHost,
+ * currentPort)}，初值 = 种子列表首项。主动断连后的重试先试原地址；TCP 连接
+ * 失败或握手失败则游标推进到下一种子（按序循环），实现"先试原地址，失败后
+ * 轮询种子列表"。Leader 改连由客户端新建专用车道完成，不在本状态机内切换目标。
+ *
  * <p><b>线程模型</b>：状态迁移由三方线程发起——调用方线程
  * （{@link #connectAsync()}/{@link #shutdown()}）、共享定时器线程（退避重连
  * 触发 {@link #doConnect()}）与 EventLoop 线程（TCP 连接回调、通道失效）。
@@ -99,8 +104,8 @@ public final class ConnectionManager {
         CLOSED
     }
 
-    /** Phase 1 协议版本，握手请求固定携带。 */
-    private static final int PROTOCOL_VERSION = 1;
+    /** v2 协议版本，握手请求固定携带（服务端兼容 v1/v2，应答回显本版本）。 */
+    private static final int PROTOCOL_VERSION = 2;
     /** 入站帧最大长度（1 MiB），与服务端帧长限制一致（详设 §3.1）。 */
     private static final int MAX_FRAME_LENGTH = 1024 * 1024;
     /** 日志器。 */
@@ -149,6 +154,51 @@ public final class ConnectionManager {
     /** 进入 ACTIVE 时的回调（含首次连接与每次重连成功），由客户端装配。 */
     private volatile Runnable activeListener = () -> {
     };
+    /**
+     * 握手成功监听器（v2）：进入 ACTIVE 时收到（且仅在收到）{@code OK} 的
+     * {@code HelloResponse} 上回调，携带服务端 leader 提示字段——客户端据此
+     * 做启动直连发现（详设 §6.3）。在 EventLoop 线程调用，MUST NOT 阻塞。
+     */
+    private volatile Consumer<HelloResponse> helloListener = hello -> {
+        // 客户端装配前不通知
+    };
+    /** 当前连接目标主机（stateLock 写、doConnect 锁内读；初值 = 种子首项）。 */
+    private String currentHost;
+    /** 当前连接目标端口（与 {@link #currentHost} 同锁域）。 */
+    private int currentPort;
+    /** 种子轮询游标（指向当前目标在 {@code config.seeds()} 中的下标）。 */
+    private int seedCursor;
+    /** 本轮已扫种子计数：多种子时满一轮才抬升退避（stateLock 内使用）。 */
+    private int seedSweep;
+    /** 失败换点开关：home 车道按种子轮询，leader 车道钉住目标（见全参构造）。 */
+    private final boolean seedRotationOnFailure;
+
+    /**
+     * 计算本次重连延时并推进退避（stateLock 内调用）。
+     *
+     * <p><b>单种子（Phase 1 语义，逐字节不变）</b>：每次失败即指数倍增
+     * （初始 200ms，上限 reconnectMaxBackoff）。
+     * <p><b>多种子（集群）</b>：一轮内快速轮换种子（延时取当前退避不倍增），
+     * 扫完全部种子一圈后才抬升退避——使 crash failover 能在亚秒级触及
+     * 存活/新主节点，而非在恢复窗口内把退避翻倍到秒级而拖过恢复判定线。
+     *
+     * @return 本次重连的抖动延时（毫秒），基于推进前的当前退避
+     */
+    private long nextReconnectDelayLocked() {
+        long delay = currentBackoffMs;
+        int n = config.seeds().size();
+        if (seedRotationOnFailure && n > 1) {
+            if (++seedSweep >= n) {
+                seedSweep = 0;
+                currentBackoffMs = Math.min(currentBackoffMs * 2,
+                        config.reconnectMaxBackoff().toMillis());
+            }
+        } else {
+            currentBackoffMs = Math.min(currentBackoffMs * 2,
+                    config.reconnectMaxBackoff().toMillis());
+        }
+        return withJitter(delay);
+    }
 
     /**
      * 创建连接管理器：不发起连接，首次连接由 {@link #connectAsync()} 触发。
@@ -158,10 +208,56 @@ public final class ConnectionManager {
      * @param timer  共享定时器
      */
     public ConnectionManager(ClientConfig config, EventLoopGroup group, HashedWheelTimer timer) {
+        this(config, group, timer, config.host(), config.port(), true);
+    }
+
+    /**
+     * 全参构造（S3 多车道，design D6）：车道以显式初始目标建连。
+     *
+     * @param config                 客户端配置（超时/退避/种子表来源）
+     * @param group                  网络线程组
+     * @param timer                  共享定时器
+     * @param initialHost            初始连接目标主机（home 车道 = 种子首项；
+     *                               leader 车道 = 提示所指地址）
+     * @param initialPort            初始连接目标端口
+     * @param seedRotationOnFailure  连接/握手失败是否按种子表轮询换点：home 车道
+     *                               {@code true}（先原地址后轮询种子）；leader
+     *                               车道 {@code false}（钉住提示地址，目标失效由
+     *                               客户端重新发现并重建车道）
+     */
+    public ConnectionManager(ClientConfig config, EventLoopGroup group, HashedWheelTimer timer,
+            String initialHost, int initialPort, boolean seedRotationOnFailure) {
         this.config = config;
         this.group = group;
         this.timer = timer;
         this.currentBackoffMs = config.reconnectInitialBackoff().toMillis();
+        this.currentHost = initialHost;
+        this.currentPort = initialPort;
+        this.seedRotationOnFailure = seedRotationOnFailure;
+    }
+
+    /**
+     * 设置握手成功监听器（v2 启动发现：HELLO 的 leader 提示由此上抛）。
+     *
+     * @param listener 监听器；在 EventLoop 线程收到 {@code OK} 握手响应回调
+     */
+    public void setHelloListener(Consumer<HelloResponse> listener) {
+        this.helloListener = listener;
+    }
+
+    /**
+     * 连接失败时把目标推进到下一粒种子（stateLock 内调用；种子表非空由
+     * Builder 校验保证）。主动断连不推进——重连先试原地址（详设 §6.3）。
+     */
+    private void advanceSeedLocked() {
+        if (!seedRotationOnFailure) {
+            return; // leader 车道钉住目标：换点由客户端重发现驱动，不在本状态机内轮询
+        }
+        java.util.List<ClientConfig.SeedAddress> seeds = config.seeds();
+        seedCursor = (seedCursor + 1) % seeds.size();
+        ClientConfig.SeedAddress next = seeds.get(seedCursor);
+        currentHost = next.host();
+        currentPort = next.port();
     }
 
     /**
@@ -274,6 +370,28 @@ public final class ConnectionManager {
     }
 
     /**
+     * 当前连接目标主机（初始种子或失败换点后的种子；车道身份判定用）。
+     *
+     * @return 目标主机
+     */
+    public String targetHost() {
+        synchronized (stateLock) {
+            return currentHost;
+        }
+    }
+
+    /**
+     * 当前连接目标端口。
+     *
+     * @return 目标端口
+     */
+    public int targetPort() {
+        synchronized (stateLock) {
+            return currentPort;
+        }
+    }
+
+    /**
      * 当前会话上下文。
      *
      * @return 会话上下文；非 ACTIVE 状态返回 {@code null}
@@ -303,9 +421,8 @@ public final class ConnectionManager {
             if (disconnectHandler != null) {
                 disconnectHandler.accept(null);
             }
-            long delay = withJitter(currentBackoffMs);
-            currentBackoffMs = Math.min(currentBackoffMs * 2, config.reconnectMaxBackoff().toMillis());
-            scheduleConnect(delay);
+            // 主动断连：先试原地址（不推进种子），退避推进见 nextReconnectDelayLocked
+            scheduleConnect(nextReconnectDelayLocked());
         }
     }
 
@@ -382,7 +499,13 @@ public final class ConnectionManager {
                                         ConnectionManager.this::handleChannelInactive));
                     }
                 });
-        bootstrap.connect(config.host(), config.port()).addListener((ChannelFuture f) -> {
+        String targetHost;
+        int targetPort;
+        synchronized (stateLock) {
+            targetHost = currentHost;
+            targetPort = currentPort;
+        }
+        bootstrap.connect(targetHost, targetPort).addListener((ChannelFuture f) -> {
             if (!f.isSuccess()) {
                 onAttemptFailed();
                 return;
@@ -401,7 +524,8 @@ public final class ConnectionManager {
     }
 
     /**
-     * TCP 连接失败：走统一的断连→退避重连路径。
+     * TCP 连接失败：走统一的断连→退避重连路径，并把下次目标推进到下一种子
+     * （连接不可达即换点；主动断连不换点，见 {@link #handleChannelInactive()}）。
      */
     private void onAttemptFailed() {
         synchronized (stateLock) {
@@ -409,9 +533,8 @@ public final class ConnectionManager {
                 return;
             }
             state = State.RECONNECTING;
-            long delay = withJitter(currentBackoffMs);
-            currentBackoffMs = Math.min(currentBackoffMs * 2, config.reconnectMaxBackoff().toMillis());
-            scheduleConnect(delay);
+            advanceSeedLocked();
+            scheduleConnect(nextReconnectDelayLocked());
         }
     }
 
@@ -450,6 +573,7 @@ public final class ConnectionManager {
     private void onHelloResult(Channel ch, Envelope resp, Throwable err) {
         CompletableFuture<Void> toComplete = null;
         boolean becameActive = false;
+        HelloResponse activeHello = null;
         synchronized (stateLock) {
             if (state != State.HELLO_SENT) {
                 return;
@@ -457,6 +581,9 @@ public final class ConnectionManager {
             HelloResponse hello = resp == null ? null : resp.getHelloResponse();
             if (err != null || hello == null || hello.getStatus() != StatusCode.OK) {
                 log.debug("handshake failed: {}", err == null ? hello.getStatus() : err.toString());
+                // 握手失败常因该节点无主可登记（集群 SESSION_OPEN 不可提交）：
+                // 推进游标，关闭后的退避重连换下一种子（详设 §6.3）。
+                advanceSeedLocked();
                 // 离开锁再关闭，避免 close 事件与状态锁交叉
             } else {
                 SessionContext context = pendingSession;
@@ -466,13 +593,16 @@ public final class ConnectionManager {
                 session = context;
                 state = State.ACTIVE;
                 becameActive = true;
+                activeHello = hello;
                 currentBackoffMs = config.reconnectInitialBackoff().toMillis();
                 toComplete = connectFuture;
             }
         }
         if (becameActive) {
-            // 锁外回调：首连/重连成功通知（重连裁决经此触发，详设 §6.2）
+            // 锁外回调：首连/重连成功通知（重连裁决经此触发，详设 §6.2）；
+            // 握手监听携带 v2 leader 提示，客户端启动发现据此直连（§6.3）。
             activeListener.run();
+            helloListener.accept(activeHello);
         }
         if (toComplete != null) {
             toComplete.complete(null);

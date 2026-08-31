@@ -53,7 +53,7 @@ class RequestDispatcherTest {
     }
 
     /**
-     * 构造已握手的会话簿记：{@code activate(core.sessionOpened())} 同时向核心
+     * 构造已握手的会话簿记：{@code activate(core.sessionOpened(), 1)} 同时向核心
      * 登记会话——未登记的会话分发被短路为 {@code SESSION_EXPIRED}
      * （{@code acquire_unknown_session_rejected} 故意绕过本夹具复现该路径）。
      *
@@ -61,7 +61,7 @@ class RequestDispatcherTest {
      */
     private ServerSession newSession() {
         ServerSession session = new ServerSession(null);
-        session.activate(core.sessionOpened());
+        session.activate(core.sessionOpened(), 1);
         return session;
     }
 
@@ -195,7 +195,7 @@ class RequestDispatcherTest {
     @Test
     void acquire_unknown_session_rejected() {
         ServerSession ghost = new ServerSession(null);
-        ghost.activate(123456789L);
+        ghost.activate(123456789L, 1);
 
         Envelope resp = dispatcher.dispatch(ghost, acquire(1, "k", -1));
 

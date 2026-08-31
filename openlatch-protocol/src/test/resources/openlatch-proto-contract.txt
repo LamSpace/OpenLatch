@@ -1,0 +1,96 @@
+# openlatch.proto 全量契约（v2）：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
+# 新增字段/枚举值/消息必须显式追加本文件（评审可见）；既有编号任何变更即构建失败
+enum MessageType
+  MESSAGE_TYPE_UNKNOWN 0
+  HELLO 1
+  LOCK_ACQUIRE 2
+  LOCK_RELEASE 3
+  LEASE_RENEW 4
+  PING 5
+  AWAIT_NOTIFY 6
+  CLUSTER_VIEW 7
+enum LockType
+  LOCK_TYPE_REENTRANT 0
+  LOCK_TYPE_SIMPLE 1
+  LOCK_TYPE_READ 2
+  LOCK_TYPE_WRITE 3
+enum StatusCode
+  OK 0
+  QUEUED 1
+  DENIED 2
+  INVALID_TOKEN 3
+  NOT_HELD 4
+  SESSION_EXPIRED 5
+  OVERLOADED 6
+  KEY_TOO_LONG 7
+  KEY_EMPTY 8
+  INVALID_REQUEST 9
+  NOT_LEADER 10
+  INTERNAL_ERROR 11
+message Envelope
+  protocol_version 1
+  type 2
+  request_id 3
+  hello_request 10
+  hello_response 11
+  acquire_request 12
+  acquire_response 13
+  release_request 14
+  release_response 15
+  lease_renew_request 16
+  lease_renew_response 17
+  await_notify 18
+  cluster_view 19
+message HelloRequest
+  client_protocol_version 1
+  client_name 2
+  auth_token 3
+message HelloResponse
+  status 1
+  session_id 2
+  server_protocol_version 3
+  default_lease_ms 4
+  leader_hint 5
+  leader_address 6
+message AcquireRequest
+  key 1
+  lock_type 2
+  thread_id 3
+  lease_ms 4
+  wait_ms 5
+message AcquireResponse
+  status 1
+  lease_token 2
+  lease_expires_at_ms 3
+  queue_position 4
+  granted_lease_ms 5
+  leader_node_id 6
+  leader_address 7
+message ReleaseRequest
+  key 1
+  lease_token 2
+  thread_id 3
+message ReleaseResponse
+  status 1
+  fully_released 2
+  leader_node_id 3
+  leader_address 4
+message LeaseRenewRequest
+  key 1
+  lease_token 2
+  lease_ms 3
+message LeaseRenewResponse
+  status 1
+  lease_expires_at_ms 2
+  leader_node_id 3
+  leader_address 4
+message AwaitNotify
+  key 1
+  request_id_ref 2
+message ClusterView
+  nodes 1
+  status 2
+message NodeInfo
+  node_id 1
+  address 2
+  is_leader 3

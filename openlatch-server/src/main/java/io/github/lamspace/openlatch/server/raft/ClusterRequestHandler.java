@@ -55,8 +55,22 @@ import java.nio.charset.StandardCharsets;
  *       {@code RequestDispatcher} 的映射表语义逐项对齐，错误码不复用）。
  * </ul>
  *
- * <p><b>角色前提</b>：本类只在当值 Leader 上被路由到（Follower 侧写请求的
- * NOT_LEADER 重定向归 S3/P2-12；非 Leader 抵达此处按可重试错误应答）。
+ * <p><b>Follower 分车道（S3/P2-12，spec"Follower 写请求分车道"）</b>：
+ * <ul>
+ *   <li><b>ACQUIRE（新授予/排队）</b>：排队登记与 {@code AWAIT_NOTIFY} 是
+ *       Leader 本地态，Follower 受理无法保证通知送达——角色门命中即同步回
+ *       {@code NOT_LEADER} 并随附 {@link LeaderTracker} 提示（选举空窗
+ *       nodeId 为 -1），不产生条目、不动等待队列；</li>
+ *   <li><b>RELEASE / RENEW（存量操作）</b>：纯 token/归属校验、无 Leader
+ *       本地态依赖——Follower 摘除角色门照常提交，经内部提交通道转发至
+ *       当值 Leader 复制执行（与 {@code SESSION_OPEN} 同车道），应答与
+ *       客户端直发 Leader 结果一致；会话已被清理的在 Follower 本地预检即
+ *       {@code SESSION_EXPIRED}（零转发），Leader 应用点 {@code REJECT_SESSION}
+ *       为权威兜底。</li>
+ * </ul>
+ * 提交失败按语义拆分：可重试的提交失败（含降级在途终结）以
+ * {@code NOT_LEADER} + 当时提示应答；其余内部失败以 {@code INTERNAL_ERROR}
+ * 应答——不再共享一个混叠码。
  *
  * <p><b>线程模型</b>：入站处理在连接 EventLoop；应答完成在状态机应用线程，
  * 经 {@code channel.eventLoop().execute} 弹回写回——单连接的请求序由
@@ -75,35 +89,41 @@ public final class ClusterRequestHandler {
     private final WaitQueue waitQueue;
     /** 语义内核（会话登记预检消费影子表）。 */
     private final LockStateMachineCore kernel;
+    /** Leader 提示单源（NOT_LEADER 应答随附提示，s3 design D3）。 */
+    private final LeaderTracker leaderTracker;
 
     /**
      * 构造处理器。
      *
-     * @param gateway   复制网关
-     * @param kernel    状态机内核（会话预检）
-     * @param waitQueue 等待队列
-     * @param config    服务配置
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（会话预检）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
      */
     public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
-                                 WaitQueue waitQueue, ServerConfig config) {
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
         this.config = config;
+        this.leaderTracker = leaderTracker;
     }
 
     /**
      * ACQUIRE 集群路径：预检查通过后提交，应答于应用后写回。
      *
      * <p>判定顺序（同步分支立即写回，异步分支接管在途记账）：
-     * 角色 → 载荷与键合法性 → 会话登记 → 排队裁决（§4.5 预演）。
+     * 角色（Follower 即 {@code NOT_LEADER}+提示改连，S3 分车道）→
+     * 载荷与键合法性 → 会话登记 → 排队裁决（§4.5 预演）。
      *
      * @param session 已握手会话（携带逻辑 sessionId）
      * @param msg     请求信封
      * @param ctx     连接上下文
      */
     public void handleAcquire(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
-        Envelope bad = validateEnvelope(msg, session);
+        Envelope bad = validateEnvelope(msg, session, true);
         if (bad != null) {
             writeSync(ctx, session, bad);
             return;
@@ -148,18 +168,19 @@ public final class ClusterRequestHandler {
                 .build().toByteString();
         gateway.submit(RaftEntryType.LOCK_ACQUIRE_ENTRY, payload)
                 .whenComplete((r, err) -> respondAsync(ctx, session,
-                        err == null ? mapAcquire(msg, r) : retryableError(msg)));
+                        err == null ? mapAcquire(msg, r) : commitFailure(msg, err)));
     }
 
     /**
-     * RELEASE 集群路径：无排队裁决，直接提交，应答于应用后写回。
+     * RELEASE 集群路径（转发车道）：无排队裁决、不设角色门——Follower 亦
+     * 照常提交，经内部通道由当值 Leader 复制执行；应答于应用后写回。
      *
      * @param session 已握手会话
      * @param msg     请求信封
      * @param ctx     连接上下文
      */
     public void handleRelease(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
-        Envelope bad = validateEnvelope(msg, session);
+        Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
             writeSync(ctx, session, bad);
             return;
@@ -170,18 +191,19 @@ public final class ClusterRequestHandler {
                 .build().toByteString();
         gateway.submit(RaftEntryType.LOCK_RELEASE_ENTRY, payload)
                 .whenComplete((r, err) -> respondAsync(ctx, session,
-                        err == null ? mapRelease(msg, r) : retryableError(msg)));
+                        err == null ? mapRelease(msg, r) : commitFailure(msg, err)));
     }
 
     /**
-     * RENEW 集群路径：直接提交，应答于应用后写回。
+     * RENEW 集群路径（转发车道）：不设角色门，Follower 亦照常提交、由
+     * 当值 Leader 复制执行；应答于应用后写回。
      *
      * @param session 已握手会话
      * @param msg     请求信封
      * @param ctx     连接上下文
      */
     public void handleRenew(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
-        Envelope bad = validateEnvelope(msg, session);
+        Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
             writeSync(ctx, session, bad);
             return;
@@ -192,22 +214,28 @@ public final class ClusterRequestHandler {
                 .build().toByteString();
         gateway.submit(RaftEntryType.LEASE_RENEW_ENTRY, payload)
                 .whenComplete((r, err) -> respondAsync(ctx, session,
-                        err == null ? mapRenew(msg, r) : retryableError(msg)));
+                        err == null ? mapRenew(msg, r) : commitFailure(msg, err)));
     }
 
     /**
-     * 公共预检：角色与载荷合法性（类型匹配、键非空、UTF-8 长度、会话登记）。
-     * 返回非 {@code null} 即为应立即写回的同步错误。
+     * 公共预检：载荷合法性（类型匹配、键非空、UTF-8 长度）与会话登记；
+     * {@code requireLeader=true}（ACQUIRE 车道）时先过权威角色门——非 Leader
+     * 回 {@code NOT_LEADER} 并随附 {@link LeaderTracker} 当时的提示。
+     * 转发车道（RELEASE/RENEW）不设角色门：条目经内部通道抵达当值 Leader，
+     * 权威判定在应用点。会话登记预检两车道同规则：连接 sid 于握手完成前已
+     * 在本副本应用（D12），本地判 {@code SESSION_EXPIRED} 与 Leader 判定
+     * 结果一致且省一次转发。返回非 {@code null} 即为应立即写回的同步错误。
      *
-     * @param msg     请求信封
-     * @param session 已握手会话
+     * @param msg          请求信封
+     * @param session      已握手会话
+     * @param requireLeader 是否要求本节点为当值 Leader（ACQUIRE 车道 true）
      * @return 需立即写回的错误应答；通过预检为 {@code null}
      */
-    private Envelope validateEnvelope(Envelope msg, ServerSession session) {
-        if (!gateway.isLeaderAuthoritative()) {
-            // S2 兜底：非 Leader 抵达此处（S3 未上线的重定向空窗）按可重试错误。
-            // 用权威角色而非事件标志：降级空窗内拒绝写入，杜绝"无多数派仍提交"。
-            return RequestDispatcher.errorResponse(msg, StatusCode.NOT_LEADER);
+    private Envelope validateEnvelope(Envelope msg, ServerSession session, boolean requireLeader) {
+        if (requireLeader && !gateway.isLeaderAuthoritative()) {
+            // ACQUIRE 车道角色门：用权威角色而非事件标志——降级空窗内拒绝
+            // 受理，杜绝"无多数派仍提交"；提示来自单源视图，选举空窗为 -1。
+            return notLeaderEnvelope(msg);
         }
         boolean hasPayload = switch (msg.getType()) {
             case LOCK_ACQUIRE -> msg.hasAcquireRequest();
@@ -260,13 +288,55 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 可重试提交失败的统一错误（S3 前以 NOT_LEADER 呈现语义最近的拒绝）。
+     * 提交失败的应答拆分（S3/P2-12，不再共享混叠码）：
+     * {@link ReplicationGateway.RetryableCommitException}（提交失败、降级在途
+     * 终结、子系统未就绪等在途可重试原因）以 {@code NOT_LEADER} + 当时提示
+     * 应答，客户端按提示改道或退避；其余异常为预期外的内部失败，记 WARN
+     * 并以 {@code INTERNAL_ERROR} 应答。
      *
      * @param msg 原请求信封
+     * @param err 提交失败原因
      * @return 错误应答信封
      */
-    private Envelope retryableError(Envelope msg) {
-        return RequestDispatcher.errorResponse(msg, StatusCode.NOT_LEADER);
+    private Envelope commitFailure(Envelope msg, Throwable err) {
+        if (err instanceof ReplicationGateway.RetryableCommitException) {
+            return notLeaderEnvelope(msg);
+        }
+        log.warn("unexpected commit failure for request {} (type {})",
+                msg.getRequestId(), msg.getType(), err);
+        return RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR);
+    }
+
+    /**
+     * 随附 Leader 提示的 {@code NOT_LEADER} 应答：按原请求类型选载荷
+     * （Acquire/Release/LeaseRenew），{@code leader_node_id} 取
+     * {@link LeaderTracker} 单源当时值（选举空窗 -1），{@code leader_address}
+     * 未配置地址映射时为空串（客户端种子发现兜底，design D4）。
+     *
+     * @param msg 原请求信封
+     * @return 带提示的拒绝应答
+     */
+    private Envelope notLeaderEnvelope(Envelope msg) {
+        LeaderTracker.Snapshot leader = leaderTracker.snapshot();
+        Envelope.Builder b = Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(msg.getType())
+                .setRequestId(msg.getRequestId());
+        switch (msg.getType()) {
+            case LOCK_RELEASE -> b.setReleaseResponse(ReleaseResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER)
+                    .setLeaderNodeId(leader.leaderNodeId())
+                    .setLeaderAddress(leader.leaderAddress()));
+            case LEASE_RENEW -> b.setLeaseRenewResponse(LeaseRenewResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER)
+                    .setLeaderNodeId(leader.leaderNodeId())
+                    .setLeaderAddress(leader.leaderAddress()));
+            default -> b.setAcquireResponse(AcquireResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER)
+                    .setLeaderNodeId(leader.leaderNodeId())
+                    .setLeaderAddress(leader.leaderAddress()));
+        }
+        return b.build();
     }
 
     /**

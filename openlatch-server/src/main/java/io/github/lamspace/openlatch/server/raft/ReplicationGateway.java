@@ -25,7 +25,6 @@ import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
-import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import org.apache.ratis.client.RaftClient;
@@ -324,7 +323,7 @@ public final class ReplicationGateway implements ApplyObserver {
             return; // 连接已不存在：等清扫路径兜底（与 Phase 1 静默丢弃同语义）
         }
         Envelope notify = Envelope.newBuilder()
-                .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
+                .setProtocolVersion(session.protocolVersion())
                 .setType(MessageType.AWAIT_NOTIFY)
                 .setRequestId(0)
                 .setAwaitNotify(AwaitNotify.newBuilder().setKey(key).setRequestIdRef(w.requestId()))

@@ -25,6 +25,7 @@ import io.github.lamspace.openlatch.protocol.HelloRequest;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
@@ -113,13 +114,50 @@ class HandshakeTest {
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getType()).isEqualTo(MessageType.HELLO);
         assertThat(resp.getRequestId()).isEqualTo(42);
+        // v1 客户端：应答信封回显请求版本 1（与 Phase 1 同形），自身版本报 2。
+        assertThat(resp.getProtocolVersion()).isEqualTo(1);
         HelloResponse hr = resp.getHelloResponse();
         assertThat(hr.getStatus()).isEqualTo(StatusCode.OK);
         assertThat(hr.getSessionId()).isPositive();
-        assertThat(hr.getServerProtocolVersion()).isEqualTo(1);
+        assertThat(hr.getServerProtocolVersion()).isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
         assertThat(hr.getDefaultLeaseMs()).isEqualTo(config.defaultLeaseMs());
         assertThat(ch.isOpen()).isTrue();
         assertThat(registry.size()).isEqualTo(1);
+    }
+
+    @Test
+    void v2_hello_accepted_with_version_echo() {
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(2)
+                .setType(MessageType.HELLO)
+                .setRequestId(43)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(2))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(2);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        // 单机模式不填 leader 提示字段（proto3 默认缺省）。
+        assertThat(resp.getHelloResponse().getLeaderHint()).isZero();
+        assertThat(resp.getHelloResponse().getLeaderAddress()).isEmpty();
+    }
+
+    @Test
+    void cluster_view_on_single_node_rejected_invalid_request() {
+        ch.writeInbound(hello(42, 2, "")); // 先完成 v2 握手进入业务阶段
+        readOutboundEnvelope();
+
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(2).setType(MessageType.CLUSTER_VIEW).setRequestId(43L)
+                .build());
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getRequestId()).isEqualTo(43);
+        assertThat(resp.getType()).isEqualTo(MessageType.CLUSTER_VIEW);
+        // 单机无集群视图可报：status=INVALID_REQUEST + 空成员表
+        // （spec"单机模式不响应 CLUSTER_VIEW"）
+        assertThat(resp.getClusterView().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);
+        assertThat(resp.getClusterView().getNodesCount()).isZero();
+        assertThat(ch.isOpen()).isTrue();
     }
 
     @Test
@@ -146,7 +184,8 @@ class HandshakeTest {
 
     @Test
     void wrong_protocol_version_rejected_and_disconnected() {
-        ch.writeInbound(hello(1, 2, ""));
+        // v2 起接受区间为 [1,2]：越界版本（3）仍拒绝并断连。
+        ch.writeInbound(hello(1, 3, ""));
 
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);

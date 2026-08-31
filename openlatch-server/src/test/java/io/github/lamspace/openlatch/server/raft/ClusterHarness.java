@@ -153,10 +153,24 @@ final class ClusterHarness implements AutoCloseable {
     /** 按当前存活视图装配并启动一个节点的运行时。 */
     private static ClusterRuntime boot(Node node, List<String> peers, long electionTimeoutMs)
             throws IOException {
-        ClusterConfig cc = new ClusterConfig(true, node.id, peers, node.raftPort,
-                node.dataDir.toString(), 1_000_000L, electionTimeoutMs);
+        // client-addresses 合成表（raft 端口 +10000）：证明提示地址来自该映射
+        // 而非 raft 地址混同；用例据此断言 leader_address 字面。
+        ClusterConfig cc = new ClusterConfig(true, node.id, peers, clientAddressSpecs(peers),
+                node.raftPort, node.dataDir.toString(), 1_000_000L, electionTimeoutMs);
         cc.validate();
         return ClusterRuntime.create(cc, testServerConfig(), node.registry);
+    }
+
+    /** 把 peers（{@code id@host:raftPort}）折算为合成接入地址表。 */
+    private static List<String> clientAddressSpecs(List<String> peers) {
+        List<String> out = new ArrayList<>();
+        for (String p : peers) {
+            int at = p.indexOf('@');
+            int colon = p.lastIndexOf(':');
+            out.add(p.substring(0, at) + "@" + p.substring(at + 1, colon) + ":"
+                    + (Integer.parseInt(p.substring(colon + 1)) + 10_000));
+        }
+        return List.copyOf(out);
     }
 
     /** 集群级测试配置：短租约下限/快扫描/常规限额。 */
@@ -254,6 +268,32 @@ final class ClusterHarness implements AutoCloseable {
     }
 
     /**
+     * 当值 Leader 存活让位（Ratis 3.3 {@code AdminApi.transferLeadership}，
+     * §8 行 2 的驱动源）：Leadership 移交目标节点，原 Leader 进程/连接/会话
+     * 全部存活——EmbeddedChannel 接入不受影响，用于验证 Follower 转发车道。
+     *
+     * @param toId 移交目标节点 id
+     * @throws IOException 无 Leader、调用失败或 Ratis 拒绝移交
+     */
+    void transferLeadership(int toId) throws IOException {
+        Node l = leader();
+        if (l == null) {
+            throw new IllegalStateException("no leader to transfer from");
+        }
+        var reply = l.runtime.subsystem().acquireClient().admin()
+                .transferLeadership(org.apache.ratis.protocol.RaftPeerId.valueOf("n" + toId), 5_000);
+        if (!reply.isSuccess()) {
+            throw new IOException("transferLeadership failed: " + reply.getException());
+        }
+    }
+
+    /** 指定节点配置的合成接入地址（raft 端口 +10000，boot 的 client-addresses 表）。 */
+    String clientAddressOf(int id) {
+        Node x = node(id);
+        return "127.0.0.1:" + (x.raftPort + 10_000);
+    }
+
+    /**
      * 选举一个可停的 Follower 并停止之。
      *
      * @return 被停节点 id
@@ -317,14 +357,14 @@ final class ClusterHarness implements AutoCloseable {
             this.ctx = channel.pipeline().firstContext();
         }
 
-        /** 集群 HELLO 直驱，等待 HelloResponse。 */
+        /** 集群 HELLO 直驱（v2，S3 起与真实客户端同版本），等待 HelloResponse。 */
         Envelope hello(long requestId) {
             Envelope msg = Envelope.newBuilder()
-                    .setProtocolVersion(1)
+                    .setProtocolVersion(2)
                     .setType(MessageType.HELLO)
                     .setRequestId(requestId)
                     .setHelloRequest(HelloRequest.newBuilder()
-                            .setClientProtocolVersion(1).setClientName("harness"))
+                            .setClientProtocolVersion(2).setClientName("harness"))
                     .build();
             node.runtime.sessionCoordinator().handleHello(ctx, session, msg);
             return awaitOutbound(10_000);

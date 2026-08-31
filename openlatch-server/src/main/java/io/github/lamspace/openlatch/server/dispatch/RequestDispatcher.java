@@ -290,6 +290,9 @@ public final class RequestDispatcher {
             case LOCK_ACQUIRE -> b.setAcquireResponse(AcquireResponse.newBuilder().setStatus(status));
             case LOCK_RELEASE -> b.setReleaseResponse(ReleaseResponse.newBuilder().setStatus(status));
             case LEASE_RENEW -> b.setLeaseRenewResponse(LeaseRenewResponse.newBuilder().setStatus(status));
+            // v2：CLUSTER_VIEW 自带 status，拒绝路径状态码在线路可见（空成员表）。
+            case CLUSTER_VIEW -> b.setClusterView(
+                    io.github.lamspace.openlatch.protocol.ClusterView.newBuilder().setStatus(status));
             default -> {
             }
         }

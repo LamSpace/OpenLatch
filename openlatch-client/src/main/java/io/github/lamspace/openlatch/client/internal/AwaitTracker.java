@@ -31,6 +31,8 @@ import io.netty.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -85,6 +87,53 @@ public final class AwaitTracker {
     private final BiConsumer<AcquireSpec, LockGrant> onGranted;
     /** 已结束等待映射的保留时长（毫秒）。 */
     private final long abandonedRetentionMs;
+    /**
+     * v2 {@code NOT_LEADER} 接管钩子（S3 客户端重定向，详设 §6.3）：
+     * 默认空实现（返回 false，按错误码失败等待——v1/单机语义回归不变）。
+     */
+    private volatile NotLeaderHandler notLeaderHandler = request -> false;
+
+    /**
+     * {@code NOT_LEADER} 接管请求：交付客户端重定向编排所需的完整上下文。
+     *
+     * @param requestId     本次等待的请求 id（同会话重发复用）
+     * @param envelope      原获取信封（同会话原地重发原样复用）
+     * @param spec          获取参数（新会话重放时重建信封用）
+     * @param userFuture    用户 future（接管后由其延续到重放终态）
+     * @param leaderNodeId  服务端提示的 Leader nodeId（-1=服务端暂不知晓）
+     * @param leaderAddress 服务端提示的 Leader 接入地址（空串=未提供）
+     * @param remainingMs   等待总预算剩余（毫秒；非正表示预算耗尽）
+     */
+    public record NotLeaderRequest(long requestId, Envelope envelope, AcquireSpec spec,
+            CompletableFuture<LockGrant> userFuture, long leaderNodeId, String leaderAddress,
+            long remainingMs) {
+    }
+
+    /**
+     * {@code NOT_LEADER} 接管处理器。
+     */
+    @FunctionalInterface
+    public interface NotLeaderHandler {
+
+        /**
+         * 等待收到 NOT_LEADER 时被调用。
+         *
+         * @param request 接管上下文
+         * @return {@code true} 表示接管——跟踪器仅摘除登记、不终止用户
+         *         future（终态由处理器的重放链交付）；{@code false} 表示
+         *         不接管，按错误码使等待失败（v1 兼容路径）
+         */
+        boolean onNotLeader(NotLeaderRequest request);
+    }
+
+    /**
+     * 装配 {@code NOT_LEADER} 接管钩子（客户端 v2 编排调用）。
+     *
+     * @param handler 处理器；{@code null} 回落为不接管（v1 语义）
+     */
+    public void setNotLeaderHandler(NotLeaderHandler handler) {
+        this.notLeaderHandler = handler == null ? request -> false : handler;
+    }
 
     /**
      * 挂起等待条目。全部终止性迁移在条目内置锁（{@code synchronized(this)}）内完成。
@@ -102,6 +151,8 @@ public final class AwaitTracker {
         private Timeout totalTimeoutTask;
         /** 是否曾收到 QUEUED：重发超时保持挂起（D1）的判定依据。 */
         private volatile boolean everQueued;
+        /** 等待总截止时刻（epoch 毫秒；{@code Long.MAX_VALUE}=不限时/立即式）。 */
+        private final long deadlineMs;
 
         /**
          * 创建等待条目。
@@ -110,13 +161,15 @@ public final class AwaitTracker {
          * @param envelope  获取请求信封
          * @param spec      获取参数
          * @param userFuture 用户 future
+         * @param deadlineMs 等待总截止时刻（epoch 毫秒）
          */
         WaitEntry(long requestId, Envelope envelope, AcquireSpec spec,
-                CompletableFuture<LockGrant> userFuture) {
+                CompletableFuture<LockGrant> userFuture, long deadlineMs) {
             this.requestId = requestId;
             this.envelope = envelope;
             this.spec = spec;
             this.userFuture = userFuture;
+            this.deadlineMs = deadlineMs;
         }
     }
 
@@ -157,7 +210,8 @@ public final class AwaitTracker {
      */
     public void startAcquire(long requestId, Envelope envelope, AcquireSpec spec,
             CompletableFuture<LockGrant> userFuture, long totalTimeoutMs) {
-        WaitEntry entry = new WaitEntry(requestId, envelope, spec, userFuture);
+        WaitEntry entry = new WaitEntry(requestId, envelope, spec, userFuture,
+                totalTimeoutMs > 0 ? System.currentTimeMillis() + totalTimeoutMs : Long.MAX_VALUE);
         waits.put(requestId, entry);
         if (totalTimeoutMs > 0) {
             entry.totalTimeoutTask = timer.newTimeout(t -> onTotalTimeout(requestId),
@@ -248,6 +302,48 @@ public final class AwaitTracker {
     }
 
     /**
+     * 可迁移等待快照（S3 Leader 改道：本车道降级时挂起项向新主车道的
+     * 重新排队移交上下文）。
+     *
+     * @param requestId   原请求 id（新车道重放将换新 id）
+     * @param envelope    原信封（spec 字段重建来源）
+     * @param spec        获取参数
+     * @param userFuture  用户 future（迁移不改其终态责任，由重放链交付）
+     * @param remainingMs 等待总预算剩余（毫秒；不限时为负值）
+     */
+    public record PendingWait(long requestId, Envelope envelope, AcquireSpec spec,
+            CompletableFuture<LockGrant> userFuture, long remainingMs) {
+    }
+
+    /**
+     * 摘取全部挂起等待并交还调用方重放（Leader 改道迁移专用）：条目从
+     * 挂起表移除、总超时任务取消、future 保持未完成；同时登记保留映射，
+     * 使旧队列迟到的授予经补偿归还路径消化，不产生孤儿锁。
+     *
+     * @return 迁移上下文列表（已完成 future 的条目仅摘除、不返回）
+     */
+    public List<PendingWait> drainPending() {
+        List<PendingWait> out = new ArrayList<>();
+        for (Long requestId : waits.keySet()) {
+            WaitEntry entry = waits.remove(requestId);
+            if (entry == null) {
+                continue;
+            }
+            synchronized (entry) {
+                if (entry.userFuture.isDone()) {
+                    continue;
+                }
+                long remaining = entry.deadlineMs == Long.MAX_VALUE
+                        ? -1L : entry.deadlineMs - System.currentTimeMillis();
+                endWait(entry);
+                out.add(new PendingWait(entry.requestId, entry.envelope, entry.spec,
+                        entry.userFuture, remaining));
+            }
+        }
+        return out;
+    }
+
+    /**
      * 发送（或重发）获取请求，响应回到 {@link #handleResponse}。
      *
      * @param entry 等待条目
@@ -333,9 +429,37 @@ public final class AwaitTracker {
                 }
             }
             case DENIED -> failWait(entry, new LockDeniedException(entry.spec.key()));
+            case NOT_LEADER -> onNotLeader(entry, response);
             default -> failWait(entry, new OpenLatchException(response.getStatus(),
                     "acquire of '" + entry.spec.key() + "' failed: " + response.getStatus()));
         }
+    }
+
+    /**
+     * {@code NOT_LEADER}（v2）分发：装配了接管钩子且返回 {@code true} 时，
+     * 摘除登记但不终止用户 future（客户端改连新 Leader 或以同 requestId 原地
+     * 重发后重新驱动）；否则按错误码使等待失败（v1 兼容/立即式路径）。
+     *
+     * @param entry    等待条目
+     * @param response 携带 leader 提示的拒绝响应
+     */
+    private void onNotLeader(WaitEntry entry, AcquireResponse response) {
+        NotLeaderHandler handler = notLeaderHandler;
+        long remaining = entry.deadlineMs == Long.MAX_VALUE
+                ? -1L : entry.deadlineMs - System.currentTimeMillis();
+        boolean taken = handler.onNotLeader(new NotLeaderRequest(
+                entry.requestId, entry.envelope, entry.spec, entry.userFuture,
+                response.getLeaderNodeId(), response.getLeaderAddress(), remaining));
+        if (taken) {
+            synchronized (entry) {
+                if (!entry.userFuture.isDone()) {
+                    endWait(entry);
+                }
+            }
+            return;
+        }
+        failWait(entry, new OpenLatchException(response.getStatus(),
+                "acquire of '" + entry.spec.key() + "' failed: " + response.getStatus()));
     }
 
     /**

@@ -97,6 +97,8 @@ public final class SessionCoordinator {
     private final long probeIntervalMs;
     /** 默认租约（HelloResponse 携带，供客户端看门狗参考）。 */
     private final long defaultLeaseMs;
+    /** Leader 提示单源（HELLO 应答的 leader_hint/leader_address 来源，design D3）。 */
+    private final LeaderTracker leaderTracker;
 
     /** 本节点 localSeq 发号器（低 32 位，从 1 起）。 */
     private final AtomicLong localSeq = new AtomicLong(1);
@@ -114,15 +116,16 @@ public final class SessionCoordinator {
     /**
      * 构造协调器并启动探针调度（非 Leader 时各 tick 空转短路）。
      *
-     * @param subsystem  Raft 子系统
-     * @param gateway    复制网关
-     * @param kernel     状态机内核
-     * @param registry   连接注册表
-     * @param config     服务器配置（默认租约展示值）
+     * @param subsystem     Raft 子系统
+     * @param gateway       复制网关
+     * @param kernel        状态机内核
+     * @param registry      连接注册表
+     * @param config        服务器配置（默认租约展示值）
+     * @param leaderTracker Leader 提示单源（HELLO 应答填充 leader 字段）
      */
     public SessionCoordinator(RaftSubsystem subsystem, ReplicationGateway gateway,
                               LockStateMachineCore kernel, ServerSessionRegistry registry,
-                              ServerConfig config) {
+                              ServerConfig config, LeaderTracker leaderTracker) {
         this.subsystem = subsystem;
         this.gateway = gateway;
         this.kernel = kernel;
@@ -130,6 +133,7 @@ public final class SessionCoordinator {
         this.nodeId = subsystem.clusterConfig().nodeId();
         this.probeIntervalMs = subsystem.clusterConfig().electionTimeoutMs();
         this.defaultLeaseMs = config.defaultLeaseMs();
+        this.leaderTracker = leaderTracker;
         gateway.setSessionCoordinator(this);
         this.probeScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "openlatch-session-probe");
@@ -152,7 +156,9 @@ public final class SessionCoordinator {
     /**
      * 集群 HELLO 路径：分配 sid → 提交 SESSION_OPEN → 应用回执后于本连接
      * EventLoop 写回 {@code HelloResponse}（成功激活登记；失败回可重试错误，
-     * 连接保持可重发 HELLO——门闩未置已握手）。
+     * 连接保持可重发 HELLO——门闩未置已握手）。两条路径均随附
+     * {@link LeaderTracker} 单源的 leader 提示（v2 客户端据此直连/改道；
+     * 提示取应答构造时刻的快照，选举空窗以 -1/空串呈现）。
      *
      * @param ctx     连接上下文
      * @param session 连接簿记
@@ -170,31 +176,36 @@ public final class SessionCoordinator {
                         submitClose(sid);
                         return;
                     }
+                    LeaderTracker.Snapshot leader = leaderTracker.snapshot();
                     if (err != null) {
                         // 提交失败但条目可能已在途提交（leader 切换竞态）：补发
                         // 关闭保证不留下"无连接持有"的孤儿会话登记（副本侧幂等）。
                         log.warn("SESSION_OPEN failed for sid={} on node {}", sid, nodeId, err);
                         submitClose(sid);
                         ctx.writeAndFlush(Envelope.newBuilder()
-                                .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
+                                .setProtocolVersion(msg.getProtocolVersion())
                                 .setType(MessageType.HELLO)
                                 .setRequestId(msg.getRequestId())
                                 .setHelloResponse(HelloResponse.newBuilder()
-                                        .setStatus(StatusCode.NOT_LEADER).setSessionId(0))
+                                        .setStatus(StatusCode.NOT_LEADER).setSessionId(0)
+                                        .setLeaderHint(leader.leaderNodeId())
+                                        .setLeaderAddress(leader.leaderAddress()))
                                 .build());
                         return;
                     }
-                    session.activate(sid);
+                    session.activate(sid, msg.getProtocolVersion());
                     registry.register(session);
                     ctx.writeAndFlush(Envelope.newBuilder()
-                            .setProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
+                            .setProtocolVersion(msg.getProtocolVersion())
                             .setType(MessageType.HELLO)
                             .setRequestId(msg.getRequestId())
                             .setHelloResponse(HelloResponse.newBuilder()
                                     .setStatus(StatusCode.OK)
                                     .setSessionId(sid)
                                     .setServerProtocolVersion(OpenLatchServer.PROTOCOL_VERSION)
-                                    .setDefaultLeaseMs(defaultLeaseMs))
+                                    .setDefaultLeaseMs(defaultLeaseMs)
+                                    .setLeaderHint(leader.leaderNodeId())
+                                    .setLeaderAddress(leader.leaderAddress()))
                             .build());
                 }));
     }

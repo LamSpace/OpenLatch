@@ -34,6 +34,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.IntConsumer;
 
 /**
  * Ratis 状态机适配器（详设 §3.2 {@code LockStateMachine}）：把 Ratis 的
@@ -68,6 +69,12 @@ public final class LockStateMachine extends BaseStateMachine {
     private volatile ApplyObserver observer;
     /** 本节点 Raft 成员 id，用于把 Leader 变更事件折算成本节点角色。 */
     private volatile RaftPeerId selfId;
+    /**
+     * Leader 身份监听器（{@link LeaderTracker} 的挂点）：每次 Leadership
+     * 变更回调携带<b>新 Leader 的 nodeId</b>（选举中无 Leader 时为 -1），
+     * 不再仅折算本节点布尔角色（volatile：事件线程读、装配线程写）。
+     */
+    private volatile IntConsumer leaderIdentityListener;
 
     /**
      * 构造状态机。
@@ -147,10 +154,14 @@ public final class LockStateMachine extends BaseStateMachine {
 
     /**
      * Leader 变更事件：折算为本节点角色后转发观察者（在途回执收尾与
-     * 任期队列清理的触发源，§4.4/§8）。
+     * 任期队列清理的触发源，§4.4/§8），并把新 Leader 身份投递
+     * {@link #setLeaderIdentityListener 领导身份监听器}（s3 design D3 的
+     * {@link LeaderTracker} 数据源）：成员 id "n&lt;nodeId&gt;" 折算为数值
+     * nodeId，选举中无 Leader（或无法解析）以 -1 表达。两个转发都同步、
+     * 不阻塞（观察者契约）。
      *
      * @param groupMemberId 组成员标识
-     * @param newLeaderId   新 Leader 的 peer id
+     * @param newLeaderId   新 Leader 的 peer id，{@code null} 表示暂无 Leader
      */
     @Override
     public void notifyLeaderChanged(org.apache.ratis.protocol.RaftGroupMemberId groupMemberId,
@@ -160,6 +171,38 @@ public final class LockStateMachine extends BaseStateMachine {
         RaftPeerId self = selfId;
         if (obs != null && self != null) {
             obs.onLeaderChanged(newLeaderId != null && newLeaderId.equals(self));
+        }
+        IntConsumer listener = leaderIdentityListener;
+        if (listener != null) {
+            listener.accept(parseNodeId(newLeaderId));
+        }
+    }
+
+    /**
+     * 装配领导身份监听器（{@link LeaderTracker} 挂点，s3 design D3）。
+     * 须在 {@code RaftServer} 启动前注册；重复调用以最后一次为准。
+     *
+     * @param listener 监听器，{@code null} 表示摘除
+     */
+    public void setLeaderIdentityListener(IntConsumer listener) {
+        this.leaderIdentityListener = listener;
+    }
+
+    /**
+     * 把 Ratis 成员 id（约定 "n&lt;nodeId&gt;"）折算为数值 nodeId。
+     *
+     * @param peerId Leader 成员 id，可为 {@code null}
+     * @return 数值 nodeId；无 Leader 或形态不识别时为 -1（提示降级为未知）
+     */
+    private static int parseNodeId(RaftPeerId peerId) {
+        if (peerId == null) {
+            return -1;
+        }
+        String s = peerId.toString();
+        try {
+            return Integer.parseInt(s.substring(1));
+        } catch (IndexOutOfBoundsException | NumberFormatException e) {
+            return -1;
         }
     }
 

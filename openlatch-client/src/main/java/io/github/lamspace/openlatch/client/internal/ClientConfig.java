@@ -17,17 +17,24 @@
 package io.github.lamspace.openlatch.client.internal;
 
 import java.time.Duration;
+import java.util.List;
 
 /**
- * 客户端配置（不可变，详设 §6.7 默认值表）。
+ * 客户端配置（不可变，详设 §6.7 默认值表；v2 增种子列表，详设 §6.3）。
  *
  * <p>由 {@link io.github.lamspace.openlatch.client.OpenLatchClient.Builder} 校验并构建，
  * 构建后各组件只读共享，无任何可变状态。所有超时类参数必须为正数时长；
  * 重连退避上限不得小于初始退避；工作线程数至少为 1。校验在 Builder 中完成，
  * 本 record 不做重复校验。
  *
- * @param host                  服务器主机名或地址（必填）
- * @param port                  服务器端口（必填）
+ * <p><b>种子语义（S3）</b>：{@code host/port} 即种子列表首项（Phase 1 单地址入口的
+ * 兼容形态）；{@code seeds} 为全部已解析种子地址（首项与 host/port 一致），
+ * 断连重连先试原地址、失败后按序轮询本表；集群 Leader 改连提示地址不在表内时，
+ * 强制发现亦以本表为扇出集合。
+ *
+ * @param host                  服务器主机名或地址（必填；种子列表首项）
+ * @param port                  服务器端口（必填；种子列表首项端口）
+ * @param seeds                 种子地址表（非空，首项 = host:port；单地址入口为一元表）
  * @param requestTimeout        单个请求（获取/释放/续租）的超时，默认 5s
  * @param defaultWaitTimeout    {@code lock()} 的总等待兜底超时，默认 30s
  * @param connectTimeout        TCP 连接 + 握手的总超时，默认 3s
@@ -38,10 +45,39 @@ import java.time.Duration;
 public record ClientConfig(
         String host,
         int port,
+        List<SeedAddress> seeds,
         Duration requestTimeout,
         Duration defaultWaitTimeout,
         Duration connectTimeout,
         Duration reconnectInitialBackoff,
         Duration reconnectMaxBackoff,
         int workerThreads) {
+
+    /**
+     * 兼容构造：Phase 1 的 8 参形态（单地址 = 一元种子表）。
+     *
+     * @param host                  服务器主机
+     * @param port                  服务器端口
+     * @param requestTimeout        请求超时
+     * @param defaultWaitTimeout    等待兜底超时
+     * @param connectTimeout        连接超时
+     * @param reconnectInitialBackoff 初始退避
+     * @param reconnectMaxBackoff   退避上限
+     * @param workerThreads         EventLoop 线程数
+     */
+    public ClientConfig(String host, int port, Duration requestTimeout, Duration defaultWaitTimeout,
+            Duration connectTimeout, Duration reconnectInitialBackoff, Duration reconnectMaxBackoff,
+            int workerThreads) {
+        this(host, port, List.of(new SeedAddress(host, port)), requestTimeout, defaultWaitTimeout,
+                connectTimeout, reconnectInitialBackoff, reconnectMaxBackoff, workerThreads);
+    }
+
+    /**
+     * 种子地址（host 与 port 已分离，构造期校验在 Builder 完成）。
+     *
+     * @param host 主机名或地址
+     * @param port 端口
+     */
+    public record SeedAddress(String host, int port) {
+    }
 }

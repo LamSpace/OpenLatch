@@ -54,6 +54,8 @@ public final class ClusterRuntime {
     private final LeaseExpiryDriver expiryDriver;
     /** 写请求集群处理器。 */
     private final ClusterRequestHandler requestHandler;
+    /** Leader 提示单源视图（s3 design D3：HELLO/NOT_LEADER/CLUSTER_VIEW 共用）。 */
+    private final LeaderTracker leaderTracker;
 
     /**
      * 私有装配构造（仅 {@link #create} 调用）。
@@ -64,16 +66,19 @@ public final class ClusterRuntime {
      * @param sessionCoordinator 会话协调器
      * @param expiryDriver       到期驱动
      * @param requestHandler     写请求处理器
+     * @param leaderTracker      Leader 提示视图
      */
     private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
                            ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
-                           LeaseExpiryDriver expiryDriver, ClusterRequestHandler requestHandler) {
+                           LeaseExpiryDriver expiryDriver, ClusterRequestHandler requestHandler,
+                           LeaderTracker leaderTracker) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
         this.sessionCoordinator = sessionCoordinator;
         this.expiryDriver = expiryDriver;
         this.requestHandler = requestHandler;
+        this.leaderTracker = leaderTracker;
     }
 
     /**
@@ -88,21 +93,34 @@ public final class ClusterRuntime {
     public static ClusterRuntime create(ClusterConfig clusterConfig, ServerConfig config,
                                         ServerSessionRegistry registry) throws IOException {
         RaftSubsystem subsystem = new RaftSubsystem(clusterConfig, config.toCoreConfig());
+        // Leader 提示单源（s3 design D3）：监听器须在 RaftServer 启动前挂上，
+        // 首个 Leadership 事件抵达前快照保持「未知」（提示以 -1 呈现）。
+        LeaderTracker leaderTracker = new LeaderTracker(clusterConfig);
+        subsystem.stateMachine().setLeaderIdentityListener(leaderTracker::onLeaderChanged);
         subsystem.start();
         WaitQueue waitQueue = new WaitQueue(config.maxQueueDepthPerKey(), config.headReplyTimeoutMs());
         ReplicationGateway gateway =
                 new ReplicationGateway(subsystem, subsystem.core(), waitQueue, registry);
         SessionCoordinator sessionCoordinator = new SessionCoordinator(
-                subsystem, gateway, subsystem.core(), registry, config);
+                subsystem, gateway, subsystem.core(), registry, config, leaderTracker);
         LeaseExpiryDriver expiryDriver =
                 new LeaseExpiryDriver(subsystem, subsystem.core(), gateway, config.leaseTickIntervalMs());
         gateway.setExpiryDriver(expiryDriver);
         expiryDriver.start();
         ClusterRequestHandler handler =
-                new ClusterRequestHandler(gateway, subsystem.core(), waitQueue, config);
+                new ClusterRequestHandler(gateway, subsystem.core(), waitQueue, config, leaderTracker);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
-                expiryDriver, handler);
+                expiryDriver, handler, leaderTracker);
+    }
+
+    /**
+     * Leader 提示视图（HELLO/NOT_LEADER/CLUSTER_VIEW 消费，s3 design D3）。
+     *
+     * @return 跟踪器（与运行时同生命周期）
+     */
+    public LeaderTracker leaderTracker() {
+        return leaderTracker;
     }
 
     /**

@@ -5,12 +5,12 @@
 | 项目名称 | **OpenLatch**                                                                                                       |
 | 文档类型 | 详细设计说明书（Phase 2 / Raft 集群）                                                                               |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0、《OpenLatch-Phase1-详细设计说明书》v1.0 |
-| 版本     | v1.1                                                                                                                |
-| 日期     | 2026-08-30                                                                                                          |
+| 版本     | v1.2                                                                                                                |
+| 日期     | 2026-08-31                                                                                                          |
 | 作者     | Lam Tong                                                                                                            |
-| 状态     | 待评审（v1.1 为 S1 定案回写，见 §2.1）                                                                              |
+| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，见 §6/§9/§13.3）                                                    |
 
-**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭。
+**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）。
 
 ---
 
@@ -115,10 +115,13 @@ server/raft/
 ├── RaftSubsystem           初始化/关停 Raft 库；生命周期与 OpenLatchServer 绑定
 ├── LockStateMachine        Raft 状态机适配器：日志条目 → CoreEngine 调用；快照序列化/加载
 ├── ReplicationGateway      Leader 侧：core 命令 → 日志提交 → 提交后响应客户端
-├── ForwardingProxy         Follower 侧：接收到的写请求转发 Leader（内部通道）
+│                           （亦是 Follower 转发道：RELEASE/RENEW 经此内部提交至 Leader）
 ├── SessionCoordinator      会话的集群登记（§5）
+├── ClusterRequestHandler   集群写请求接入：预检/分车道裁决（§4.5）
 └── LeaderTracker           当前 Leader 变更事件 → 通知接入层与客户端提示
 ```
+
+> v1.2 实现落点：原规划的独立 `ForwardingProxy` 类未单列——Follower 侧 RELEASE/RENEW 的转发直接复用 `ReplicationGateway` 的内部提交通道（`SESSION_OPEN` 本就走此路），`ClusterRequestHandler` 摘除角色门即接入；`LeaderTracker` 为 S3 新增（`server.raft`），保留 Ratis `notifyLeaderChanged` 的新 Leader 身份并折算为 `{nodeId, address}` 提示单源。`ClusterRequestHandler`/`LeaderTracker` 均为详设结构在实现中的落点补全，不改变 §3.1 拓扑。
 
 `CoreEngine`（openlatch-core） **零改动**复用：集群化改变的是"谁调用它、何时响应客户端"，不改变锁语义本身。这是 Phase 1 将核心隔离为纯 Java 模块的直接收益。
 
@@ -196,6 +199,15 @@ Raft 要求状态机确定性回放。锁语义中唯一的非确定来源是 **
     - "需排队"时本地即时响应（延迟与单机一致）；
     - 状态机回放的 ACQUIRE 条目因此总是"授予"语义（提交前已在 Leader 本地预演判定可授予）；Leader 切换导致预演结果失效的窗口由客户端重试覆盖（§8）。
 
+**Follower 写请求分车道（v1.2 / S3/P2-12）**：非 Leader 节点对三类写按"是否依赖当值节点本地态"分道处理——
+
+| 车道 | 请求 | Follower 处理 | 依据 |
+|------|------|--------------|------|
+| 拒绝+改道 | ACQUIRE | 立即 `NOT_LEADER` + Leader 提示（选举空窗 nodeId=-1），不产生条目、不动等待队列 | 排队登记与 `AWAIT_NOTIFY` 推送是 Leader 本地态（§4.4），Follower 受理无法保证通知送达 |
+| 转发 | RELEASE / RENEW | 摘除角色门，经内部提交通道（与 `SESSION_OPEN` 同车道，即 §3.2 `ForwardingProxy` 机制本体）提交至当值 Leader 复制执行 | 纯 token/归属校验、无 Leader 本地态依赖；Leader 按 §5.2 规则 2 校验 `sessionId` 登记于复制状态 |
+
+由此"Leader 切换后存活会话的存量锁可续可解"成立（§11 验收 2），且该转发对 v1 客户端同样生效。客户端连接拓扑对应设计为"稳态单连接（home 即 Leader），故障期双车道（home 转发出口 + Leader 获取道）"（`s3-leader-discovery-failover` design D6）。
+
 ---
 
 ## 5. 会话的集群化
@@ -220,31 +232,41 @@ Phase 1 中"连接断开 → 立即清理该会话的锁"依赖连接与服务�
 
 ## 6. 协议扩展（S3 客户端侧）
 
-### 6.1 向后兼容原则
+### 6.1 向后兼容原则（v1.2 实现口径）
 
-- `protocol_version` 升为 **2**；服务端同时接受 v1 与 v2 客户端（v1 客户端在集群模式下可正常工作，只是不理解 `leaderHint`，表现为收到 `NOT_LEADER` 后按普通错误重试——可降级但体验差，文档建议升级）；
-- 不删除、不复用任何 Phase 1 字段与错误码；仅新增。
+- `protocol_version` 升为 **2**；服务端握手接受区间 `[1,2]`（`OpenLatchServer.isClientVersionSupported`），区间外回 `INVALID_REQUEST` 并断连，不做隐式兼容；应答信封 `protocol_version` **回显请求版本**，故 v1 客户端看到与 Phase 1 同形的响应（新增字段为其未知字段，proto3 容忍）；
+- **v1 客户端在集群模式的实际能力**（分车道，见 §4.5/§3.2）：其存量锁的 RENEW/RELEASE 经 Follower 转发车道正常送达 Leader（**可用**）；仅"新 ACQUIRE 恰好落在 Follower"时会收到 `NOT_LEADER`——v1 不理解 hint，表现为按普通错误码失败，需应用重试或（推荐）升级到 v2 客户端获得自动改连；单机模式行为与 Phase 1 逐字节一致；
+- 不删除、不复用任何 Phase 1 字段与错误码；仅新增枚举值/字段/消息。Phase 1 已发布编号由 `OpenlatchProtoContractFreezeTest` 逐行钉死。
 
-### 6.2 新增/变更
+### 6.2 新增/变更（v1.2 定稿编号）
 
 ```proto
-// HelloResponse 新增
-int64  leader_node_id = 6;    // 当前 Leader 的 nodeId；-1 表示未知
-string leader_address = 7;    // 当前 Leader 的接入地址（host:port）
+// Envelope.protocol_version：v1 固定 1；v2 起请求填 1 或 2，服务端回显请求版本
+// MessageType 新增：CLUSTER_VIEW = 7（请求无 payload，任意节点作答）
 
-// AcquireResponse / ReleaseResponse / LeaseRenewResponse 的 status 现已可取：
-// NOT_LEADER（Phase 1 预留码，Phase 2 启用）
+// HelloResponse：复用 Phase 1 预留的 leader_hint 承载 nodeId，新增地址字段
+int64  leader_hint    = 5;  // v2 启用（Phase 1 预留）：Leader 的 nodeId；集群模式必填——
+                            // >0 为 Leader nodeId，-1=本节点暂不知晓，单机模式不填(0)
+string leader_address = 6;  // v2：Leader 接入地址（host:port）；未配置地址映射时为空串
 
-// 新增消息（Envelope oneof 新增字段）
-message ClusterView {         // 客户端可请求（新增 MessageType CLUSTER_VIEW = 7）
+// 三类写响应：NOT_LEADER（Phase 1 预留码，v2 启用）随附提示载体（仅拒绝路径填充）
+AcquireResponse     { int64 leader_node_id=6;  string leader_address=7;  }
+ReleaseResponse     { int64 leader_node_id=3;  string leader_address=4;  }
+LeaseRenewResponse  { int64 leader_node_id=3;  string leader_address=4;  }
+
+// 新增消息（Envelope oneof 新增字段 = 19）
+message ClusterView {         // 应答含 status 自述（OK+成员表 / 错误码+空表），v2 未发布前增补
   repeated NodeInfo nodes = 1;
+  StatusCode status      = 2;  // 保证单机拒绝路径状态码线路可见
 }
 message NodeInfo {
-  int64  node_id  = 1;
-  string address  = 2;
+  int64  node_id   = 1;
+  string address   = 2;  // 未配置 client-addresses 时空串（客户端种子自报兜底）
   bool   is_leader = 3;
 }
 ```
+
+> v1.1 草稿曾拟 `HelloResponse` 另起 `leader_node_id=6/leader_address=7`；实现复用 Phase 1 既预留的 `leader_hint=5` 作 nodeId、`leader_address=6` 作地址，避免字段 5 空置与双 id。三类写响应的 hint 载体（v1.1 §6.3 提及"随附 leaderHint"但未定义字段）在此补齐。
 
 ### 6.3 客户端 Leader 发现与故障转移
 
@@ -319,6 +341,7 @@ message NodeInfo {
 | `openlatch.cluster.enabled`             | `false`   | 关闭即 Phase 1 单机行为（同一二进制） |
 | `openlatch.cluster.node-id`             | 必填      | 节点唯一 id                           |
 | `openlatch.cluster.peers`               | 必填      | `id@host:raftPort` 列表               |
+| `openlatch.cluster.client-addresses`    | 空（可选）| v1.2 新增：`id@host:port` 接入地址映射，供 Leader 提示与 `CLUSTER_VIEW` 作答。缺省不阻塞启动，`leader_address` 降级为空串、客户端以种子自报兜底 |
 | `openlatch.cluster.raft-port`           | `9411`    | Raft 复制通信端口                     |
 | `openlatch.cluster.data-dir`            | `./data`  | 日志与快照目录                        |
 | `openlatch.cluster.snapshot-threshold`  | `1000000` | 快照触发条目数                        |
@@ -387,7 +410,7 @@ message NodeInfo {
 | ID    | 子任务                         | 内容与交付物                                                                         | 前置  | 验证                                |
 |-------|--------------------------------|--------------------------------------------------------------------------------------|-------|-------------------------------------|
 | P2-11 | 协议 v2 扩展                   | `HelloResponse` leader 字段、启用 `NOT_LEADER`、`CLUSTER_VIEW`；服务端兼容 v1 客户端 | P2-10 | 协议测试全绿；v1 客户端行为回归不变 |
-| P2-12 | LeaderTracker 与 Follower 拒绝 | Leadership 变更事件；Follower 写请求回 `NOT_LEADER` + leaderHint                     | P2-11 | 角色切换后的响应行为用例通过        |
+| P2-12 | LeaderTracker 与 Follower 分车道 | `LeaderTracker`（保留 Ratis 新主身份→`{nodeId,address}` 提示单源，§3.2/§4.5）；Follower 分车道：ACQUIRE 回 `NOT_LEADER`+提示、RELEASE/RENEW 经转发道由 Leader 复制执行（§4.5） | P2-11 | 角色切换后的响应行为用例通过（`LeaderFailoverServerTest`）；提示一致性三消费方同源 |
 | P2-13 | 客户端 Leader 发现             | 种子列表、HELLO hint 直连、`NOT_LEADER` 重定向、连续 3 次失败强制发现（§6.3）        | P2-12 | §6.3 流程逐分支用例通过             |
 | P2-14 | 杀 Leader 演练自动化           | 计时脚本 + 存活会话锁保留断言 + 等待者重排队断言                                     | P2-13 | 端到端恢复 < 10s；**S3 退出**       |
 

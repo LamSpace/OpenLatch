@@ -6,6 +6,8 @@ OpenLatch 是一个轻量级分布式锁服务（Phase 1 / MVP）：单节点内
 
 **Phase 1 不包含**：集群/ Raft（Phase 2）、FairLock/Semaphore/CountDownLatch、监控控制台、TLS 与认证（Phase 3）。协议为后续能力预留字段。
 
+> Phase 2（Raft 集群）正在分阶段交付（S1 选型 / S2 复制状态机 / S3 Leader 发现与故障转移已完成，S4 快照与容错进行中）；集群部署与客户端故障转移行为见 [《Phase 2 集群部署与故障转移指南》](docs/OpenLatch-Phase2-集群部署与故障转移.md)。
+
 ## 模块
 
 | 模块 | 说明 |

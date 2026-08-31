@@ -72,6 +72,59 @@ class ClusterConfigTest {
                 .hasMessageContaining("openlatch.cluster.peers");
     }
 
+    /** spec"地址映射未配置不阻塞启动"：缺省空表，查询降级为空串。 */
+    @Test
+    void clientAddressesAbsentDegradesToEmpty() {
+        Properties p = props(
+                "openlatch.cluster.enabled", "true",
+                "openlatch.cluster.node-id", "1",
+                "openlatch.cluster.peers", "1@a:9411,2@b:9412");
+        ClusterConfig c = ClusterConfig.fromProperties(p);
+        assertThat(c.clientAddresses()).isEmpty();
+        assertThat(c.clientAddress(2)).isEmpty();
+    }
+
+    /** 合法地址映射：逐 id 查询命中，未知 id 回落空串。 */
+    @Test
+    void clientAddressesLegalParsesMap() {
+        Properties p = props(
+                "openlatch.cluster.enabled", "true",
+                "openlatch.cluster.node-id", "1",
+                "openlatch.cluster.peers", "1@a:9411,2@b:9412",
+                "openlatch.cluster.client-addresses", "1@x:9410,2@y:9411");
+        ClusterConfig c = ClusterConfig.fromProperties(p);
+        assertThat(c.clientAddressMap()).hasSize(2);
+        assertThat(c.clientAddress(1)).isEqualTo("x:9410");
+        assertThat(c.clientAddress(2)).isEqualTo("y:9411");
+        assertThat(c.clientAddress(3)).isEmpty();
+    }
+
+    /** spec"地址映射非法启动失败"：格式非法指明配置键与具体条目。 */
+    @Test
+    void malformedClientAddressRejected() {
+        Properties p = props(
+                "openlatch.cluster.enabled", "true",
+                "openlatch.cluster.node-id", "1",
+                "openlatch.cluster.peers", "1@a:9411",
+                "openlatch.cluster.client-addresses", "1@x:notaport");
+        assertThatThrownBy(() -> ClusterConfig.fromProperties(p))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("openlatch.cluster.client-addresses");
+    }
+
+    /** spec"地址映射非法启动失败"：nodeId 重复拒绝。 */
+    @Test
+    void duplicateClientAddressIdRejected() {
+        Properties p = props(
+                "openlatch.cluster.enabled", "true",
+                "openlatch.cluster.node-id", "1",
+                "openlatch.cluster.peers", "1@a:9411",
+                "openlatch.cluster.client-addresses", "1@x:9410,1@y:9411");
+        assertThatThrownBy(() -> ClusterConfig.fromProperties(p))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("重复节点 id");
+    }
+
     @Test
     void legalConfigParsesAllKeys() {
         Properties p = props(

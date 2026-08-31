@@ -21,7 +21,9 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -35,10 +37,15 @@ import java.util.Properties;
  * <p><b>校验契约</b>：{@code enabled=true} 时 {@code node-id} 与 {@code peers}
  * 必填且 {@code peers} 必须包含本节点条目；缺失/非法以指明配置键的
  * {@link IllegalArgumentException} 快速失败，MUST NOT 静默降级为单机。
+ * {@code clientAddresses} 为可选项：配置时逐条校验 {@code id@host:port} 格式
+ * 与 id 唯一（未配置不阻塞启动，Leader 提示的地址字段降级为空串，
+ * 客户端以种子发现兜底，见 s3 design D4）。
  *
  * @param enabled           是否启用集群（{@code false} 即 Phase 1 单机）
  * @param nodeId            本节点唯一 id（启用时必填，≥1；参与 sessionId 高位编码）
  * @param peers             全成员列表 {@code id@host:port}（启用时必填，含本节点）
+ * @param clientAddresses   各节点客户端接入地址列表 {@code id@host:port}（可选，
+ *                          v2 Leader 提示与 {@code CLUSTER_VIEW} 作答的地址来源）
  * @param raftPort          本节点 Raft 复制通信监听端口
  * @param dataDir           Raft 日志与快照目录
  * @param snapshotThreshold 快照触发条目数（S2 仅解析透传，S4 落地生成/触发）
@@ -48,10 +55,28 @@ public record ClusterConfig(
         boolean enabled,
         int nodeId,
         List<String> peers,
+        List<String> clientAddresses,
         int raftPort,
         String dataDir,
         long snapshotThreshold,
         long electionTimeoutMs) {
+
+    /**
+     * 兼容构造：未配置 {@code clientAddresses} 的 7 参形态（地址映射为空表，
+     * Leader 提示地址降级为空串）。
+     *
+     * @param enabled           是否启用集群
+     * @param nodeId            本节点 id
+     * @param peers             全成员列表
+     * @param raftPort          Raft 复制端口
+     * @param dataDir           数据目录
+     * @param snapshotThreshold 快照触发条目数
+     * @param electionTimeoutMs 选举超时
+     */
+    public ClusterConfig(boolean enabled, int nodeId, List<String> peers, int raftPort,
+                         String dataDir, long snapshotThreshold, long electionTimeoutMs) {
+        this(enabled, nodeId, peers, List.of(), raftPort, dataDir, snapshotThreshold, electionTimeoutMs);
+    }
 
     /** 配置键前缀（§9）。 */
     public static final String KEY_PREFIX = "openlatch.cluster.";
@@ -73,7 +98,7 @@ public record ClusterConfig(
      * @return 单机配置
      */
     public static ClusterConfig disabled() {
-        return new ClusterConfig(DEFAULT_ENABLED, 0, List.of(), DEFAULT_RAFT_PORT,
+        return new ClusterConfig(DEFAULT_ENABLED, 0, List.of(), List.of(), DEFAULT_RAFT_PORT,
                 DEFAULT_DATA_DIR, DEFAULT_SNAPSHOT_THRESHOLD, DEFAULT_ELECTION_TIMEOUT_MS);
     }
 
@@ -88,11 +113,12 @@ public record ClusterConfig(
         boolean enabled = boolOf(props, KEY_PREFIX + "enabled", DEFAULT_ENABLED);
         int nodeId = intOf(props, KEY_PREFIX + "node-id", 0);
         List<String> peers = listOf(props, KEY_PREFIX + "peers");
+        List<String> clientAddresses = listOf(props, KEY_PREFIX + "client-addresses");
         int raftPort = intOf(props, KEY_PREFIX + "raft-port", DEFAULT_RAFT_PORT);
         String dataDir = props.getProperty(KEY_PREFIX + "data-dir", DEFAULT_DATA_DIR);
         long snapshotThreshold = longOf(props, KEY_PREFIX + "snapshot-threshold", DEFAULT_SNAPSHOT_THRESHOLD);
         long electionTimeoutMs = longOf(props, KEY_PREFIX + "election-timeout-ms", DEFAULT_ELECTION_TIMEOUT_MS);
-        ClusterConfig cfg = new ClusterConfig(enabled, nodeId, peers, raftPort,
+        ClusterConfig cfg = new ClusterConfig(enabled, nodeId, peers, clientAddresses, raftPort,
                 dataDir, snapshotThreshold, electionTimeoutMs);
         cfg.validate();
         return cfg;
@@ -124,8 +150,10 @@ public record ClusterConfig(
      * 全量校验（spec"缺必填项启动失败"）：{@code enabled=true} 时
      * {@code node-id >= 1}；{@code peers} 非空、逐条
      * {@code id@host:port} 合法、id 唯一，且必须包含本节点的条目；
-     * {@code raftPort} 合法端口；{@code dataDir} 非空白；
-     * {@code snapshotThreshold >= 1}；{@code electionTimeoutMs > 0}。
+     * {@code clientAddresses} 可选——未配置直接放行，配置时逐条
+     * {@code id@host:port} 合法且 id 唯一；{@code raftPort} 合法端口；
+     * {@code dataDir} 非空白；{@code snapshotThreshold >= 1}；
+     * {@code electionTimeoutMs > 0}。
      *
      * @throws IllegalArgumentException 任一配置项非法（消息指明配置键）
      */
@@ -169,6 +197,15 @@ public record ClusterConfig(
         if (!selfIncluded) {
             throw new IllegalArgumentException("配置项 " + KEY_PREFIX + "peers 必须包含本节点（node-id="
                     + nodeId + "）的条目: " + peers);
+        }
+        // 可选地址映射：未配置放行（降级为空串提示），配置则逐条校验且 id 唯一。
+        List<Integer> addrIds = new ArrayList<>();
+        for (String a : clientAddresses) {
+            addrIds.add(entryId(a, KEY_PREFIX + "client-addresses"));
+        }
+        if (addrIds.stream().distinct().count() != addrIds.size()) {
+            throw new IllegalArgumentException(
+                    "配置项 " + KEY_PREFIX + "client-addresses 含重复节点 id: " + clientAddresses);
         }
         if (raftPort < 1 || raftPort > 65535) {
             throw new IllegalArgumentException(
@@ -272,5 +309,60 @@ public record ClusterConfig(
      */
     public String selfPeerId() {
         return "n" + nodeId;
+    }
+
+    /**
+     * 客户端接入地址映射（nodeId → {@code host:port}），由可选配置键
+     * {@code openlatch.cluster.client-addresses} 解析；构造前须已 {@link #validate()}。
+     *
+     * @return 不可变映射；未配置为空表
+     */
+    public Map<Integer, String> clientAddressMap() {
+        Map<Integer, String> map = new LinkedHashMap<>();
+        for (String entry : clientAddresses) {
+            int at = entry.indexOf('@');
+            map.put(Integer.parseInt(entry.substring(0, at).trim()),
+                    entry.substring(at + 1).trim());
+        }
+        return Map.copyOf(map);
+    }
+
+    /**
+     * 指定节点的客户端接入地址。
+     *
+     * @param nodeId 目标节点 id
+     * @return {@code host:port}；未配置该节点映射时为空串（提示降级，
+     *         客户端以种子发现兜底，design D4）
+     */
+    public String clientAddress(int nodeId) {
+        return clientAddressMap().getOrDefault(nodeId, "");
+    }
+
+    /**
+     * 校验并提取 {@code id@host:port} 形态列表项的节点 id。
+     *
+     * @param entry 列表项
+     * @param key   配置键（错误信息定位用）
+     * @return 节点 id
+     * @throws IllegalArgumentException 形态非法（消息指明配置键与非法项）
+     */
+    private static int entryId(String entry, String key) {
+        int at = entry.indexOf('@');
+        if (at <= 0) {
+            throw new IllegalArgumentException("配置项 " + key + " 非法（应为 id@host:port）: " + entry);
+        }
+        int id;
+        try {
+            id = Integer.parseInt(entry.substring(0, at).trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("配置项 " + key + " 非法（id 应为整数）: " + entry);
+        }
+        String hostPort = entry.substring(at + 1).trim();
+        int colon = hostPort.lastIndexOf(':');
+        if (colon <= 0 || colon == hostPort.length() - 1
+                || !hostPort.substring(colon + 1).chars().allMatch(Character::isDigit)) {
+            throw new IllegalArgumentException("配置项 " + key + " 非法（应为 id@host:port）: " + entry);
+        }
+        return id;
     }
 }

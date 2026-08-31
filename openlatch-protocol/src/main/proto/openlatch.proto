@@ -14,6 +14,7 @@ enum MessageType {
   LEASE_RENEW    = 4;
   PING           = 5;   // 心跳，无 payload
   AWAIT_NOTIFY   = 6;   // 服务器 → 客户端 推送
+  CLUSTER_VIEW   = 7;   // v2：集群视图查询，请求无 payload，任意节点作答
 }
 
 // 锁类型。
@@ -36,13 +37,13 @@ enum StatusCode {
   KEY_TOO_LONG    = 7;
   KEY_EMPTY       = 8;
   INVALID_REQUEST = 9;   // 参数非法（如 lease 越界）
-  NOT_LEADER      = 10;  // Phase 2 预留，Phase 1 不使用
+  NOT_LEADER      = 10;  // v2 启用（Phase 1 预留）：本节点非当值 Leader 拒绝写请求，随附 leader 提示
   INTERNAL_ERROR  = 11;
 }
 
 // 统一封装。request_id 在单条连接内唯一；服务端推送（AWAIT_NOTIFY）时为 0。
 message Envelope {
-  int32       protocol_version = 1;   // Phase 1 固定为 1
+  int32       protocol_version = 1;   // v1 固定为 1；v2 起客户端请求填 1 或 2，服务端应答回显请求版本
   MessageType type               = 2;
   int64       request_id         = 3; // 服务端推送（AWAIT_NOTIFY）时为 0
   oneof payload {
@@ -55,6 +56,7 @@ message Envelope {
     LeaseRenewRequest   lease_renew_request  = 16;
     LeaseRenewResponse  lease_renew_response = 17;
     AwaitNotify         await_notify         = 18;
+    ClusterView         cluster_view         = 19;  // v2：CLUSTER_VIEW 的响应载荷（请求无 payload）
   }
 }
 
@@ -69,7 +71,9 @@ message HelloResponse {
   int64      session_id              = 2;  // 服务端分配，连接生命周期内有效
   int32      server_protocol_version = 3;
   int64      default_lease_ms        = 4;
-  int64      leader_hint             = 5;  // Phase 2 预留
+  int64      leader_hint             = 5;  // v2 启用（Phase 1 预留）：Leader 的 nodeId；集群模式必填——
+                                           // >0 为 Leader nodeId，-1 表示本节点暂不知晓 Leader 身份；单机模式不填（0）
+  string     leader_address          = 6;  // v2：Leader 接入地址（host:port）；未配置地址映射时为空串
 }
 
 message AcquireRequest {
@@ -81,11 +85,13 @@ message AcquireRequest {
 }
 
 message AcquireResponse {
-  StatusCode status              = 1;  // OK=授予 / QUEUED=排队 / DENIED=拒绝 / 错误码
+  StatusCode status              = 1;  // OK=授予 / QUEUED=排队 / DENIED=拒绝 / NOT_LEADER(v2)=改道 / 错误码
   int64      lease_token         = 2;  // OK 时有效：解锁与续租凭证
   int64      lease_expires_at_ms = 3;  // 服务端时钟，仅诊断参考
   int32      queue_position      = 4;  // QUEUED 时有效
   int64      granted_lease_ms    = 5;  // OK 时实际生效租约（客户端据此设定看门狗）
+  int64      leader_node_id      = 6;  // v2：仅 NOT_LEADER 时随附；Leader nodeId，-1=本节点暂不知晓 Leader
+  string     leader_address      = 7;  // v2：仅 NOT_LEADER 时随附；Leader 接入地址，未配置映射时为空串
 }
 
 message ReleaseRequest {
@@ -95,8 +101,10 @@ message ReleaseRequest {
 }
 
 message ReleaseResponse {
-  StatusCode status          = 1;  // OK / INVALID_TOKEN / NOT_HELD
+  StatusCode status          = 1;  // OK / INVALID_TOKEN / NOT_HELD / NOT_LEADER(v2，仅转发失败路径)
   bool       fully_released  = 2;  // 可重入计数归零时为 true
+  int64      leader_node_id  = 3;  // v2：仅 NOT_LEADER 时随附；Leader nodeId，-1=本节点暂不知晓 Leader
+  string     leader_address  = 4;  // v2：仅 NOT_LEADER 时随附；Leader 接入地址，未配置映射时为空串
 }
 
 message LeaseRenewRequest {
@@ -106,11 +114,28 @@ message LeaseRenewRequest {
 }
 
 message LeaseRenewResponse {
-  StatusCode status              = 1;  // OK / INVALID_TOKEN / NOT_HELD
+  StatusCode status              = 1;  // OK / INVALID_TOKEN / NOT_HELD / NOT_LEADER(v2，仅转发失败路径)
   int64      lease_expires_at_ms = 2;
+  int64      leader_node_id      = 3;  // v2：仅 NOT_LEADER 时随附；Leader nodeId，-1=本节点暂不知晓 Leader
+  string     leader_address      = 4;  // v2：仅 NOT_LEADER 时随附；Leader 接入地址，未配置映射时为空串
 }
 
 message AwaitNotify {
   string key            = 1;
   int64  request_id_ref = 2;  // 指向原 ACQUIRE 的 request_id
+}
+
+// v2：CLUSTER_VIEW 响应——任意节点依本地视图作答（成员表 + Leader 标记），不产生日志条目。
+// status 自述结果：OK=正常；INVALID_REQUEST=单机模式无视图可报（v2 未发布前的补充，
+// 保证拒绝路径的状态码在线路可见，对齐 Phase 1 "无 payload 类型以无体帧呈现"的例外）。
+message ClusterView {
+  repeated NodeInfo nodes = 1;
+  StatusCode status       = 2;  // 应答结果（成功 OK + 成员表；失败错误码 + 空表）
+}
+
+// v2：集群成员视图项。address 为该节点接入地址（host:port），未配置地址映射时为空串。
+message NodeInfo {
+  int64  node_id   = 1;
+  string address   = 2;
+  bool   is_leader = 3;
 }
