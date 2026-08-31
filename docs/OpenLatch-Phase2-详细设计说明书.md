@@ -5,12 +5,12 @@
 | 项目名称 | **OpenLatch**                                                                                                       |
 | 文档类型 | 详细设计说明书（Phase 2 / Raft 集群）                                                                               |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0、《OpenLatch-Phase1-详细设计说明书》v1.0 |
-| 版本     | v1.2                                                                                                                |
+| 版本     | v1.3                                                                                                                |
 | 日期     | 2026-08-31                                                                                                          |
 | 作者     | Lam Tong                                                                                                            |
-| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，见 §6/§9/§13.3）                                                    |
+| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，v1.3 为 S2 退出补回写，见 §4/§6/§9/§13.2/§13.3）                                                    |
 
-**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）。
+**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）；v1.3（2026-08-31）S2 退出评审回写补齐——§4.5 排队登记主体由"本地 `CoreEngine`"改判为 Leader 侧任期作用域独立 `WaitQueue`（S2 design D9 正确性修复）、§4.3"命令级时间覆盖参数"定夺不做（S2 design D2）、§13.2 各任务标记完成（证据见 `openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`）。
 
 ---
 
@@ -172,7 +172,7 @@ Raft 要求状态机确定性回放。锁语义中唯一的非确定来源是 **
 1. **到期由 Leader 驱动**：Leader 的租约扫描线程发现到期时，追加 `LEASE_EXPIRE_ENTRY(key, leaseToken)` 日志；所有副本在回放该条目时才真正释放。到期判断只发生在 Leader，回放侧不自行判断时间——同一日志序列产生同一状态；
 2. 回放/追赶期间，历史 `LEASE_EXPIRE_ENTRY` 照常重放；快照点之后的到期由新 Leader 的扫描线程继续驱动；
 3. **时钟前提**：`wall_clock_ms` 只用于到期计算与诊断，要求节点间 NTP 同步、漂移 ≤ 1s。默认租约 30s ≫ 漂移容限，误差影响可忽略。该前提写入部署文档（§9）；
-4. `CoreEngine` 注入的 `Clock` 在集群模式下使用"条目携带时刻"回放：回放 `LOCK_ACQUIRE_ENTRY` 时，租约到期 = 条目内记录的授予时刻 + 租期，而非回放时的物理时钟。**S1 PoC 修订（v1.1）**：经 `LockStateMachineCore.EntryClock`（apply 线程 thread-local 条目时刻注入）在两库 applier 上验证成立，`CoreEngine` 可保持零改动——命令级时间覆盖参数由"唯一增量改动"降级为 S2 可选的显式化改进（评审定夺）。
+4. `CoreEngine` 注入的 `Clock` 在集群模式下使用"条目携带时刻"回放：回放 `LOCK_ACQUIRE_ENTRY` 时，租约到期 = 条目内记录的授予时刻 + 租期，而非回放时的物理时钟。**S1 PoC 修订（v1.1）**：经 `LockStateMachineCore.EntryClock`（apply 线程 thread-local 条目时刻注入）在两库 applier 上验证成立，`CoreEngine` 可保持零改动——命令级时间覆盖参数由"唯一增量改动"降级为 S2 可选的显式化改进，**S2 评审定夺：不做**（v1.3 回写，S2 design D2）——改 `CoreEngine`/`AcquireCommand` 公开签名违背 §1.4 零改动原则；EntryClock 的 thread-local 前提（applier 单线程、apply 无跨线程逃逸）写入 `LockStateMachine` 类级 Javadoc 为显式契约，并以多线程不串扰反例测试固化。
 
 ### 4.4 设计决策：等待队列不复制
 
@@ -194,10 +194,12 @@ Raft 要求状态机确定性回放。锁语义中唯一的非确定来源是 **
 ```
 
 - **授予/排队的结果由状态机应用时刻的状态决定**，预检查只是快速失败通道，最终以应用结果为准；
-- 排队（QUEUED）同样写日志吗？ **不**——排队不是复制状态（§4.4）。Leader 在本地 `CoreEngine` 中登记等待队列并立即回 `QUEUED`；仅授予/释放/续租/会话变更写日志。由此：
+- 排队（QUEUED）同样写日志吗？ **不**——排队不是复制状态（§4.4）。Leader 在任期作用域的独立 `WaitQueue`（`server.raft`，与 `CoreEngine` 解耦）中登记等待者并立即回 `QUEUED`；仅授予/释放/续租/会话变更写日志。由此：
     - ACQUIRE 在"可授予"时走复制路径（延迟 ≈ 一次多数派提交）；
     - "需排队"时本地即时响应（延迟与单机一致）；
-    - 状态机回放的 ACQUIRE 条目因此总是"授予"语义（提交前已在 Leader 本地预演判定可授予）；Leader 切换导致预演结果失效的窗口由客户端重试覆盖（§8）。
+    - 状态机回放的 ACQUIRE 条目因此总是"授予"语义（提交前已在 Leader 本地预演判定可授予）；并发同键令预演在应用点失效时，Leader 在 apply 时刻本地补登记并回 QUEUED，Follower 忽略队列副作用（队列非复制状态，副本一致性不破坏）；Leader 在窗口内死亡则排队丢失，由客户端重排队覆盖（§8，队列可丢为既定语义）。
+
+    **登记主体为何不是 `CoreEngine`（v1.3 / S2 design D9）**：等待项若登记进本地引擎，降级节点会残留陈旧等待项，回放同 key 授予条目时被"队列非空禁止越过在队者"规则拦成 DENIED/QUEUED 与其他副本分歧——复制状态（锁表）被**非复制状态**（队列）污染。故集群路径引擎永不登记等待项（apply 恒 `queueIfBusy=false`），排队/位次/同 `(sessionId,requestId)` 去重/深度限额由 `WaitQueue` 承载并在 WinLeadership 时清空重建——任期边界机械保证 §4.4 的"单个 Leader 任期内的严格 FIFO"。
 
 **Follower 写请求分车道（v1.2 / S3/P2-12）**：非 Leader 节点对三类写按"是否依赖当值节点本地态"分道处理——
 
@@ -394,16 +396,18 @@ message NodeInfo {
 | P2-03 | SOFAJRaft 接入原型 | 同上范围，JRaft 侧实现                                                                                       | P2-01        | ✅ 功能跑通；胶水 306 LOC（`friction-jraft.md`） |
 | P2-04 | 对比评估与选型定案 | 按 §2.4 门槛逐项实测：授予延迟 P99、吞吐、选主计时、快照恢复耗时、API 侵入度；输出选型报告并回写本文档修订版 | P2-02、P2-03 | ✅ 报告 `docs/raft-selection-report.md` 含逐项数据；评审中；**S1 退出** |
 
-### 13.2 S2：复制状态机
+### 13.2 S2：复制状态机（已完成，v1.3 回写）
+
+证据：`openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`（含 `zero-touch-evidence.txt`、`observations-ratis-3.3.0.md`）。
 
 | ID    | 子任务                  | 内容与交付物                                                                            | 前置         | 验证                                       |
 |-------|-------------------------|-----------------------------------------------------------------------------------------|--------------|--------------------------------------------|
-| P2-05 | `raft.proto` 定义       | `RaftEntryType` / `RaftLogEntry`（§4.2）、`SnapshotState` 骨架（§7.1）                  | P2-04        | 生成代码编译通过；条目类型与 §4.2 一致     |
-| P2-06 | LockStateMachine 适配器 | 日志条目 → `CoreEngine` 应用；回放时钟用条目时刻（§4.3）；NOOP 条目                     | P2-05        | 确定性回放测试：同一序列两次应用逐字段一致 |
-| P2-07 | ReplicationGateway      | Leader：预检查 → 提交日志 → 应用后响应；QUEUED 本地即时响应不写日志（§4.5）             | P2-06        | 授予/排队两条路径的集成用例通过            |
-| P2-08 | 会话集群化              | `SESSION_OPEN/CLOSE` 条目、`sessionId=(nodeId, localSeq)`、接入节点失联批量清理（§5.2） | P2-07        | 会话登记/断连清理/节点失联清理由例通过     |
-| P2-09 | 租约到期复制            | Leader 扫描驱动 `LEASE_EXPIRE_ENTRY`；回放按 token 幂等校验                             | P2-07        | failover 后到期继续生效用例通过            |
-| P2-10 | 3 节点复制集成          | 多数派确认、停 1 节点仍可服务、停 2 节点不可授予                                        | P2-08、P2-09 | §10 复制集成全绿；**S2 退出**              |
+| P2-05 | `raft.proto` 定义       | `RaftEntryType` / `RaftLogEntry`（§4.2）、`SnapshotState` 骨架（§7.1）                  | P2-04        | ✅ 生成代码编译通过；golden 文件冻结编号比对，Phase 1 wire format 零 diff |
+| P2-06 | LockStateMachine 适配器 | 日志条目 → `CoreEngine` 应用；回放时钟用条目时刻（§4.3）；NOOP 条目                     | P2-05        | ✅ 确定性回放属性测试（≥100 组随机序列两次回放 digest 一致）；`openlatch-core` git diff 为空 |
+| P2-07 | ReplicationGateway      | Leader：预检查 → 提交日志 → 应用后响应；QUEUED 本地即时响应不写日志（§4.5）             | P2-06        | ✅ MiniRaftCluster 授予/排队两路径用例通过（含停 1 Follower 追平、失主快速失败） |
+| P2-08 | 会话集群化              | `SESSION_OPEN/CLOSE` 条目、`sessionId=(nodeId, localSeq)`、接入节点失联批量清理（§5.2） | P2-07        | ✅ 登记/断连清理/失联清理三路 digest 一致；failover 后新 Leader 认账存活会话 |
+| P2-09 | 租约到期复制            | Leader 扫描驱动 `LEASE_EXPIRE_ENTRY`；回放按 token 幂等校验                             | P2-07        | ✅ failover 后到期继续生效（误差 ≤ 一个扫描周期）；ABA 交错空操作用例通过 |
+| P2-10 | 3 节点复制集成          | 多数派确认、停 1 节点仍可服务、停 2 节点不可授予                                        | P2-08、P2-09 | ✅ §10 复制集成全绿，`mvn clean verify` 全 reactor 绿；**S2 退出** |
 
 ### 13.3 S3：Leader 发现与客户端故障转移
 
