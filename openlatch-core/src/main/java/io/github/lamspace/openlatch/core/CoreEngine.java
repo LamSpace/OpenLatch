@@ -22,7 +22,9 @@ import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
+import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
+import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
@@ -32,7 +34,9 @@ import io.github.lamspace.openlatch.core.session.SessionRegistry;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
@@ -74,6 +78,8 @@ public final class CoreEngine {
     private final SessionRegistry sessions = new SessionRegistry();
     /** 租约凭证发号器，授予新持有时自增取值。 */
     private final AtomicLong leaseTokenCounter = new AtomicLong(1);
+    /** 快照重建守卫位：{@link #restoreFrom} 至多生效一次的标记（装配静默期写，无并发访问）。 */
+    private boolean snapshotRestored;
 
     /**
      * 构造核心引擎。
@@ -86,6 +92,89 @@ public final class CoreEngine {
         this.config = Objects.requireNonNull(config);
         this.clock = Objects.requireNonNull(clock);
         this.listener = Objects.requireNonNull(listener);
+    }
+
+    /**
+     * 快照状态重建（详设 §7.1，S4/design D1）：以 {@link CoreStateRestore}
+     * 一次性注入复制状态全集，恢复后本引擎对继承锁的行为与从未被截断的
+     * 原生演化路径一致。仅供快照加载使用——集群状态机在恢复/安装快照时以
+     * <b>全新引擎</b>调用本方法一次；非快照恢复路径 MUST NOT 调用。
+     *
+     * <p><b>恢复前置（防御校验）</b>：仅接受"零状态且未重建过"的引擎——
+     * 守卫位未置、发号器未消耗、锁表为空，违者抛
+     * {@link IllegalStateException}。在运行中引擎上重建会撕裂既有持有，
+     * 该误用模式被机械拒绝而非依赖调用方自觉。
+     *
+     * <p><b>注入内容</b>（与原生演化终态逐项对齐）：
+     * <ol>
+     *   <li>锁条目：经 {@link LockEntry#restored} 直写持有与租约三元组
+     *       （凭证/租期/到期时刻按快照原值，不经状态迁移规则、不经
+     *       {@link Clock}），等待队列恒空；</li>
+     *   <li>会话登记：{@code sessions} 全集逐个登记（内部 sid 由调用方在
+     *       构造前经 {@link #sessionOpened()} 预生成亦可——本方法幂等于
+     *       登记表 {@code putIfAbsent} 语义）；持有者所属会话触及的 key
+     *       一并登记，使 {@link #sessionClosed} 对继承持有的清理完整；</li>
+     *   <li>到期堆回填：每个继承条目按（key、凭证、到期时刻）offer 堆记录，
+     *       使 {@link #expireDue} 能回收快照继承的租约（spec"到期扫描覆盖
+     *       继承租约"；陈旧校验语义与原生路径相同）；</li>
+     *   <li>发号水位：租约凭证发号器置为输入的 {@code nextLeaseToken}
+     *       （快照内已发出的最大凭证 +1 起），后续授予既不复用继承凭证
+     *       （spec"发号不复用继承凭证"），也与未截断副本对同一尾部日志
+     *       发出逐笔相同的凭证（跨副本一致依赖此水印）。</li>
+     * </ol>
+     *
+     * <p><b>线程模型</b>：须在装配静默期（任何业务方法并发调用开始前）单线程
+     * 完成；本方法不对并发业务调用作防护，混合时序属契约违例。
+     *
+     * @param restore 重建输入（条目 + 会话全集）；null 抛 {@link NullPointerException}
+     * @throws IllegalStateException      引擎非零状态或已重建过
+     * @throws IllegalArgumentException   输入自洽性非法（由输入对象构造保证，正常不可达）
+     */
+    public void restoreFrom(CoreStateRestore restore) {
+        Objects.requireNonNull(restore);
+        if (snapshotRestored || leaseTokenCounter.get() != 1L || !lockTable.values().isEmpty()) {
+            throw new IllegalStateException(
+                    "restoreFrom is allowed once on a fresh zero-state engine");
+        }
+        for (CoreStateRestore.Entry en : restore.entries()) {
+            boolean isRead = en.lockType() == LockType.READ;
+            Owner writer = null;
+            int writeCount = 0;
+            Map<Owner, Integer> readers = new HashMap<>();
+            for (CoreStateRestore.Holder h : en.holders()) {
+                Owner owner = new Owner(h.sessionId(), h.threadId());
+                if (isRead) {
+                    readers.put(owner, h.count());
+                } else {
+                    writer = owner;
+                    writeCount = h.count();
+                }
+                sessions.register(h.sessionId());
+                sessions.touchIfPresent(h.sessionId(), en.key());
+            }
+            LockEntry entry = LockEntry.restored(en.key(), en.lockType() != LockType.SIMPLE,
+                    writer, writeCount, readers, en.leaseToken(), en.leaseMs(), en.expiresAtMs());
+            lockTable.computeIfAbsent(en.key(), k -> entry);
+            leaseManager.offer(en.key(), en.leaseToken(), en.expiresAtMs());
+        }
+        // 无持有者的登记会话也要在场（会话校验与后续授予依赖登记表）。
+        for (Long sid : restore.sessions()) {
+            sessions.register(sid);
+        }
+        // 引擎守卫已保证零状态（cur==1），水位取值即权威下一发号。
+        leaseTokenCounter.updateAndGet(cur -> Math.max(cur, restore.nextLeaseToken()));
+        snapshotRestored = true;
+    }
+
+    /**
+     * 下一枚租约凭证的快照读数（不发号）：授予新持有时将签发 {@code >= }
+     * 本读数的凭证。供快照生成侧读取发号水位（详设 §7.1 / s4 design D10），
+     * 与 {@link #restoreFrom} 的水位输入对偶。
+     *
+     * @return 当前发号器值（首次授予将返回的凭证）
+     */
+    public long nextLeaseToken() {
+        return leaseTokenCounter.get();
     }
 
     /**

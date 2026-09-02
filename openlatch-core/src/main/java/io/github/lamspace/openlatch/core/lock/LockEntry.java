@@ -95,6 +95,39 @@ public final class LockEntry {
     }
 
     /**
+     * 快照重建工厂（详设 §7.1，仅供 {@code CoreEngine.restoreFrom} 在加载快照时
+     * 构造"已持有"状态的条目）：以传入的持有与租约快照直接装配条目初态，
+     * 不经任何状态迁移规则——凭证、到期时刻、持有计数按快照原值落地。
+     *
+     * <p><b>不变量</b>：等待队列恒为空（集群引擎无本地等待项，单机恢复不存在
+     * 等待语义）；写侧持有由 {@code writer}/{@code writeCount} 表达，读侧持有
+     * 由 {@code readers} 表表达，二者互斥（{@code writer == null} 或
+     * {@code readers.isEmpty()}）。本工厂不校验该互斥性——校验责任在输入值
+     * 对象构造处（{@code CoreStateRestore}），以调用方契约+构造校验双保险。
+     *
+     * @param key           锁键
+     * @param reentrant     是否可重入（与 {@code LockType != SIMPLE} 同判定）
+     * @param writer        写侧持有者；读锁条目为 {@code null}
+     * @param writeCount    写侧重入层数（{@code writer == null} 时忽略）
+     * @param readers       读者 → 重入计数（写类条目传入空表）
+     * @param leaseToken    当前租约凭证
+     * @param leaseMs       实际生效租期（毫秒）
+     * @param leaseExpiresAtMs 当前到期时刻（毫秒）
+     * @return 持有快照初态的条目（等待队列空）
+     */
+    public static LockEntry restored(String key, boolean reentrant, Owner writer, int writeCount,
+            Map<Owner, Integer> readers, long leaseToken, long leaseMs, long leaseExpiresAtMs) {
+        LockEntry e = new LockEntry(key, reentrant);
+        e.writer = writer;
+        e.writeCount = writer == null ? 0 : writeCount;
+        e.readers.putAll(readers);
+        e.leaseToken = leaseToken;
+        e.leaseMs = leaseMs;
+        e.leaseExpiresAtMs = leaseExpiresAtMs;
+        return e;
+    }
+
+    /**
      * 状态迁移：按下列规则顺序授予、排队或拒绝（设计说明书 §4.3 规则集，
      * 首个命中者即为结果）：
      * <ol>

@@ -184,8 +184,11 @@ class StateMachineDeterminismTest {
      * 生成一组语义合法的随机条目序列：会话开闭、四类锁获取（含可排队
      * 标记）、释放、续租、随机位置的到期条目（携带时刻单调不减，与
      * Leader 扫描事实一致）。
+     *
+     * <p>包级可见：{@code StateMachineSnapshotTest} 的快照切割点不变性属性
+     * 测试共用同一序列发生器（S4/P2-15，两测同源防漂移）。
      */
-    private static List<RaftLogEntry> randomSequence(Random rnd) {
+    static List<RaftLogEntry> randomSequence(Random rnd) {
         List<RaftLogEntry> seq = new ArrayList<>();
         long[] sids = {61, 62, 63};
         String[] keys = {"k1", "k2", "k3"};

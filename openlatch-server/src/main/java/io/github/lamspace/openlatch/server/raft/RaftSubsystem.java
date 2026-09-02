@@ -55,9 +55,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 调用——每分一次组，S2 单组、实例幂等复用），装配方经 {@link #core()} /
  * {@link #stateMachine()} 取用并在 gateway 建成后回挂观察者。
  *
- * <p><b>快照边界（S2）</b>：Ratis 自动快照触发显式关闭——状态机未实现
- * {@code takeSnapshot}（§7 归 S4/P2-15）；{@code snapshot-threshold} 配置照常
- * 解析与校验，仅在 S4 装配时生效。
+ * <p><b>快照装配（S4，§7/P2-15）</b>：Ratis 自动触发按
+ * {@code openlatch.cluster.snapshot-threshold} 开启（未快照位点差越过阈值
+ * 即在应用线程产出快照）；快照文件保留数钉为 2（详设 §7.2"保留最近 2 份"，
+ * 不随外部配置浮动——保留语义与恢复判据耦合）；日志截断由库侧按快照位点
+ * 协同完成。手动触发见 {@link #triggerSnapshot()}。
  *
  * <p><b>线程模型</b>：{@link #start()} 前不可用（除构造期字段）；启动后
  * {@link #isLeader()}/{@link #acquireClient()} 任意线程可调（Ratis 自身并发安全）；
@@ -136,8 +138,23 @@ public final class RaftSubsystem {
                 TimeDuration.valueOf(Math.max(1, electionMs / 2), TimeUnit.MILLISECONDS));
         RaftServerConfigKeys.Rpc.setTimeoutMax(props,
                 TimeDuration.valueOf(electionMs, TimeUnit.MILLISECONDS));
-        // S2 无快照实现：显式关闭自动触发（S4/P2-15 落地后由 snapshot-threshold 驱动）。
-        RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(props, false);
+        // S4：自动触发按 snapshot-threshold 开启；保留 2 份（详设 §7.2）。
+        RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(props, true);
+        RaftServerConfigKeys.Snapshot.setAutoTriggerThreshold(
+                props, clusterConfig.snapshotThreshold());
+        RaftServerConfigKeys.Snapshot.setRetentionFileNum(props, 2);
+        // 截断推进至本节点快照位点（快照位点恒为已应用⊆已提交，对多数派安全）。
+        // 库默认的"按全体 peer 提交位取 min"会被任一长期缺席节点卡死——日志
+        // 无上界增长且严重落后场景永远走不到安装流（§7.3-2 依赖截断制造位点差）。
+        RaftServerConfigKeys.Log.setPurgeUptoSnapshotIndex(props, true);
+        if (clusterConfig.logSegmentBytes() > 0) {
+            // Raft 库语义透传（同 election-timeout-ms 口径）：小 segment 使截断
+            // 粒度落在测试可驱动的条目量级（S4 追赶用例）。
+            org.apache.ratis.util.SizeInBytes seg =
+                    org.apache.ratis.util.SizeInBytes.valueOf(clusterConfig.logSegmentBytes());
+            RaftServerConfigKeys.Log.setSegmentSizeMax(props, seg);
+            RaftServerConfigKeys.Log.setPreallocatedSize(props, seg);
+        }
 
         RaftGroup group = RaftGroup.valueOf(groupId, peers);
         // 摩擦档案（P2-02）：重启目录非空必须 RECOVER，否则 "Failed to FORMAT"。
@@ -192,6 +209,118 @@ public final class RaftSubsystem {
             server = null;
         }
         log.info("Raft subsystem stopped: self={}", selfPeerId);
+    }
+
+    /**
+     * 手动触发一份快照（详设 §7.2"手动管理命令"落点，S4/design D6）：
+     * 直调本节点状态机的 {@code takeSnapshot}，语义与自动触发一致
+     * （applyLock 内一致性副本 + 锁外落盘）。仅供运维脚本与测试在阈值
+     * 之外主动产快照；不等待库侧截断/清理——那由下一轮自动快照周期顺带
+     * 完成（手动位点已推进库侧 latest 引用，截断按 max 位点收敛）。
+     *
+     * <p><b>线程注记</b>：可在任意线程调用；与在途应用经内核 {@code applyLock}
+     * 与状态机实例锁串行，快照内容为"调用时刻已应用位点"的完整状态。
+     * 角色无关（Leader/Follower 均可——各副本快照自产）。
+     *
+     * @return 快照位点（已应用索引）；无有效位点（尚未应用任何条目）时 {@code -1}
+     * @throws IOException 服务未启动、分组不可达或落盘失败
+     */
+    public long triggerSnapshot() throws IOException {
+        return ((LockStateMachine) server.getDivision(groupId).getStateMachine())
+                .takeSnapshot();
+    }
+
+    /**
+     * 成员变更（详设 §7.4，S4/P2-17/design D6）：以目标投票者/监听者全集
+     * 提交 Ratis 单步配置变更（{@code AdminApi.setConfiguration}）。
+     *
+     * <p><b>输入形态</b>：与配置键 {@code peers} 同族的 {@code id@host:port}
+     * 列表（端口为 Raft 复制端口）；监听者条目仅要求 {@code id@host:port}
+     * 可达，其后续升票由运维以全集列表再次调用完成（listener 追赶→升
+     * voter 的两段流程见部署文档）。
+     *
+     * <p><b>多数派护栏</b>（spec"成员变更运维"，机械拒绝而非仅文档约定）：
+     * 以<b>本节点视角</b>的当前投票者集为基线做差集校验——单次调用对投票者
+     * 的净变更 MUST ≤ 1 个成员，且 MUST NOT 同时含加与删。两条件联合保证
+     * 旧/新多数派恒相交（单步变更安全前提）；违反抛
+     * {@link IllegalArgumentException}。监听者集合不受此护栏约束
+     * （监听者不参与投票，不改变多数派）。
+     *
+     * <p><b>调用位置</b>：从视图新鲜的成员节点调用（本方法读本地
+     * {@code getRaftConf()} 做基线；请求经内部客户端路由至当值 Leader 提交）。
+     * 返回成功即配置条目已提交（Ratis 单步变更语义）。
+     *
+     * @param voterSpecs   目标投票者全集（{@code id@host:raftPort}）
+     * @param listenerSpecs 目标监听者全集（可为空列表）
+     * @throws IllegalArgumentException 净变更超一个成员或同时加减；spec 形态非法
+     * @throws IOException              提交失败（无 Leader、被拒、超时）
+     */
+    public void setMembers(List<String> voterSpecs, List<String> listenerSpecs)
+            throws IOException {
+        List<RaftPeer> voters = parsePeers(voterSpecs);
+        List<RaftPeer> listeners = parsePeers(listenerSpecs);
+        java.util.Set<RaftPeerId> current = new java.util.HashSet<>();
+        // getCurrentPeers() 无参形态即投票者全集（Ratis 语义：非 LISTENER 在册成员）。
+        for (RaftPeer p : division().getRaftConf().getCurrentPeers()) {
+            current.add(p.getId());
+        }
+        java.util.Set<RaftPeerId> target = new java.util.HashSet<>();
+        for (RaftPeer p : voters) {
+            target.add(p.getId());
+        }
+        java.util.Set<RaftPeerId> added = new java.util.HashSet<>(target);
+        added.removeAll(current);
+        java.util.Set<RaftPeerId> removed = new java.util.HashSet<>(current);
+        removed.removeAll(target);
+        if (!added.isEmpty() && !removed.isEmpty() || added.size() + removed.size() > 1) {
+            throw new IllegalArgumentException(
+                    "成员变更多数派护栏：单次仅可加或删一个投票者（added=" + added
+                            + ", removed=" + removed + "）——先加新节点并等待追赶完成，再移除旧节点（§7.4）");
+        }
+        var reply = acquireClient().admin().setConfiguration(voters, listeners);
+        if (!reply.isSuccess()) {
+            Throwable failure = reply.getException();
+            throw new IOException("setConfiguration failed: " + failure, failure);
+        }
+        log.info("membership changed: voters={}, listeners={}", voterSpecs, listenerSpecs);
+    }
+
+    /**
+     * 移除一个投票者（出组）：以本节点视图当前成员全集为基线，剔除
+     * {@code n<nodeId>} 后提交单步变更。被移除节点的会话清理由调用方经
+     * {@code ClusterRuntime.removeMember} 的同车道完成（出组成员不再出现于
+     * commitInfos，失联判定对其永不可见——必须显式触发）。
+     *
+     * @param nodeId 要移除的节点 id
+     * @throws IllegalArgumentException 目标不在当前投票者集合
+     * @throws IOException              提交失败
+     */
+    public void removeVoter(int nodeId) throws IOException {
+        List<String> voters = new ArrayList<>();
+        List<String> listeners = new ArrayList<>();
+        var conf = division().getRaftConf();
+        for (RaftPeer p : conf.getCurrentPeers()) {
+            voters.add(specOf(p));
+        }
+        for (RaftPeer p : conf.getCurrentPeers(
+                org.apache.ratis.proto.RaftProtos.RaftPeerRole.LISTENER)) {
+            listeners.add(specOf(p));
+        }
+        if (!voters.removeIf(s -> s.startsWith(nodeId + "@"))) {
+            throw new IllegalArgumentException("节点 " + nodeId + " 不在当前投票者集合: " + voters);
+        }
+        setMembers(voters, listeners);
+        log.info("voter removed: n{}", nodeId);
+    }
+
+    /**
+     * {@link RaftPeer} 折算回 {@code id@host:port} spec（"n&lt;id&gt;" → id）。
+     *
+     * @param peer 成员
+     * @return spec 字符串
+     */
+    private static String specOf(RaftPeer peer) {
+        return peer.getId().toString().substring(1) + "@" + peer.getAddress();
     }
 
     /**

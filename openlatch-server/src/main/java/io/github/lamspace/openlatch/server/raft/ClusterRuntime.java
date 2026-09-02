@@ -180,6 +180,26 @@ public final class ClusterRuntime {
     }
 
     /**
+     * 成员变更运维入口：移除一个投票者并清理其会话（详设 §7.4，S4/P2-17，
+     * design D6）。
+     *
+     * <p><b>两步编排</b>：先提交单步配置变更（出组；多数派护栏与差集校验在
+     * {@link RaftSubsystem#removeVoter(int)}），应答返回即配置已提交（Ratis
+     * 单步变更语义）；随后立即触发被移除节点会话的批量清理（§5.2 规则 4
+     * 同车道——出组成员从 commitInfos 消失，失联判定不可见，必须显式）。
+     * 配置变更失败则异常上抛、不清理；清理以日志条目落地，各副本一致收敛。
+     * MUST 在当值 Leader 节点上调用（非 Leader 时提交路径按既有语义失败）。
+     *
+     * @param nodeId 被移除的节点 id
+     * @throws IllegalArgumentException 节点不在当前投票者集合或违反变更护栏
+     * @throws IOException              配置变更提交失败
+     */
+    public void removeMember(int nodeId) throws IOException {
+        subsystem.removeVoter(nodeId);
+        sessionCoordinator.onMemberRemoved(nodeId);
+    }
+
+    /**
      * 会话集群协调器（HELLO 与断连传播的接入层路由目标）。
      *
      * @return 协调器

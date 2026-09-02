@@ -27,6 +27,7 @@ import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
+import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
@@ -36,9 +37,13 @@ import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
 import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +72,15 @@ import java.util.Map;
  * 语义仍按幂等设计——SESSION_OPEN 重复登记为无操作，SESSION_CLOSE 对未登记
  * 会话无操作，到期条目由引擎的"凭证+到期时刻"陈旧校验兜底（ABA 安全）。
  *
+ * <p><b>快照通道（S4，design D1/D2/D10）</b>：{@link #snapshotState()} 在
+ * applyLock 内产出一致性状态（影子表 proto + 引擎发号水位）；
+ * {@link #installSnapshot} 以<b>全新引擎</b>经 {@code CoreEngine.restoreFrom}
+ * 整体替换状态并重建 {@code sidMap}——回灌重放路线在"快照含历史释放空洞"
+ * 下无法复现凭证序列（PoC 已证伪），发号水位使重建副本与未截断副本对同一
+ * 尾部日志发出逐笔相同的凭证（digest 跨快照切割点可比）。引擎替换只发生在
+ * applyLock 内、应用/安装线程域，业务投影（{@link ShadowTable#heldEntries()}）
+ * 经影子表 {@code load} 的原子替换获得一致视图。
+ *
  * <p><b>线程模型</b>：{@link #apply} 仅由状态机应用线程（单线程、条目间无并发，
  * Ratis {@code StateMachineUpdater}，design D10）调用；{@code applyLock} 兜底
  * 串行并保护影子表一致性快照。构造后 {@link #shadow()}/{@link #digest()} 的
@@ -85,10 +99,14 @@ public final class LockStateMachineCore {
     private final EntryClock clock = new EntryClock();
     /** 复制状态影子表（逻辑归属视图 + 无锁预检索引）。 */
     private final ShadowTable shadow = new ShadowTable();
-    /** 逻辑会话 id → 本副本引擎内部 sid（引擎随机 sid 不出节点）。 */
+    /** 逻辑会话 id → 本副本引擎内部 sid（引擎随机 sid 不出节点；安装快照时整体重建）。 */
     private final Map<Long, Long> sidMap = new HashMap<>();
-    /** 锁语义核心，构造即装配、集群路径唯一可变入口为 {@link #apply}。 */
-    private final CoreEngine engine;
+    /**
+     * 锁语义核心。集群路径的可变入口为 {@link #apply}（条目迁移）与
+     * {@link #installSnapshot}（快照整体替换，applyLock 内换入全新引擎）——
+     * 二者之外不得变更引擎状态（design D12 不变式的 S4 扩展）。
+     */
+    private CoreEngine engine;
 
     /** 应用失败计数（解析异常/未知类型），诊断与测试断言用。 */
     private volatile long applyFailures;
@@ -100,9 +118,18 @@ public final class LockStateMachineCore {
      */
     public LockStateMachineCore(CoreConfig config) {
         this.config = java.util.Objects.requireNonNull(config);
-        // 集群引擎恒不登记等待项（design D9）：notifyHead 事件源（队首迁移）
-        // 只存在于单机路径，此处收到即说明集群路径误登记了等待项，记 WARN。
-        this.engine = new CoreEngine(config, clock, (sid, rid, key) ->
+        this.engine = newEngine();
+    }
+
+    /**
+     * 装配一个零状态引擎：集群引擎恒不登记等待项（design D9），
+     * {@code notifyHead} 事件源只存在于单机路径，此处收到即说明集群路径
+     * 误登记了等待项，记 WARN。{@link #installSnapshot} 换入新引擎时复用。
+     *
+     * @return 全新 {@link CoreEngine}（config/clock 同源）
+     */
+    private CoreEngine newEngine() {
+        return new CoreEngine(config, clock, (sid, rid, key) ->
                 log.warn("unexpected notifyHead from cluster engine: sid={}, key={}", sid, key));
     }
 
@@ -425,5 +452,98 @@ public final class LockStateMachineCore {
      */
     public long applyFailures() {
         return applyFailures;
+    }
+
+    /**
+     * 产出当前复制状态的一致性快照形态（详设 §7.1/§7.2，S4/P2-15）：
+     * applyLock 内取影子表 proto 并嵌入引擎发号水位（
+     * {@code next_lease_token}，design D10——缺它则重建副本对同一尾部日志
+     * 发出与未截断副本不同的凭证，跨副本 digest 永久分叉）。
+     *
+     * <p><b>并发语义</b>：与 {@link #apply} 互斥于同一 {@code applyLock}，
+     * 产出即"某应用时刻的完整状态"（无撕裂）；返回后状态照常演化，演化
+     * 由快照位点之后的日志承载（切割点不变性）。
+     *
+     * @return 不可变的 {@link SnapshotState}（锁条目按声明序 + 会话集 + 水位）
+     */
+    SnapshotState snapshotState() {
+        synchronized (applyLock) {
+            return shadow.toProto().toBuilder()
+                    .setNextLeaseToken(engine.nextLeaseToken())
+                    .build();
+        }
+    }
+
+    /**
+     * 安装一份快照并整体替换状态（详设 §7.3，S4/P2-16）：启动加载（本地
+     * 最新快照）与追赶安装（Leader 流式下发）共用本通道。
+     *
+     * <p><b>原子性</b>：applyLock 内完成"全新引擎重建（
+     * {@code CoreEngine.restoreFrom}，含发号水位落位与到期堆回填）→
+     * {@code sidMap} 按快照会话集重建（逻辑 id → 新内部 sid）→ 影子表
+     * {@link ShadowTable#load} 整体替换"，三步之间对外不可见半更新状态。
+     *
+     * <p><b>前置契约</b>：仅由状态机应用/安装线程（Ratis 保证与
+     * {@link #apply} 同线程域或 {@code pause} 隔离）调用；调用后本内核的
+     * 已应用位点由调用方（{@link LockStateMachine}）同步设置。快照中持有者
+     * 引用未登记会话、锁类型越界等损坏形态以异常抛出（MUST NOT 静默装坏
+     * 状态——启动期异常即拒绝启动，安装期异常由 Ratis 重试）。
+     *
+     * @param state 快照状态（{@link #snapshotState()} 的对偶产物）
+     * @throws IllegalStateException 快照自洽性损坏（持有者缺会话登记、类型越界）
+     */
+    void installSnapshot(SnapshotState state) {
+        synchronized (applyLock) {
+            CoreEngine fresh = newEngine();
+            Map<Long, Long> newSidMap = new HashMap<>();
+            for (long logical : state.getSessionsList()) {
+                newSidMap.put(logical, fresh.sessionOpened());
+            }
+            List<CoreStateRestore.Entry> entries = new ArrayList<>(state.getLocksCount());
+            for (SnapshotLock l : state.getLocksList()) {
+                LockType type = toCoreLockType(l.getLockTypeValue());
+                if (type == null) {
+                    throw new IllegalStateException(
+                            "snapshot entry has invalid lock type: key=" + l.getKey());
+                }
+                List<CoreStateRestore.Holder> holders = new ArrayList<>(l.getHoldersCount());
+                for (SnapshotHolder h : l.getHoldersList()) {
+                    Long internal = newSidMap.get(h.getSessionId());
+                    if (internal == null) {
+                        throw new IllegalStateException("snapshot holder session not registered: "
+                                + h.getSessionId() + " (key=" + l.getKey() + ")");
+                    }
+                    holders.add(new CoreStateRestore.Holder(internal, h.getThreadId(), h.getCount()));
+                }
+                entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
+                        l.getLeaseMs(), l.getExpiresAtMs(), holders));
+            }
+            // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
+            // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。
+            long watermark = state.getNextLeaseToken();
+            if (watermark < 1) {
+                watermark = maxEntryToken(entries) + 1;
+            }
+            fresh.restoreFrom(new CoreStateRestore(entries, List.copyOf(newSidMap.values()),
+                    watermark));
+            this.engine = fresh;
+            this.sidMap.clear();
+            this.sidMap.putAll(newSidMap);
+            this.shadow.load(state);
+        }
+    }
+
+    /**
+     * 重建条目列表中的最大租约凭证（缺水位快照的兜底计算）。
+     *
+     * @param entries 重建条目
+     * @return 最大凭证；空列表为 {@code 0}
+     */
+    private static long maxEntryToken(List<CoreStateRestore.Entry> entries) {
+        long max = 0;
+        for (CoreStateRestore.Entry e : entries) {
+            max = Math.max(max, e.leaseToken());
+        }
+        return max;
     }
 }

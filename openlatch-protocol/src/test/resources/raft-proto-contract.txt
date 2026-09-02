@@ -62,3 +62,4 @@ message SnapshotLock
 message SnapshotState
   locks 1
   sessions 2
+  next_lease_token 3

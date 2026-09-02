@@ -1,0 +1,32 @@
+S4 core 零改动口径证据（design D8：§7.1 授权的纯新增）
+========================================================
+
+口径（相对 S2 退出时的 `git diff openlatch-core 为空`）：
+S4 对 openlatch-core 的变更改为——"§7.1 授权的纯新增：既有方法体逐字节不变，
+既有文件仅追加式新增成员，其余为新增文件"。以下以 git diff 逐项佐证。
+
+1) 工作区 diff 统计（openlatch-core）
+------------------------------------------------------------
+  CoreEngine.java  | 89 +++   （纯新增：import ×4、守卫位字段 1、restoreFrom 方法、
+                                nextLeaseToken 读点方法，含契约级 Javadoc）
+  LockEntry.java   | 33 +++   （纯新增：restored 静态重建工厂 + import ×0 追加）
+  2 files changed, 122 insertions(+), 0 deletions(-)
+  —— 全部为 + 行，无任何 - 行（未修改/删除既有任何一行，含注释）。
+
+2) 新增文件（未跟踪）
+------------------------------------------------------------
+  core/snapshot/CoreStateRestore.java            快照重建输入值对象（core 原生类型）
+  core/test/.../CoreEngineRestoreTest.java       重建入口用例（spec 新 4 场景 + 守卫）
+
+3) 检查方法
+------------------------------------------------------------
+  git diff --stat -- openlatch-core
+  git status --short openlatch-core
+  两条命令的输出已列于上；任何对既有方法体的编辑都会显示为对既有行段的
+  上下文替换（- 行），实际为零。
+
+4) 结论
+------------------------------------------------------------
+  openlatch-core 的 S4 变更是"纯新增"：新增文件 + 既有文件内的追加式成员；
+  既有公开方法的行为与代码逐字节不变（core-lock-engine spec"单机路径零扰动"
+  由全量既有 core 测试回归绿佐证：CoreEngineRestoreTest 7 例 + 既有 34 例全绿）。

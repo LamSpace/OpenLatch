@@ -48,8 +48,11 @@ import java.util.Properties;
  *                          v2 Leader 提示与 {@code CLUSTER_VIEW} 作答的地址来源）
  * @param raftPort          本节点 Raft 复制通信监听端口
  * @param dataDir           Raft 日志与快照目录
- * @param snapshotThreshold 快照触发条目数（S2 仅解析透传，S4 落地生成/触发）
+ * @param snapshotThreshold 快照触发条目数（S4 起接入 Ratis 自动触发阈值）
  * @param electionTimeoutMs 选举超时上界（Raft 层语义透传）
+ * @param logSegmentBytes   Raft 日志 segment 上限字节（Raft 层语义透传，
+ *                          {@code 0} 取库默认；S4 追赶用例用小值驱动截断与
+ *                          快照安装流）
  */
 public record ClusterConfig(
         boolean enabled,
@@ -59,11 +62,12 @@ public record ClusterConfig(
         int raftPort,
         String dataDir,
         long snapshotThreshold,
-        long electionTimeoutMs) {
+        long electionTimeoutMs,
+        int logSegmentBytes) {
 
     /**
      * 兼容构造：未配置 {@code clientAddresses} 的 7 参形态（地址映射为空表，
-     * Leader 提示地址降级为空串）。
+     * Leader 提示地址降级为空串，日志 segment 取库默认）。
      *
      * @param enabled           是否启用集群
      * @param nodeId            本节点 id
@@ -75,7 +79,27 @@ public record ClusterConfig(
      */
     public ClusterConfig(boolean enabled, int nodeId, List<String> peers, int raftPort,
                          String dataDir, long snapshotThreshold, long electionTimeoutMs) {
-        this(enabled, nodeId, peers, List.of(), raftPort, dataDir, snapshotThreshold, electionTimeoutMs);
+        this(enabled, nodeId, peers, List.of(), raftPort, dataDir, snapshotThreshold,
+                electionTimeoutMs, 0);
+    }
+
+    /**
+     * 兼容构造：未配置 {@code logSegmentBytes} 的 8 参形态（segment 取库默认）。
+     *
+     * @param enabled           是否启用集群
+     * @param nodeId            本节点 id
+     * @param peers             全成员列表
+     * @param clientAddresses   客户端接入地址表（可为空表）
+     * @param raftPort          Raft 复制端口
+     * @param dataDir           数据目录
+     * @param snapshotThreshold 快照触发条目数
+     * @param electionTimeoutMs 选举超时
+     */
+    public ClusterConfig(boolean enabled, int nodeId, List<String> peers,
+                         List<String> clientAddresses, int raftPort, String dataDir,
+                         long snapshotThreshold, long electionTimeoutMs) {
+        this(enabled, nodeId, peers, clientAddresses, raftPort, dataDir, snapshotThreshold,
+                electionTimeoutMs, 0);
     }
 
     /** 配置键前缀（§9）。 */
@@ -91,6 +115,8 @@ public record ClusterConfig(
     public static final long DEFAULT_SNAPSHOT_THRESHOLD = 1_000_000L;
     /** 默认选举超时（毫秒）。 */
     public static final long DEFAULT_ELECTION_TIMEOUT_MS = 3_000L;
+    /** 默认日志 segment 上限（{@code 0}=取 Raft 库默认）。 */
+    public static final int DEFAULT_LOG_SEGMENT_BYTES = 0;
 
     /**
      * 全默认（关闭集群）。
@@ -99,7 +125,8 @@ public record ClusterConfig(
      */
     public static ClusterConfig disabled() {
         return new ClusterConfig(DEFAULT_ENABLED, 0, List.of(), List.of(), DEFAULT_RAFT_PORT,
-                DEFAULT_DATA_DIR, DEFAULT_SNAPSHOT_THRESHOLD, DEFAULT_ELECTION_TIMEOUT_MS);
+                DEFAULT_DATA_DIR, DEFAULT_SNAPSHOT_THRESHOLD, DEFAULT_ELECTION_TIMEOUT_MS,
+                DEFAULT_LOG_SEGMENT_BYTES);
     }
 
     /**
@@ -118,8 +145,9 @@ public record ClusterConfig(
         String dataDir = props.getProperty(KEY_PREFIX + "data-dir", DEFAULT_DATA_DIR);
         long snapshotThreshold = longOf(props, KEY_PREFIX + "snapshot-threshold", DEFAULT_SNAPSHOT_THRESHOLD);
         long electionTimeoutMs = longOf(props, KEY_PREFIX + "election-timeout-ms", DEFAULT_ELECTION_TIMEOUT_MS);
+        int logSegmentBytes = intOf(props, KEY_PREFIX + "log-segment-bytes", DEFAULT_LOG_SEGMENT_BYTES);
         ClusterConfig cfg = new ClusterConfig(enabled, nodeId, peers, clientAddresses, raftPort,
-                dataDir, snapshotThreshold, electionTimeoutMs);
+                dataDir, snapshotThreshold, electionTimeoutMs, logSegmentBytes);
         cfg.validate();
         return cfg;
     }
@@ -153,7 +181,7 @@ public record ClusterConfig(
      * {@code clientAddresses} 可选——未配置直接放行，配置时逐条
      * {@code id@host:port} 合法且 id 唯一；{@code raftPort} 合法端口；
      * {@code dataDir} 非空白；{@code snapshotThreshold >= 1}；
-     * {@code electionTimeoutMs > 0}。
+     * {@code electionTimeoutMs > 0}；{@code logSegmentBytes >= 0}。
      *
      * @throws IllegalArgumentException 任一配置项非法（消息指明配置键）
      */
@@ -221,6 +249,10 @@ public record ClusterConfig(
         if (electionTimeoutMs <= 0) {
             throw new IllegalArgumentException(
                     "配置项 " + KEY_PREFIX + "election-timeout-ms 非法（应 > 0）: " + electionTimeoutMs);
+        }
+        if (logSegmentBytes < 0) {
+            throw new IllegalArgumentException(
+                    "配置项 " + KEY_PREFIX + "log-segment-bytes 非法（应 >= 0，0 取库默认）: " + logSegmentBytes);
         }
     }
 

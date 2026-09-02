@@ -114,7 +114,11 @@ message SnapshotLock {
   repeated SnapshotHolder holders = 6;
 }
 
+// next_lease_token 为 S4 增补（发号水位）：快照后新副本的租约凭证发号器从该
+// 值起，保证与未截断副本对同一尾部日志发出相同凭证（快照切割点的跨副本一致
+// 依赖它，见 s4 design D10）。既有字段 1/2 编号不变。
 message SnapshotState {
   repeated SnapshotLock locks    = 1;
   repeated int64        sessions = 2;  // 已登记逻辑会话 id 集合（含归属 nodeId 高位）
+  int64 next_lease_token         = 3;  // S4：下一待发号水印（>= max(held lease_token)+1）
 }

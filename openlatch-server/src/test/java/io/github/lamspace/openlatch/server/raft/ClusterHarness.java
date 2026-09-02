@@ -47,17 +47,24 @@ final class ClusterHarness implements AutoCloseable {
         final int raftPort;
         /** 选举超时（重启复用）。 */
         final long electionTimeoutMs;
+        /** 快照触发阈值（重启复用；S4 用例以小阈值驱动自动快照）。 */
+        final long snapshotThreshold;
+        /** 日志 segment 上限字节（{@code 0}=库默认；S4 安装流用例强制截断）。 */
+        final int logSegmentBytes;
         /** 当前运行时（{@code null}=已停机）。 */
         volatile ClusterRuntime runtime;
 
         private Node(int id, ClusterRuntime runtime, ServerSessionRegistry registry,
-                     Path dataDir, int raftPort, long electionTimeoutMs) {
+                     Path dataDir, int raftPort, long electionTimeoutMs, long snapshotThreshold,
+                     int logSegmentBytes) {
             this.id = id;
             this.runtime = runtime;
             this.registry = registry;
             this.dataDir = dataDir;
             this.raftPort = raftPort;
             this.electionTimeoutMs = electionTimeoutMs;
+            this.snapshotThreshold = snapshotThreshold;
+            this.logSegmentBytes = logSegmentBytes;
         }
 
         /** 本节点是否存活（运行时在位且 division 未关闭）。 */
@@ -99,15 +106,23 @@ final class ClusterHarness implements AutoCloseable {
         }
     }
 
-    /** 全部节点（按 id 升序固定）。 */
+    /** 全部节点（按 id 升序固定；{@link #addNode} 追加）。 */
     private final List<Node> nodes = new ArrayList<>();
     /** 端口与目录模板（重启复用）。 */
     private final List<String> peerSpecs;
+    /** 建群参数（addNode 的新节点沿用）。 */
+    private final long baseElectionTimeoutMs;
+    private final long baseSnapshotThreshold;
+    private final int baseLogSegmentBytes;
     /** 关停幂等标志。 */
     private boolean closed;
 
-    private ClusterHarness(List<String> peerSpecs) {
+    private ClusterHarness(List<String> peerSpecs, long electionTimeoutMs,
+                           long snapshotThreshold, int logSegmentBytes) {
         this.peerSpecs = peerSpecs;
+        this.baseElectionTimeoutMs = electionTimeoutMs;
+        this.baseSnapshotThreshold = snapshotThreshold;
+        this.baseLogSegmentBytes = logSegmentBytes;
     }
 
     /**
@@ -122,7 +137,7 @@ final class ClusterHarness implements AutoCloseable {
     }
 
     /**
-     * 启动 n 节点集群并等待初始选主。
+     * 启动 n 节点集群并等待初始选主（默认大阈值：S2/S3 用例零扰动）。
      *
      * @param n                 节点数
      * @param electionTimeoutMs 选举超时（探针周期与 failover 时长的共同旋钮）
@@ -130,6 +145,37 @@ final class ClusterHarness implements AutoCloseable {
      * @throws IOException 装配失败
      */
     static ClusterHarness start(int n, long electionTimeoutMs) throws IOException {
+        return start(n, electionTimeoutMs, 1_000_000L);
+    }
+
+    /**
+     * 启动 n 节点集群并等待初始选主，快照阈值显式给定（S4 用例以小阈值
+     * 驱动自动快照；重启沿用同一阈值）。
+     *
+     * @param n                 节点数
+     * @param electionTimeoutMs 选举超时
+     * @param snapshotThreshold 快照触发条目数
+     * @return 就绪集群
+     * @throws IOException 装配失败
+     */
+    static ClusterHarness start(int n, long electionTimeoutMs, long snapshotThreshold)
+            throws IOException {
+        return start(n, electionTimeoutMs, snapshotThreshold, 0);
+    }
+
+    /**
+     * 完整参数启动：小 {@code logSegmentBytes}（如 4096）使日志按小块滚动，
+     * 配合快照截断可把落后节点推入安装流（S4/P2-16；{@code 0}=库默认）。
+     *
+     * @param n                 节点数
+     * @param electionTimeoutMs 选举超时
+     * @param snapshotThreshold 快照触发条目数
+     * @param logSegmentBytes   日志 segment 上限字节（{@code 0} 取库默认）
+     * @return 就绪集群
+     * @throws IOException 装配失败
+     */
+    static ClusterHarness start(int n, long electionTimeoutMs, long snapshotThreshold,
+                                int logSegmentBytes) throws IOException {
         int[] ports = new int[n];
         for (int i = 0; i < n; i++) {
             ports[i] = freePort();
@@ -138,25 +184,50 @@ final class ClusterHarness implements AutoCloseable {
         for (int i = 0; i < n; i++) {
             peers.add((i + 1) + "@127.0.0.1:" + ports[i]);
         }
-        ClusterHarness h = new ClusterHarness(List.copyOf(peers));
+        ClusterHarness h = new ClusterHarness(List.copyOf(peers), electionTimeoutMs,
+                snapshotThreshold, logSegmentBytes);
         for (int i = 0; i < n; i++) {
             Path dir = Files.createTempDirectory("openlatch-cluster-" + (i + 1) + "-");
             Node node = new Node(i + 1, null, new ServerSessionRegistry(), dir, ports[i],
-                    electionTimeoutMs);
-            node.runtime = boot(node, peers, electionTimeoutMs);
+                    electionTimeoutMs, snapshotThreshold, logSegmentBytes);
+            node.runtime = boot(node, peers);
             h.nodes.add(node);
         }
         h.awaitTrue(h::hasLeader, 20_000, "初始选主");
         return h;
     }
 
+    /**
+     * 以空数据目录启动一个新节点（S4/P2-17 加节点流程测试用）：仅启动其
+     * Raft 服务并纳入其自身视角的成员表——组的正式变更由用例经
+     * {@code subsystem().setMembers} 走运维路径（listener 加入→追赶→升票）。
+     *
+     * @param nodeId 新节点 id（不得与既有节点重复）
+     * @return 已启动的节点视图
+     * @throws IOException 端口/目录分配或装配失败
+     */
+    Node addNode(int nodeId) throws IOException {
+        if (nodes.stream().anyMatch(x -> x.id == nodeId)) {
+            throw new IllegalArgumentException("node id 已存在: " + nodeId);
+        }
+        int port = freePort();
+        List<String> peersWithNew = new ArrayList<>(peerSpecs);
+        peersWithNew.add(nodeId + "@127.0.0.1:" + port);
+        Path dir = Files.createTempDirectory("openlatch-cluster-" + nodeId + "-");
+        Node node = new Node(nodeId, null, new ServerSessionRegistry(), dir, port,
+                baseElectionTimeoutMs, baseSnapshotThreshold, baseLogSegmentBytes);
+        node.runtime = boot(node, List.copyOf(peersWithNew));
+        nodes.add(node);
+        return node;
+    }
+
     /** 按当前存活视图装配并启动一个节点的运行时。 */
-    private static ClusterRuntime boot(Node node, List<String> peers, long electionTimeoutMs)
-            throws IOException {
+    private static ClusterRuntime boot(Node node, List<String> peers) throws IOException {
         // client-addresses 合成表（raft 端口 +10000）：证明提示地址来自该映射
         // 而非 raft 地址混同；用例据此断言 leader_address 字面。
         ClusterConfig cc = new ClusterConfig(true, node.id, peers, clientAddressSpecs(peers),
-                node.raftPort, node.dataDir.toString(), 1_000_000L, electionTimeoutMs);
+                node.raftPort, node.dataDir.toString(), node.snapshotThreshold,
+                node.electionTimeoutMs, node.logSegmentBytes);
         cc.validate();
         return ClusterRuntime.create(cc, testServerConfig(), node.registry);
     }
@@ -264,7 +335,7 @@ final class ClusterHarness implements AutoCloseable {
         if (x.alive()) {
             throw new IllegalStateException("node " + id + " still alive");
         }
-        x.runtime = boot(x, peerSpecs, x.electionTimeoutMs);
+        x.runtime = boot(x, peerSpecs);
     }
 
     /**
@@ -318,6 +389,24 @@ final class ClusterHarness implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 throw new AssertionError(what + "：等待被中断");
             }
+        }
+    }
+
+    /**
+     * 指定节点数据目录内的快照文件（按 {@code snapshot.T_I} 命名匹配，
+     * 不含 MD5/tmp/corrupt 伴随文件；S4 保留数与位点断言入口）。
+     *
+     * @param id 节点 id
+     * @return 快照文件路径列表（无序）
+     */
+    List<Path> snapshotFiles(int id) throws IOException {
+        Node x = node(id);
+        try (var walk = Files.walk(x.dataDir)) {
+            return walk.filter(Files::isRegularFile)
+                    .filter(p -> org.apache.ratis.statemachine.impl
+                            .SimpleStateMachineStorage.SNAPSHOT_REGEX
+                            .matcher(p.getFileName().toString()).matches())
+                    .toList();
         }
     }
 

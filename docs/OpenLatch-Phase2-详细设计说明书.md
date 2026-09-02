@@ -5,12 +5,12 @@
 | 项目名称 | **OpenLatch**                                                                                                       |
 | 文档类型 | 详细设计说明书（Phase 2 / Raft 集群）                                                                               |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0、《OpenLatch-Phase1-详细设计说明书》v1.0 |
-| 版本     | v1.3                                                                                                                |
-| 日期     | 2026-08-31                                                                                                          |
+| 版本     | v1.4                                                                                                                |
+| 日期     | 2026-09-02                                                                                                          |
 | 作者     | Lam Tong                                                                                                            |
-| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，v1.3 为 S2 退出补回写，见 §4/§6/§9/§13.2/§13.3）                                                    |
+| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，v1.3 为 S2 退出补回写，v1.4 为 S4 实现回写，见 §4/§6/§7/§9/§13.4） |
 
-**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）；v1.3（2026-08-31）S2 退出评审回写补齐——§4.5 排队登记主体由"本地 `CoreEngine`"改判为 Leader 侧任期作用域独立 `WaitQueue`（S2 design D9 正确性修复）、§4.3"命令级时间覆盖参数"定夺不做（S2 design D2）、§13.2 各任务标记完成（证据见 `openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`）。
+**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）；v1.3（2026-08-31）S2 退出评审回写补齐——§4.5 排队登记主体由"本地 `CoreEngine`"改判为 Leader 侧任期作用域独立 `WaitQueue`（S2 design D9 正确性修复）、§4.3"命令级时间覆盖参数"定夺不做（S2 design D2）、§13.2 各任务标记完成（证据见 `openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`）；v1.4（2026-09-02）S4 快照与恢复、容错加固实现回写——§7.1 `SnapshotState` 增 `next_lease_token=3`（发号水位，切割点跨副本一致的硬条件）并落定重建入口形态（`CoreStateRestore` 值对象）、§7.2 落盘口径与手动触发落点、§7.3 安装流（Ratis 3.3 pause→reload 模型，取代既有 `loadSnapshot(Stream)` 假设）、§9 增 `log-segment-bytes` 键与"截断推进至快照位点"装配口径、§1.4 core"零改动"口径切换为"§7.1 授权纯新增"、§13.4 各任务完成标记（证据见 `openspec/changes/phase2-s4-snapshot-recovery/`：`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md` 与 `docs/rolling-restart-drill-2026-09-02.md`）。
 
 ---
 
@@ -123,7 +123,7 @@ server/raft/
 
 > v1.2 实现落点：原规划的独立 `ForwardingProxy` 类未单列——Follower 侧 RELEASE/RENEW 的转发直接复用 `ReplicationGateway` 的内部提交通道（`SESSION_OPEN` 本就走此路），`ClusterRequestHandler` 摘除角色门即接入；`LeaderTracker` 为 S3 新增（`server.raft`），保留 Ratis `notifyLeaderChanged` 的新 Leader 身份并折算为 `{nodeId, address}` 提示单源。`ClusterRequestHandler`/`LeaderTracker` 均为详设结构在实现中的落点补全，不改变 §3.1 拓扑。
 
-`CoreEngine`（openlatch-core） **零改动**复用：集群化改变的是"谁调用它、何时响应客户端"，不改变锁语义本身。这是 Phase 1 将核心隔离为纯 Java 模块的直接收益。
+`CoreEngine`（openlatch-core）复用原则：集群化改变的是"谁调用它、何时响应客户端"，不改变锁语义本身。这是 Phase 1 将核心隔离为纯 Java 模块的直接收益。**v1.4 口径修正（S4）**：为支撑快照恢复，`openlatch-core` 获 §7.1 授权的<b>纯新增</b>（`core.snapshot.CoreStateRestore` 值对象 + `CoreEngine.restoreFrom`/`nextLeaseToken` + `LockEntry.restored` 工厂），既有方法体逐字节不变（证据 `openspec/changes/phase2-s4-snapshot-recovery/s4-zero-touch-evidence.txt`：core diff 122 insertions、0 deletions）——S2 退出时"git diff 为空"的口径在 S4 后不再成立，改以"既有方法体零改动"表述。
 
 ---
 
@@ -299,18 +299,24 @@ message NodeInfo {
 | 日志位点     | 由 Raft 库管理                                                          |
 | ~~等待队列~~ | 不快照（不复制，§4.4）                                                  |
 
-序列化：复用 `raft.proto` 定义 `SnapshotState` 消息（锁条目 repeated），单一二进制文件；加载即反序列化后重建 `CoreEngine` 状态（为 `CoreEngine` 增加一个仅供快照加载使用的包级私有重建入口）。
+序列化：复用 `raft.proto` 定义 `SnapshotState` 消息（锁条目 repeated），单一二进制文件；加载即反序列化后重建 `CoreEngine` 状态。
+
+> **v1.4 实现落点（S4/P2-15）**：`SnapshotState` 在 S2 骨架（`locks`/`sessions`）基础上增补 `next_lease_token=3`——<b>发号水位</b>（S4 design D10）：凭证发号是历史累计量，被释放条目的已消耗凭证不出现在快照中，若仅按"继承最大凭证+1"起号，重建副本与未截断副本会对同一尾部日志发出不同 `leaseToken`，跨副本状态永久分叉（PoC"回灌无法复现 token 序列"的镜像）。水位不入 digest（`ShadowTable.toProto` 不变），由 `LockStateMachineCore.snapshotState()` 组合、`installSnapshot` 消费；缺字段（值 0）按 max(凭证)+1 兜底。重建入口实为 core 新增 `CoreStateRestore` 值对象 + `CoreEngine.restoreFrom`（§1.4 口径修正）——"包级私有"字面不可行（core/server 跨模块跨包），取"public 入口 + Javadoc 契约限定唯一调用方与用途"。重建内容四件套：锁表直写、会话登记、到期堆回填、发号水位落位；等待队列不恢复（集群引擎无等待项，design D9）。切割点不变性（≥100 组随机序列"前缀装快照+后缀回放"与全程直接回放 digest 一致）是该水位的机械判据。
 
 ### 7.2 触发与保留
 
 - 触发：日志条目数阈值（默认 100 万条，可配置）或手动管理命令；
 - 保留最近 2 份快照；快照写入期间状态机照常服务（先取条目锁内的一致性快照副本，再异步落盘）。
 
+> **v1.4 实现落点（S4/P2-15）**：自动触发 = 装配层把 `snapshot-threshold` 接入 Ratis `auto-trigger`（S2 关闭的那行在 S4 打开）；保留 2 份 = `raft.snapshot.retention.file.num=2`（快照位点已应用⊆已提交，截断推进至快照位点对多数派安全，装配层恒置 `purgeUptoSnapshotIndex=true`——否则任一缺席节点卡死截断，§7.3-2 安装流永不触发）；手动管理命令落点为 `RaftSubsystem.triggerSnapshot()`（任意角色节点可调，语义同自动触发，S4 design D6；不引入管理端点）。"异步落盘"口径（design D4）：`applyLock` 内 `shadow.toProto()` 一致性副本 → <b>放锁后</b>写盘提交（tmp→原子 rename→MD5 伴随）；完全异步（先返位点后落盘）会使截断先于持久化而失快照，被否决——落盘期间应用线程的短暂停为既定代价，耗时由 §10 快照基准度量（实测 10 万条目：落盘 45ms）。
+
 ### 7.3 恢复流程
 
 1. 节点启动：加载最新快照 → 重建锁状态 → 回放快照后日志；
 2. 落后过多的节点：由 Raft 库安装 Leader 的快照后继续增量追赶；
 3. 追赶期间节点可接入只读查询（`CLUSTER_VIEW`），写请求一律 `NOT_LEADER`。
+
+> **v1.4 实现落点（S4/P2-16，design D5 spike 结论）**：Ratis 3.3.0 无 `loadSnapshot(SnapshotInfo, InputStream)`——安装流为库写快照文件到 `SimpleStateMachineStorage` → `stateMachine.pause()`（自行迁移生命周期 RUNNING→PAUSED）→ 库原子发布（tmp→`snapshot.T_I`，含 MD5 伴随）→ `StateMachineUpdater.reload()` 调 `reinitialize()`（状态机重扫盘上最新快照、`installSnapshot` 整体重建、位点钉到快照位点、生命周期回 RUNNING）→ 增量回放续起。要点：安装发布不经状态机引用（reinitialize 必须盘上重扫 `loadLatestSnapshot`）；MD5 伴随文件是有效性判定输入（takeSnapshot 必须 `computeAndSaveMd5ForFile`）；`initialize` 须经 `startAndTransition` 把生命周期推到 RUNNING。启动加载与安装共用同一 `loadSnapshot(SingleFileSnapshotInfo)` 通道。追赶窗口写请求 `NOT_LEADER` 由 S3 角色门天然覆盖（安装中恒为 Follower）。结论档案见 `openspec/changes/phase2-s4-snapshot-recovery/observations-ratis-3.3.0-s4-snapshot.md`。
 
 ### 7.4 成员变更
 
@@ -346,8 +352,9 @@ message NodeInfo {
 | `openlatch.cluster.client-addresses`    | 空（可选）| v1.2 新增：`id@host:port` 接入地址映射，供 Leader 提示与 `CLUSTER_VIEW` 作答。缺省不阻塞启动，`leader_address` 降级为空串、客户端以种子自报兜底 |
 | `openlatch.cluster.raft-port`           | `9411`    | Raft 复制通信端口                     |
 | `openlatch.cluster.data-dir`            | `./data`  | 日志与快照目录                        |
-| `openlatch.cluster.snapshot-threshold`  | `1000000` | 快照触发条目数                        |
+| `openlatch.cluster.snapshot-threshold`  | `1000000` | 快照触发条目数（S4 起接入自动触发；保留 2 份由装配层钉死，不入配置） |
 | `openlatch.cluster.election-timeout-ms` | `3000`    | 依 Raft 库语义透传                    |
+| `openlatch.cluster.log-segment-bytes`   | `0`       | v1.4（S4）新增：Raft 日志 segment 上限字节，依 Raft 库语义透传（0=库默认；运维一般不配，测试以小值驱动截断/安装流） |
 
 部署要求：节点间 NTP 同步（漂移 ≤ 1s，§4.3）；`data-dir` 建议独立磁盘。
 
@@ -418,12 +425,14 @@ message NodeInfo {
 | P2-13 | 客户端 Leader 发现             | 种子列表、HELLO hint 直连、`NOT_LEADER` 重定向、连续 3 次失败强制发现（§6.3）        | P2-12 | §6.3 流程逐分支用例通过             |
 | P2-14 | 杀 Leader 演练自动化           | 计时脚本 + 存活会话锁保留断言 + 等待者重排队断言                                     | P2-13 | 端到端恢复 < 10s；**S3 退出**       |
 
-### 13.4 S4：快照与恢复、容错加固
+### 13.4 S4：快照与恢复、容错加固（已完成，v1.4 回写）
+
+证据：`openspec/changes/phase2-s4-snapshot-recovery/`（`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md`）。
 
 | ID    | 子任务             | 内容与交付物                                                                              | 前置  | 验证                                   |
 |-------|--------------------|-------------------------------------------------------------------------------------------|-------|----------------------------------------|
-| P2-15 | 快照生成           | `SnapshotState` 序列化、条目锁内一致性副本 + 异步落盘、保留 2 份（§7.2）                  | P2-14 | 快照可加载；快照期间服务不受影响       |
-| P2-16 | 快照加载与追赶     | 启动加载 + 日志回放；Raft 快照安装流程；10 万条目基准与全量比对工具                       | P2-15 | 恢复 < 30s（§2.4）；全量比对一致       |
-| P2-17 | 成员变更           | 库 API 封装；"先加后删"运维流程文档；变更期间会话清理                                     | P2-16 | 加节点追赶、删节点用例通过             |
-| P2-18 | 分区与滚动重启演练 | 少数派不可授予断言；滚动重启客户端错误率统计                                              | P2-17 | 分区演练全绿；滚动重启错误率 < 1%      |
-| P2-19 | 混沌测试与验收闭环 | 随机杀节点 + 持续负载 + 不变式检查器（§10）；§11 七项验收证据收集；一致性声明写入用户文档 | P2-18 | §11 验收清单逐项闭环；**Phase 2 发布** |
+| P2-15 | 快照生成           | `SnapshotState` 序列化（含发号水位）、条目锁内一致性副本 + 锁外落盘、保留 2 份、手动触发（§7.1/§7.2） | P2-14 | ✅ 快照可加载（round-trip + 切割点不变性 109 组）；快照期间服务不受影响（`ClusterSnapshotTest` 低阈值并发负载零错误） |
+| P2-16 | 快照加载与追赶     | 启动加载 + 日志回放；Ratis 3.3 pause→reload 安装流；10 万条目基准与全量比对工具（§7.3）    | P2-15 | ✅ 恢复 < 30s（实测 521ms）；全量比对一致（`StateComparisons.diff` 空）；`ClusterSnapshotRecoveryTest` 两恢复路径 |
+| P2-17 | 成员变更           | `RaftSubsystem.setMembers/removeVoter` + `ClusterRuntime.removeMember`；"先加后删"运维文档；变更期间会话清理 | P2-16 | ✅ `ClusterMembershipTest`：加节点（listener→追平→升票→当选服务）、删节点会话清理、多数派护栏拒绝 |
+| P2-18 | 分区与滚动重启演练 | 少数派不可授予断言；滚动重启客户端错误率统计；容错加固（失联判定）                          | P2-17 | ✅ 辅轨 `MinorityQuorumTest` 全绿（并暴露/修复失联判定误伤——§4.5 未述之实现缺陷，D12）；netns 主轨 `PartitionDrillIT` 待特权环境补跑；滚动重启双顺序 0.80%/0.00%（`docs/rolling-restart-drill-2026-09-02.md`） |
+| P2-19 | 混沌测试与验收闭环 | 随机杀节点 + 持续负载 + 不变式检查器（§10）；§11 验收证据收集；用户文档一致性                 | P2-18 | ✅ `ClientChaosIT` 零双授冲突/零泄漏/摘要收敛；`s4-exit-checklist.md` 逐项；**Phase 2 发布** |
