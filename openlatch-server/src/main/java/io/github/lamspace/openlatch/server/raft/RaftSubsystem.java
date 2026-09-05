@@ -127,6 +127,14 @@ public final class RaftSubsystem {
      * <p>存储目录已存在时以 RECOVER 启动（Ratis 摩擦档案：默认 FORMAT 在重启
      * 非空目录即失败），否则 FORMAT 新建。
      *
+     * <p><b>线程池装配契约</b>：proxy/server/client 三组池钉为非缓存固定池
+     * （常驻 worker）——Ratis 3.3.0 的组关停派发是 fire-and-forget 进 cached
+     * proxy 池，而 cached 池 worker 空闲 60s 全部退出后，优雅关停的派发任务
+     * 可能永不被执行（关停链挂至库内 1 天超时），空闲节点必中；固定池从构造
+     * 上消除该前提（soak 取证见 observations 档案）。尺寸 4 覆盖单分组启动
+     * 派发与本服务内部客户端池（{@value #CLIENT_POOL_SIZE}）并发度，属保守
+     * 容量而非调优参数。
+     *
      * @throws IOException 启动失败（端口占用、存储不可写等）
      */
     public void start() throws IOException {
@@ -147,6 +155,16 @@ public final class RaftSubsystem {
         // 库默认的"按全体 peer 提交位取 min"会被任一长期缺席节点卡死——日志
         // 无上界增长且严重落后场景永远走不到安装流（§7.3-2 依赖截断制造位点差）。
         RaftServerConfigKeys.Log.setPurgeUptoSnapshotIndex(props, true);
+        // 线程池钉死（soak 缺陷修复，契约见本方法 Javadoc）：cached 池的 worker
+        // 空闲 60s 回收，而 Ratis 3.3.0 RaftServerProxy.close 以 fire-and-forget
+        // 把组关停任务派发进 proxy 池（不 join）——零 worker 时刻派发即永不被执行，
+        // 状态机更新器收不到停止信号，同线程的 shutdownAndWait 挂 1 天。
+        RaftServerConfigKeys.ThreadPool.setProxyCached(props, false);
+        RaftServerConfigKeys.ThreadPool.setProxySize(props, 4);
+        RaftServerConfigKeys.ThreadPool.setServerCached(props, false);
+        RaftServerConfigKeys.ThreadPool.setServerSize(props, 4);
+        RaftServerConfigKeys.ThreadPool.setClientCached(props, false);
+        RaftServerConfigKeys.ThreadPool.setClientSize(props, 4);
         if (clusterConfig.logSegmentBytes() > 0) {
             // Raft 库语义透传（同 election-timeout-ms 口径）：小 segment 使截断
             // 粒度落在测试可驱动的条目量级（S4 追赶用例）。

@@ -5,12 +5,12 @@
 | 项目名称 | **OpenLatch**                                                                                                       |
 | 文档类型 | 详细设计说明书（Phase 2 / Raft 集群）                                                                               |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0、《OpenLatch-Phase1-详细设计说明书》v1.0 |
-| 版本     | v1.4                                                                                                                |
-| 日期     | 2026-09-02                                                                                                          |
+| 版本     | v1.5                                                                                                                |
+| 日期     | 2026-09-06                                                                                                          |
 | 作者     | Lam Tong                                                                                                            |
-| 状态     | 待评审（v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，v1.3 为 S2 退出补回写，v1.4 为 S4 实现回写，见 §4/§6/§7/§9/§13.4） |
+| 状态     | 已验收（Phase 2 发布收口，v1.1 为 S1 定案回写，v1.2 为 S3 实现回写，v1.3 为 S2 退出补回写，v1.4 为 S4 实现回写，v1.5 为发布收口回写，见 §4/§6/§7/§9/§12/§13；验收证据汇总见 `docs/Phase2-验收报告.md`） |
 
-**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）；v1.3（2026-08-31）S2 退出评审回写补齐——§4.5 排队登记主体由"本地 `CoreEngine`"改判为 Leader 侧任期作用域独立 `WaitQueue`（S2 design D9 正确性修复）、§4.3"命令级时间覆盖参数"定夺不做（S2 design D2）、§13.2 各任务标记完成（证据见 `openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`）；v1.4（2026-09-02）S4 快照与恢复、容错加固实现回写——§7.1 `SnapshotState` 增 `next_lease_token=3`（发号水位，切割点跨副本一致的硬条件）并落定重建入口形态（`CoreStateRestore` 值对象）、§7.2 落盘口径与手动触发落点、§7.3 安装流（Ratis 3.3 pause→reload 模型，取代既有 `loadSnapshot(Stream)` 假设）、§9 增 `log-segment-bytes` 键与"截断推进至快照位点"装配口径、§1.4 core"零改动"口径切换为"§7.1 授权纯新增"、§13.4 各任务完成标记（证据见 `openspec/changes/phase2-s4-snapshot-recovery/`：`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md` 与 `docs/rolling-restart-drill-2026-09-02.md`）。
+**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-08-30）S1 Raft 选型 PoC 完成，§2 定案 Apache Ratis（证据见 `docs/raft-selection-report.md` 与 `poc/raft-selection/`），§12 风险 4 关闭；v1.2（2026-08-31）S3 Leader 发现与故障转移实现回写——§6.2 hint 字段编号定稿（复用 `leader_hint=5` + 新增 `leader_address=6`，补三类写响应 hint 载体与 `ClusterView.status`）、§9 增 `client-addresses` 配置键、§6.1 v1 客户端口径收紧、§3.2/§13.3 P2-12 措辞对齐分车道裁决（证据见 `openspec/changes/s3-leader-discovery-failover/` 与 `docs/failover-drill-*.md`）；v1.3（2026-08-31）S2 退出评审回写补齐——§4.5 排队登记主体由"本地 `CoreEngine`"改判为 Leader 侧任期作用域独立 `WaitQueue`（S2 design D9 正确性修复）、§4.3"命令级时间覆盖参数"定夺不做（S2 design D2）、§13.2 各任务标记完成（证据见 `openspec/changes/archive/2026-08-30-phase2-s2-replicated-state-machine/`）；v1.4（2026-09-02）S4 快照与恢复、容错加固实现回写——§7.1 `SnapshotState` 增 `next_lease_token=3`（发号水位，切割点跨副本一致的硬条件）并落定重建入口形态（`CoreStateRestore` 值对象）、§7.2 落盘口径与手动触发落点、§7.3 安装流（Ratis 3.3 pause→reload 模型，取代既有 `loadSnapshot(Stream)` 假设）、§9 增 `log-segment-bytes` 键与"截断推进至快照位点"装配口径、§1.4 core"零改动"口径切换为"§7.1 授权纯新增"、§13.4 各任务完成标记（证据见 `openspec/changes/phase2-s4-snapshot-recovery/`：`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md` 与 `docs/rolling-restart-drill-2026-09-02.md`）；v1.5（2026-09-06）Phase 2 发布收口回写——§13.3 S3 四任务退出记账补齐（镜像 v1.3 对 S2 的补回写模式，证据为 S3 归档与 `docs/failover-drill-2026-08-31.md`）、§11-3 主轨分区演练绿（netns 真分区，`docs/partition-drill-2026-09-06.md`，判据口径修正：HELLO 在少数派可完成本地握手、判定以会话化 ACQUIRE 的 NOT_LEADER 与 RELEASE 道非 OK + 锁存活为准）、§10 混沌字面 ≥10 分钟 soak 达成（510 杀/509 重启/0 冲突/0 泄漏）、§9 新增线程池装配契约（Ratis 3.3.0 cached 池在空闲后优雅关停必挂的 P0 修复，`observations-ratis-3.3.0-soak-shutdown-hang.md`）、§12 遗留增 P1 leader 复制停摆（存量缺陷，差分实验证明非收口期引入，`defects/leader-replication-stall-ratis-3.3.0.md`，运维推荐"先从不先主"）（证据见 `openspec/changes/phase2-release-closure/`）。
 
 ---
 
@@ -358,6 +358,8 @@ message NodeInfo {
 
 部署要求：节点间 NTP 同步（漂移 ≤ 1s，§4.3）；`data-dir` 建议独立磁盘。
 
+> **v1.5 装配契约（发布收口 / P0 修复）**：Ratis 的 proxy/server/client 三组线程池由装配层钉死为**非缓存固定池（size=4）**，不入配置。动因：Ratis 3.3.0 `RaftServerProxy.close` 以 fire-and-forget 将组关停派发进 proxy 池，而默认 cached 池 worker 空闲 60s 全部回收——空闲节点（>60s 无派发）的优雅关停任务可能永不被执行，关停线程挂库内 1 天超时（生产 SIGTERM 停机必中）。固定池常驻 worker 从构造上消除该前提；取证与回归见 `openspec/changes/phase2-release-closure/observations-ratis-3.3.0-soak-shutdown-hang.md` 与 `IdleNodeGracefulStopIT`（规约化入 `cluster-node-lifecycle`"长空闲后优雅关停有界"场景）。
+
 ## 10. 测试设计
 
 | 层次       | 内容                                                                                                                            |
@@ -367,7 +369,7 @@ message NodeInfo {
 | 故障演练   | 实施计划 §5.2 验收清单 1–7 逐项自动化（杀 Leader 计时、分区隔离用进程组/网络命名空间隔离实现）                                  |
 | 快照       | 10 万锁条目快照：大小、落盘耗时、加载耗时；加载后状态与集群一致（全量比对工具）                                                 |
 | 客户端     | 种子发现、`NOT_LEADER` 重定向、切换窗口内超时行为、幂等重放                                                                     |
-| 混沌       | 随机杀节点 + 持续负载（≥10 分钟），不变式检查器：任何时刻同 key 至多一个写持有者；无锁泄漏（停负载 + 等待一个租约期后锁表为空） |
+| 混沌       | 随机杀节点 + 持续负载（≥10 分钟），不变式检查器：任何时刻同 key 至多一个写持有者；无锁泄漏（停负载 + 等待一个租约期后锁表为空）。**v1.5 双档达成**：常规回归为 ~18s 短窗口（缺省语义）；字面 ≥10 分钟 soak 档经 `-Dopenlatch.chaos.soak-minutes` 启用，发布级单轮实测 `loadWallMs=601038 / kills=510 / restarts=509 / grants=2567 / conflicts=0`（2026-09-05，静息态） |
 
 ## 11. Phase 2 验收标准
 
@@ -375,7 +377,7 @@ message NodeInfo {
 
 1. ✅ 3 节点正常服务 —— 复制集成测试全绿；
 2. ✅ 杀 Leader 恢复 < 10s、存活会话锁不丢 —— 故障演练计时与锁保留断言；
-3. ✅ 少数派不能授予 —— 分区演练断言少数派全部写请求失败；
+3. ✅ 少数派不能授予 —— 分区演练断言少数派全部写请求失败（主辅双轨：辅轨 `MinorityQuorumTest`，S4 归档；主轨 netns 真分区 `docs/partition-drill-2026-09-06.md`，会话化 ACQUIRE×4 判 NOT_LEADER、RELEASE 道非 OK、Leader 侧同凭证释放成功证锁存活，撤分区自动收敛；v1.5 收口绿）；
 4. ✅ 快照恢复一致 —— 全量比对通过；
 5. ✅ 滚动重启不中断 —— 演练期间客户端错误率 < 1%（仅切换窗口瞬时错误）；
 6. ✅ 切换期无死锁无泄漏 —— 混沌测试不变式检查通过；
@@ -389,6 +391,7 @@ message NodeInfo {
 | 2 | 到期由 Leader 驱动：Leader 长时间无写入时到期延迟 ≤ 扫描周期（500ms） | 可接受                                                     |
 | 3 | 时钟漂移超出假设（> 1s）时租约误差放大                                | 部署文档强制 NTP；监控（Phase 3）可加节点时钟偏移指标      |
 | 4 | Raft 库与 Netty 的线程/内存共存细节依赖 S1 PoC 结论                   | **已关闭（v1.1）**：Ratis thirdparty 全着色，与主干 protobuf 3.25.5 / netty 4.1.137 零类路径交集（`poc/raft-selection/friction-ratis.md`） |
+| 5 | Ratis 3.3.0 leader 复制停摆：旧 leader 带脏条目重启归群的语境下，新 leader 任期 NOOP 可能永不提交（双稳态），写面 `LeaderNotReady` 阻塞 200+ 秒不自愈 | **在案（v1.5）**：存量 P1（差分实验证明非收口期引入；S4"R2 离群轮 24.22% 瞬态"旧判定由本行更正）。运维缓解：滚动重启推荐"先从不先主"（已入部署文档）；跟进：独立 change 立项——leader 自愈看门狗评估 / Ratis 3.3.1 升级跟踪。取证与跟进计划见 `openspec/changes/phase2-release-closure/defects/leader-replication-stall-ratis-3.3.0.md` |
 
 ## 13. 实施子任务拆分
 
@@ -416,23 +419,25 @@ message NodeInfo {
 | P2-09 | 租约到期复制            | Leader 扫描驱动 `LEASE_EXPIRE_ENTRY`；回放按 token 幂等校验                             | P2-07        | ✅ failover 后到期继续生效（误差 ≤ 一个扫描周期）；ABA 交错空操作用例通过 |
 | P2-10 | 3 节点复制集成          | 多数派确认、停 1 节点仍可服务、停 2 节点不可授予                                        | P2-08、P2-09 | ✅ §10 复制集成全绿，`mvn clean verify` 全 reactor 绿；**S2 退出** |
 
-### 13.3 S3：Leader 发现与客户端故障转移
+### 13.3 S3：Leader 发现与客户端故障转移（已完成，v1.5 回写）
+
+证据：`openspec/changes/archive/2026-08-31-s3-leader-discovery-failover/`（含 `s3-exit-checklist.md`；实现回写见 v1.2）与 `docs/failover-drill-2026-08-31.md`。
 
 | ID    | 子任务                         | 内容与交付物                                                                         | 前置  | 验证                                |
 |-------|--------------------------------|--------------------------------------------------------------------------------------|-------|-------------------------------------|
-| P2-11 | 协议 v2 扩展                   | `HelloResponse` leader 字段、启用 `NOT_LEADER`、`CLUSTER_VIEW`；服务端兼容 v1 客户端 | P2-10 | 协议测试全绿；v1 客户端行为回归不变 |
-| P2-12 | LeaderTracker 与 Follower 分车道 | `LeaderTracker`（保留 Ratis 新主身份→`{nodeId,address}` 提示单源，§3.2/§4.5）；Follower 分车道：ACQUIRE 回 `NOT_LEADER`+提示、RELEASE/RENEW 经转发道由 Leader 复制执行（§4.5） | P2-11 | 角色切换后的响应行为用例通过（`LeaderFailoverServerTest`）；提示一致性三消费方同源 |
-| P2-13 | 客户端 Leader 发现             | 种子列表、HELLO hint 直连、`NOT_LEADER` 重定向、连续 3 次失败强制发现（§6.3）        | P2-12 | §6.3 流程逐分支用例通过             |
-| P2-14 | 杀 Leader 演练自动化           | 计时脚本 + 存活会话锁保留断言 + 等待者重排队断言                                     | P2-13 | 端到端恢复 < 10s；**S3 退出**       |
+| P2-11 | 协议 v2 扩展                   | `HelloResponse` leader 字段、启用 `NOT_LEADER`、`CLUSTER_VIEW`；服务端兼容 v1 客户端 | P2-10 | ✅ 协议测试全绿（`OpenlatchProtoContractFreezeTest`/`ProtocolCodecTest`/`HandshakeTest` v1·v2·v3 三分支）；v1 客户端行为回归零 diff |
+| P2-12 | LeaderTracker 与 Follower 分车道 | `LeaderTracker`（保留 Ratis 新主身份→`{nodeId,address}` 提示单源，§3.2/§4.5）；Follower 分车道：ACQUIRE 回 `NOT_LEADER`+提示、RELEASE/RENEW 经转发道由 Leader 复制执行（§4.5） | P2-11 | ✅ 角色切换后的响应行为用例通过（`LeaderFailoverServerTest` 7 项：拒绝+hint==真主、选举空窗 hint=-1、跨 failover 续租/释放、未登记会话转发被拒）；提示一致性三消费方同源 |
+| P2-13 | 客户端 Leader 发现             | 种子列表、HELLO hint 直连、`NOT_LEADER` 重定向、连续 3 次失败强制发现（§6.3）        | P2-12 | ✅ §6.3 流程逐分支用例通过（`LeaderDiscoveryTest` 5 项 + `ClientClusterIT` 5 项端到端：存活会话持锁不丢、等待者跨 failover 重排） |
+| P2-14 | 杀 Leader 演练自动化           | 计时脚本 + 存活会话锁保留断言 + 等待者重排队断言                                     | P2-13 | ✅ 端到端恢复 < 10s（实测 1621–1806ms，7 有效样本）；全量演练 4/4；**S3 退出** |
 
 ### 13.4 S4：快照与恢复、容错加固（已完成，v1.4 回写）
 
-证据：`openspec/changes/phase2-s4-snapshot-recovery/`（`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md`）。
+证据：`openspec/changes/phase2-s4-snapshot-recovery/`（`s4-exit-checklist.md`、`s4-zero-touch-evidence.txt`、`observations-ratis-3.3.0-s4-snapshot.md`）；发布收口（主轨分区、soak 字面达标、P0/P1 处置）：`openspec/changes/phase2-release-closure/`。
 
 | ID    | 子任务             | 内容与交付物                                                                              | 前置  | 验证                                   |
 |-------|--------------------|-------------------------------------------------------------------------------------------|-------|----------------------------------------|
 | P2-15 | 快照生成           | `SnapshotState` 序列化（含发号水位）、条目锁内一致性副本 + 锁外落盘、保留 2 份、手动触发（§7.1/§7.2） | P2-14 | ✅ 快照可加载（round-trip + 切割点不变性 109 组）；快照期间服务不受影响（`ClusterSnapshotTest` 低阈值并发负载零错误） |
 | P2-16 | 快照加载与追赶     | 启动加载 + 日志回放；Ratis 3.3 pause→reload 安装流；10 万条目基准与全量比对工具（§7.3）    | P2-15 | ✅ 恢复 < 30s（实测 521ms）；全量比对一致（`StateComparisons.diff` 空）；`ClusterSnapshotRecoveryTest` 两恢复路径 |
 | P2-17 | 成员变更           | `RaftSubsystem.setMembers/removeVoter` + `ClusterRuntime.removeMember`；"先加后删"运维文档；变更期间会话清理 | P2-16 | ✅ `ClusterMembershipTest`：加节点（listener→追平→升票→当选服务）、删节点会话清理、多数派护栏拒绝 |
-| P2-18 | 分区与滚动重启演练 | 少数派不可授予断言；滚动重启客户端错误率统计；容错加固（失联判定）                          | P2-17 | ✅ 辅轨 `MinorityQuorumTest` 全绿（并暴露/修复失联判定误伤——§4.5 未述之实现缺陷，D12）；netns 主轨 `PartitionDrillIT` 待特权环境补跑；滚动重启双顺序 0.80%/0.00%（`docs/rolling-restart-drill-2026-09-02.md`） |
-| P2-19 | 混沌测试与验收闭环 | 随机杀节点 + 持续负载 + 不变式检查器（§10）；§11 验收证据收集；用户文档一致性                 | P2-18 | ✅ `ClientChaosIT` 零双授冲突/零泄漏/摘要收敛；`s4-exit-checklist.md` 逐项；**Phase 2 发布** |
+| P2-18 | 分区与滚动重启演练 | 少数派不可授予断言；滚动重启客户端错误率统计；容错加固（失联判定）                          | P2-17 | ✅ 辅轨 `MinorityQuorumTest` 全绿（并暴露/修复失联判定误伤——§4.5 未述之实现缺陷，D12）；**主轨 netns 真分区绿**（v1.5 收口，2026-09-06：会话化 ACQUIRE×4 判 NOT_LEADER、RELEASE 道非 OK、Leader 侧同凭证释放成功证锁存活、撤分区自动收敛；真跑 6 轮暴露并修复 6 处演练工具缺陷，见 `docs/partition-drill-2026-09-06.md` 与 observations/D5 扩展记录）；滚动重启双顺序 0.80%/0.00%（`docs/rolling-restart-drill-2026-09-02.md`）——先主后从序存在存量 P1 停摆（§12 风险 5 在案，运维推荐序"先从不先主"） |
+| P2-19 | 混沌测试与验收闭环 | 随机杀节点 + 持续负载 + 不变式检查器（§10）；§11 验收证据收集；用户文档一致性                 | P2-18 | ✅ `ClientChaosIT` 零双授冲突/零泄漏/摘要收敛；`s4-exit-checklist.md` 逐项；**v1.5 收口补全**：字面 ≥10 分钟 soak 单轮达成（510 杀/509 重启/0 冲突/0 泄漏）、§11-3 主轨绿、P0 关停缺陷修复+规格化、存量 P1 在案（§12 风险 5）；`docs/Phase2-验收报告.md` 七项逐项闭环 + DoD 五条款自检；**Phase 2 发布** |

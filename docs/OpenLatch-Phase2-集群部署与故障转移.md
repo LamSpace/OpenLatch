@@ -158,8 +158,10 @@ mvn -s <settings> -pl openlatch-server -am package
 
 | 演练 | 命令 | 报告 / 判据 |
 |---|---|---|
-| 滚动重启（两顺序，客户端错误率 <1%） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=RollingRestartDrillIT` | `docs/rolling-restart-drill-<日期>.md`（实测 先从后主 0.80% / 先主后从 0.00%，§11-5） |
-| 网络分区（netns 真分区，需 passwordless sudo） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=PartitionDrillIT` | `docs/partition-drill-<日期>.md`；无特权环境跳过（辅轨 `MinorityQuorumTest` 提供近似判据，§11-3） |
+| 滚动重启（两顺序，客户端错误率 <1%） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=RollingRestartDrillIT` | `docs/rolling-restart-drill-<日期>.md`（实测 先从后主 0.80% / 先主后从 0.00%，§11-5；先主后从序存在存量 P1 停摆风险，见下方运维推荐序） |
+| 网络分区（netns 真分区，需 passwordless sudo） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=PartitionDrillIT` | `docs/partition-drill-<日期>.md`；无特权环境显式跳过（辅轨 `MinorityQuorumTest` 提供近似判据，§11-3；主轨已于 2026-09-06 真分区全绿：少数派授予/释放道全拒、锁存活、撤分区自动收敛） |
 | 混沌（随机杀/重启 + 共享 key 竞争不变式） | `mvn -s <settings> -pl openlatch-client test -Dtest=ClientChaosIT` | 零双授冲突 / 停载后锁表空 / 副本摘要收敛（§11-6；常规回归，短租约有界窗口） |
 
 进程级杀 Leader 计时演练（P2-14，§11-2）见 §5。
+
+**运维推荐序（滚动重启，v1.5 收口补录）**：逐台重启请按**"先从不先主"**顺序（先重启全部 Follower，最后重启 Leader，令其在两节点多数派之上从容重加入）。"先主后从"序存在存量 Ratis 3.3.0 缺陷风险：旧 Leader 带脏条目重启归群的时序下，新 Leader 任期提交可能停摆（表现为写请求持续被拒 >200 秒不自愈、复制组无错误日志）。故障表征与差分归因、跟进计划见 `openspec/changes/phase2-release-closure/defects/leader-replication-stall-ratis-3.3.0.md`。
