@@ -34,13 +34,13 @@
 
 ## 5. P3-10 客户端指标与 starter 注入
 
-- [ ] 5.1 client pom 增 optional `micrometer-core`；`ClientMetrics` 门面（null 注册表全 no-op）+ `Builder.meterRegistry(...)`；埋点三收口：`RequestMultiplexer`（requests{type,status}/duration，status 含 timeout/unavailable）、`ConnectionManager`（reconnect.total）、`OpenLatchClient.loseEntry`（locks.lost.total）
-- [ ] 5.2 客户端单测（`SimpleMeterRegistry`）：默认关闭零记录；固定脚本计数逐项吻合；断线失锁用例（复用既有故障注入夹具）计数 +1
-- [ ] 5.3 starter：`ObjectProvider<MeterRegistry>` 条件注入（有 bean 注入 builder、无 bean 静默跳过）；`ApplicationContextRunner` 两态用例
+- [x] 5.1 client pom 增 optional `micrometer-core`；`ClientMetrics` 门面（null 注册表全 no-op）+ `Builder.meterRegistry(...)`；埋点三收口：`RequestMultiplexer`（requests{type,status}/duration，status 含 timeout/unavailable）、`ConnectionManager`（reconnect.total）、`OpenLatchClient.loseEntry`（locks.lost.total）
+- [x] 5.2 客户端单测（`SimpleMeterRegistry`）：默认关闭零记录；固定脚本计数逐项吻合；断线失锁用例（复用既有故障注入夹具）计数 +1
+- [x] 5.3 starter：`ObjectProvider<MeterRegistry>` 条件注入（有 bean 注入 builder、无 bean 静默跳过）；`ApplicationContextRunner` 两态用例
 - [x] 5.4 验证：client/starter 全量测试绿；**T2 退出**——§8-3 证据齐（清单逐项用例 + 联调记录在案）
 
 ## 6. 收口
 
 - [x] 6.1 全仓 `mvn -s /home/lam/repo/settings.xml clean verify` + `-Pdrill` 全绿
 - [x] 6.2 详设回写勘误：§3.4 埋点位置（双路径共用 `ServerMetrics`）、§3.2 增命名映射口径注记；README 部署段知会 9412 管理端口
-- [ ] 6.3 提交并归档（delta 同步主规格：`metrics-observability` 新建 + `core-lock-engine`/`client-sdk`/`spring-boot-starter` 增量）
+- [x] 6.3 提交并归档（delta 同步主规格：`metrics-observability` 新建 + `core-lock-engine`/`client-sdk`/`spring-boot-starter` 增量）
