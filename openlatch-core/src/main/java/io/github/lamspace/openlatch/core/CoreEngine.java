@@ -23,6 +23,7 @@ import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
+import io.github.lamspace.openlatch.core.lock.SemaphoreEntry;
 import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
@@ -270,11 +271,16 @@ public final class CoreEngine {
         }
 
         KeyFamily family = familyOf(cmd.lockType());
+        // Semaphore 建条目预检：条目不存在时总量主张必须 > 0（design D1）。
+        // 竞态良性：他者抢先建条目后本请求按"既有条目断言"规则处理。
+        if (family == KeyFamily.SEMAPHORE && cmd.permitsTotal() <= 0 && lockTable.get(key) == null) {
+            return new AcquireResult(Outcome.REJECT_SEMAPHORE_TOTAL, 0, 0, 0);
+        }
         boolean reentrant = cmd.lockType() != LockType.SIMPLE;
         long effectiveLeaseMs = clampLease(cmd.requestedLeaseMs());
 
         while (true) {
-            KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant));
+            KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant, cmd));
             synchronized (e) {
                 if (lockTable.get(key) != e) {
                     continue; // 条目在等待期间被移除，重试（design.md D4）
@@ -290,8 +296,11 @@ public final class CoreEngine {
                     }
                     return new AcquireResult(Outcome.REJECT_SESSION, 0, 0, 0);
                 }
+                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集，详设 §2.3）。
                 AcquireResult result = switch (e) {
                     case LockEntry le -> le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
+                            effectiveLeaseMs, config);
+                    case SemaphoreEntry se -> se.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
                             effectiveLeaseMs, config);
                     // 家族判定已保证同族，此处为家族尚无实现条目时的收口分支。
                     default -> new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
@@ -318,23 +327,27 @@ public final class CoreEngine {
     private static KeyFamily familyOf(LockType lockType) {
         return switch (lockType) {
             case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
+            case SEMAPHORE -> KeyFamily.SEMAPHORE;
         };
     }
 
     /**
      * 按家族创建条目。锁家族条目构造与既有 {@code new LockEntry(k, reentrant)}
-     * 逐参数一致；未接入家族（Semaphore/Latch，P3-03/P3-05 落地）不可达。
+     * 逐参数一致；Semaphore 条目以请求的 {@code permitsTotal} 定型许可总量
+     * （建条目预检已保证 &gt; 0）；Latch 家族 P3-05 接入前不可达。
      *
      * @param family    目标家族
      * @param key       锁键
      * @param reentrant 可重入性（仅锁家族取用，由首次请求类型定型）
+     * @param cmd       建条目请求（Semaphore 读取 {@code permitsTotal}）
      * @return 新条目
      * @throws IllegalStateException 家族未接入（正常路径不可达）
      */
-    private static KeyEntry newEntry(KeyFamily family, String key, boolean reentrant) {
+    private static KeyEntry newEntry(KeyFamily family, String key, boolean reentrant, AcquireCommand cmd) {
         return switch (family) {
             case LOCK -> new LockEntry(key, reentrant);
-            case SEMAPHORE, LATCH -> throw new IllegalStateException(
+            case SEMAPHORE -> new SemaphoreEntry(key, cmd.permitsTotal());
+            case LATCH -> throw new IllegalStateException(
                     "entry family not yet implemented: " + family);
         };
     }
@@ -372,12 +385,13 @@ public final class CoreEngine {
         List<Waiter> notify = new ArrayList<>();
         ReleaseResult result;
         synchronized (e) {
-            // 释放按条目家族分派：锁家族走 LockEntry 计数释放；他家族条目
-            // 对本命令而言无锁持有语义，回 NOT_HELD（Semaphore 的许可释放
-            // 通道自 P3-03 起在此扩展）。
-            result = e instanceof LockEntry le
-                    ? le.release(cmd, now, config.headReplyTimeoutMs(), notify)
-                    : new ReleaseResult(ReleaseStatus.NOT_HELD, false);
+            // 释放按条目家族分派：锁计数逐层释放，Semaphore 按许可归还，
+            // 其余家族无锁释放语义回 NOT_HELD。
+            result = switch (e) {
+                case LockEntry le -> le.release(cmd, now, config.headReplyTimeoutMs(), notify);
+                case SemaphoreEntry se -> se.release(cmd, now, config.headReplyTimeoutMs(), notify);
+                default -> new ReleaseResult(ReleaseStatus.NOT_HELD, false);
+            };
             if (e.isEmpty()) {
                 lockTable.remove(cmd.key(), e);
             }
@@ -413,11 +427,13 @@ public final class CoreEngine {
             return new RenewResult(ReleaseStatus.NOT_HELD, 0);
         }
         synchronized (e) {
-            // 续租同释放按家族分派：他家族条目对本命令无租约语义，回
-            // NOT_HELD（Semaphore 续租通道自 P3-03 起在此扩展）。
-            RenewResult result = e instanceof LockEntry le
-                    ? le.renew(cmd, now, clampLease(cmd.requestedLeaseMs()))
-                    : new RenewResult(ReleaseStatus.NOT_HELD, 0);
+            // 续租同释放按家族分派；Semaphore 续租刷新全体共享租约，
+            // 其余家族对本命令无租约语义回 NOT_HELD。
+            RenewResult result = switch (e) {
+                case LockEntry le -> le.renew(cmd, now, clampLease(cmd.requestedLeaseMs()));
+                case SemaphoreEntry se -> se.renew(cmd, now, clampLease(cmd.requestedLeaseMs()));
+                default -> new RenewResult(ReleaseStatus.NOT_HELD, 0);
+            };
             if (result.status() == ReleaseStatus.OK) {
                 leaseManager.offer(cmd.key(), e.leaseToken(), result.newExpiresAtMs());
             }

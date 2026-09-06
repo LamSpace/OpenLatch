@@ -24,7 +24,8 @@ import io.github.lamspace.openlatch.core.LockType;
  *
  * @param sessionId        等待者所属会话
  * @param requestId        获取请求的请求 id
- * @param lockType         请求的锁类型
+ * @param lockType         请求的锁类型（Semaphore 等待者为 {@code SEMAPHORE}）
+ * @param permits          请求许可数（仅 Semaphore 队首推进判定消费；锁等待者恒 1）
  * @param threadId         发起请求的客户端线程标识
  * @param enqueuedAtMs     入队时刻（毫秒）
  * @param notifyDeadlineMs 通知响应截止时刻（毫秒），{@code 0} 表示尚未通知
@@ -33,9 +34,25 @@ public record Waiter(
         long sessionId,
         long requestId,
         LockType lockType,
+        int permits,
         long threadId,
         long enqueuedAtMs,
         long notifyDeadlineMs) {
+
+    /**
+     * 锁等待者便捷构造（Phase 1/2 既有形态）：许可数取缺省 1。
+     *
+     * @param sessionId        等待者所属会话
+     * @param requestId        获取请求的请求 id
+     * @param lockType         请求的锁类型
+     * @param threadId         发起请求的客户端线程标识
+     * @param enqueuedAtMs     入队时刻（毫秒）
+     * @param notifyDeadlineMs 通知响应截止时刻（毫秒）
+     */
+    public Waiter(long sessionId, long requestId, LockType lockType,
+            long threadId, long enqueuedAtMs, long notifyDeadlineMs) {
+        this(sessionId, requestId, lockType, 1, threadId, enqueuedAtMs, notifyDeadlineMs);
+    }
 
     /**
      * 归属。
@@ -62,6 +79,6 @@ public record Waiter(
      * @return 新实例
      */
     public Waiter withDeadline(long deadlineMs) {
-        return new Waiter(sessionId, requestId, lockType, threadId, enqueuedAtMs, deadlineMs);
+        return new Waiter(sessionId, requestId, lockType, permits, threadId, enqueuedAtMs, deadlineMs);
     }
 }

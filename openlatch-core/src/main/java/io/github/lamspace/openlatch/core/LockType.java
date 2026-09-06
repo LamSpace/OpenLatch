@@ -47,5 +47,11 @@ public enum LockType {
      * （同族别名、互通互认），作为公平承诺的 API 标识；授予顺序等于排队
      * 顺序的保证由 FIFO 队列本体承载（详设 §2.2）。
      */
-    FAIR
+    FAIR,
+    /**
+     * 许可门闸（Phase 3 T1）：非锁家族类型，仅作请求定型判别——携带此
+     * 类型的命令由门面分派至 {@code SemaphoreEntry}（详设 §2.3），不参与
+     * 上述互斥矩阵。
+     */
+    SEMAPHORE
 }

@@ -18,10 +18,10 @@
 
 ## 3. P3-03 Semaphore（core + 协议）
 
-- [ ] 3.1 proto：`LockType.LOCK_TYPE_SEMAPHORE`、`AcquireRequest.permits/permits_total`、`ReleaseRequest.permits`；`MessageLegality` 校验（非 SEMAPHORE 携带 permits>1/permits_total>0 拒绝、SEMAPHORE 建条目必填 permits_total）
-- [ ] 3.2 `SemaphoreEntry`（D4 规则序：重入→队首足量→DENIED→入队携 permits）；`CoreEngine` 家族分派接入；到期归还全部许可 + `OVER_RELEASE` 拒绝路径
-- [ ] 3.3 `CoreEngineSemaphoreTest`：D4 场景矩阵（队首不足无人获授、按序授予、重入不受队首约束、立即式、到期整体归还、超额释放、会话关闭不泄漏）+ 类型不匹配矩阵（三家族两两互斥、FAIR≡REENTRANT）
-- [ ] 3.4 验证：§7 T1 Semaphore 语义用例全绿；v1/v2 请求新类型被消息级拒绝（`HandshakeTest` 扩展）
+- [x] 3.1 proto：`LockType.LOCK_TYPE_SEMAPHORE`、`AcquireRequest.permits/permits_total`、`ReleaseRequest.permits`；`MessageLegality` 校验（非 SEMAPHORE 携带 permits>1/permits_total>0 拒绝、SEMAPHORE 建条目必填 permits_total）
+- [x] 3.2 `SemaphoreEntry`（D4 规则序：重入→队首足量→DENIED→入队携 permits）；`CoreEngine` 家族分派接入；到期归还全部许可 + `OVER_RELEASE` 拒绝路径
+- [x] 3.3 `CoreEngineSemaphoreTest`：D4 场景矩阵（队首不足无人获授、按序授予、重入不受队首约束、立即式、到期整体归还、超额释放、会话关闭不泄漏）+ 类型不匹配矩阵（三家族两两互斥、FAIR≡REENTRANT）
+- [x] 3.4 验证：§7 T1 Semaphore 语义用例全绿；v1/v2 请求新类型被消息级拒绝（`HandshakeTest` 扩展）
 
 ## 4. P3-04 Semaphore（客户端）
 

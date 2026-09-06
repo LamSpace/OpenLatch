@@ -37,6 +37,7 @@ import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
 import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
+import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
@@ -250,7 +251,8 @@ public final class LockStateMachineCore {
         }
         AcquireResult r = engine.acquire(new AcquireCommand(
                 local, p.getRequestId(), req.getKey(), lockType,
-                req.getThreadId(), req.getLeaseMs(), false));
+                req.getThreadId(), req.getLeaseMs(), false,
+                RequestDispatcher.normalizedPermits(req.getPermits()), req.getPermitsTotal()));
         return switch (r.outcome()) {
             case GRANTED -> {
                 long expiresAt = entry.getWallClockMs() + r.grantedLeaseMs();
@@ -287,7 +289,8 @@ public final class LockStateMachineCore {
         }
         var req = p.getRequest();
         ReleaseResult r = engine.release(new ReleaseCommand(
-                local, req.getKey(), req.getLeaseToken(), req.getThreadId()));
+                local, req.getKey(), req.getLeaseToken(), req.getThreadId(),
+                RequestDispatcher.normalizedPermits(req.getPermits())));
         if (r.status() == ReleaseStatus.OK) {
             shadow.release(p.getSessionId(), req.getThreadId(), req.getKey());
         }

@@ -93,7 +93,9 @@ public final class RequestDispatcher {
      * 分发获取锁请求：协议 {@code AcquireRequest} → core {@code AcquireCommand}
      * → 结果映射为协议响应。{@code wait_ms == 0} 映射为立即式（不排队），
      * {@code -1} 与正数均映射为可排队（设计说明书 §3.2.2）；租约到期时刻
-     * 以映射时的 {@code System.currentTimeMillis()} 计算。
+     * 以映射时的 {@code System.currentTimeMillis()} 计算。v3 门控与许可参数
+     * 合法性（{@link #validateAcquirePermits}）先于命令构造，许可数经
+     * {@link #normalizedPermits} 归一后传入 core。
      *
      * @param session 已握手会话（提供 sessionId）
      * @param msg     入站消息信封（已确认携带 {@code AcquireRequest}）
@@ -106,6 +108,10 @@ public final class RequestDispatcher {
         if (session.protocolVersion() < 3 && isV3OnlyLockType(req.getLockType())) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
         }
+        StatusCode permitBad = validateAcquirePermits(req);
+        if (permitBad != null) {
+            return errorResponse(msg, permitBad);
+        }
         LockType lockType = toCoreLockType(req.getLockType());
         if (lockType == null) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -117,9 +123,44 @@ public final class RequestDispatcher {
                 lockType,
                 req.getThreadId(),
                 req.getLeaseMs(),
-                req.getWaitMs() != 0);   // wait_ms == 0 立即式；-1 与 >0 均可排队（设计说明书 §3.2.2）
+                req.getWaitMs() != 0,   // wait_ms == 0 立即式；-1 与 >0 均可排队（设计说明书 §3.2.2）
+                normalizedPermits(req.getPermits()),
+                req.getPermitsTotal());
         AcquireResult result = core.acquire(cmd);
         return toAcquireResponse(msg, result, System.currentTimeMillis());
+    }
+
+    /**
+     * 获取请求的许可参数合法性（Phase 3 详设 §2.1 / P3-03）：
+     * {@code permits}/{@code permits_total} 为负，或非 SEMAPHORE 类型携带
+     * {@code permits > 1} / {@code permits_total != 0} 时非法。合法返回
+     * {@code null}；非法返回映射状态码（统一 {@code INVALID_REQUEST}）。
+     * "SEMAPHORE 建条目必填总量 / 既有条目断言匹配"依赖条目存在性，由
+     * core 侧判定（{@link io.github.lamspace.openlatch.core.result.Outcome#REJECT_SEMAPHORE_TOTAL}）。
+     *
+     * @param req 获取请求
+     * @return 非法时的状态码；合法为 {@code null}
+     */
+    public static StatusCode validateAcquirePermits(AcquireRequest req) {
+        if (req.getPermits() < 0 || req.getPermitsTotal() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getLockType() != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE
+                && (req.getPermits() > 1 || req.getPermitsTotal() != 0)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return null;
+    }
+
+    /**
+     * 许可数归一：proto3 缺省 0 按"单许可"处理（协议注释口径，
+     * server 层统一折算，core 只见 {@code >= 1}）。
+     *
+     * @param permits 协议携带值
+     * @return 归一后的许可数（{@code 0 → 1}，其余原值）
+     */
+    public static int normalizedPermits(int permits) {
+        return permits == 0 ? 1 : permits;
     }
 
     /**
@@ -132,8 +173,12 @@ public final class RequestDispatcher {
      */
     private Envelope dispatchRelease(ServerSession session, Envelope msg) {
         ReleaseRequest req = msg.getReleaseRequest();
+        if (req.getPermits() < 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         ReleaseCommand cmd = new ReleaseCommand(
-                session.sessionId(), req.getKey(), req.getLeaseToken(), req.getThreadId());
+                session.sessionId(), req.getKey(), req.getLeaseToken(), req.getThreadId(),
+                normalizedPermits(req.getPermits()));
         return toReleaseResponse(msg, core.release(cmd));
     }
 
@@ -165,20 +210,22 @@ public final class RequestDispatcher {
             case LOCK_TYPE_READ -> LockType.READ;
             case LOCK_TYPE_WRITE -> LockType.WRITE;
             case LOCK_TYPE_FAIR -> LockType.FAIR;
+            case LOCK_TYPE_SEMAPHORE -> LockType.SEMAPHORE;
             default -> null;
         };
     }
 
     /**
      * 是否 v3 专属协议锁类型：握版本 &lt;3 的会话请求这些类型 MUST 被消息级
-     * 拒绝（详设 §6 兼容性策略）。P3-02 仅 {@code FAIR}；
-     * {@code SEMAPHORE}/{@code LATCH} 随各自子任务在此增列。
+     * 拒绝（详设 §6 兼容性策略）。已接入：{@code FAIR}（P3-02）、
+     * {@code SEMAPHORE}（P3-03）；{@code LATCH} 随 P3-05 增列。
      *
      * @param type 协议锁类型
      * @return v3 专属返回 {@code true}
      */
     public static boolean isV3OnlyLockType(io.github.lamspace.openlatch.protocol.LockType type) {
-        return type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR;
+        return type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR
+                || type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE;
     }
 
     /**
@@ -217,9 +264,10 @@ public final class RequestDispatcher {
             case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
             case REJECT_QUEUE_FULL -> StatusCode.OVERLOADED;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
-            // 家族误用是请求形状错误，非会话/容量问题（Phase 3 T1 design D3：
-            // 协议面不细分，统一 INVALID_REQUEST）。
+            // 家族误用与总量断言不成立都是请求形状错误，非会话/容量问题
+            // （Phase 3 T1 design D3：协议面不细分，统一 INVALID_REQUEST）。
             case REJECT_TYPE_MISMATCH -> StatusCode.INVALID_REQUEST;
+            case REJECT_SEMAPHORE_TOTAL -> StatusCode.INVALID_REQUEST;
         };
     }
 

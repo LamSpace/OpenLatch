@@ -32,6 +32,12 @@ import io.github.lamspace.openlatch.core.LockType;
  *                         {@code false} 对应协议 {@code wait_ms == 0} 的立即式获取，
  *                         无快路径即返回 {@code DENIED}；core 不感知等待时限
  *                         （等待模式折算见详设 §3.2.2）。
+ * @param permits          请求许可数（仅 SEMAPHORE 有效，{@code >= 1}；锁家族
+ *                         请求不参与判定，缺省 1）
+ * @param permitsTotal     Semaphore 许可总量断言：建条目时必填 {@code > 0}
+ *                         （缺失回 {@code REJECT_SEMAPHORE_TOTAL}）；既有条目上
+ *                         非零值须与定型值一致、{@code 0} 为不主张（纯加入）；
+ *                         锁家族请求 MUST 为 0（server 层合法性预检）
  */
 public record AcquireCommand(
         long sessionId,
@@ -40,5 +46,24 @@ public record AcquireCommand(
         LockType lockType,
         long threadId,
         long requestedLeaseMs,
-        boolean queueIfBusy) {
+        boolean queueIfBusy,
+        int permits,
+        int permitsTotal) {
+
+    /**
+     * 锁家族便捷构造（Phase 1/2 既有调用形态）：许可参数取缺省
+     * （{@code permits = 1}、{@code permitsTotal = 0}），语义与锁请求一致。
+     *
+     * @param sessionId        发起请求的会话
+     * @param requestId        请求 id
+     * @param key              锁键
+     * @param lockType         锁类型
+     * @param threadId         客户端线程标识
+     * @param requestedLeaseMs 期望租约时长（毫秒）
+     * @param queueIfBusy      无快路径时是否排队
+     */
+    public AcquireCommand(long sessionId, long requestId, String key, LockType lockType,
+            long threadId, long requestedLeaseMs, boolean queueIfBusy) {
+        this(sessionId, requestId, key, lockType, threadId, requestedLeaseMs, queueIfBusy, 1, 0);
+    }
 }

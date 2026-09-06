@@ -28,7 +28,8 @@ package io.github.lamspace.openlatch.core.result;
  * 会话登记，条目状态零扰动）→
  * 条目内规则（重入/快路径/队首重发 → {@link #GRANTED}，立即式无快路径 →
  * {@link #DENIED}，幂等去重或入队 → {@link #QUEUED}，队列满 →
- * {@link #REJECT_QUEUE_FULL}）。会话校验在预检与条目锁内各执行一次，
+ * {@link #REJECT_QUEUE_FULL}，Semaphore 总量断言不成立 →
+ * {@link #REJECT_SEMAPHORE_TOTAL}）。会话校验在预检与条目锁内各执行一次，
  * 两个检查点均返回 {@link #REJECT_SESSION}。
  */
 public enum Outcome {
@@ -55,5 +56,12 @@ public enum Outcome {
      * Semaphore），条目状态与会话触及集零扰动；server 层映射协议
      * {@code INVALID_REQUEST}。
      */
-    REJECT_TYPE_MISMATCH
+    REJECT_TYPE_MISMATCH,
+    /**
+     * 拒绝：Semaphore 许可总量断言不成立——建条目请求缺失 {@code > 0}
+     * 的 {@code permitsTotal}，或既有条目上非零主张与定型值不符
+     * （Phase 3 T1 详设 §2.3 / design D1）；条目状态零扰动，server 层
+     * 映射协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_SEMAPHORE_TOTAL
 }

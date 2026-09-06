@@ -139,6 +139,12 @@ public final class ClusterRequestHandler {
             writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
+        // 许可参数合法性（与单机分发器共用判定，P3-03）：非法不入日志。
+        StatusCode permitBad = RequestDispatcher.validateAcquirePermits(req);
+        if (permitBad != null) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, permitBad));
+            return;
+        }
         boolean queueWanted = req.getWaitMs() != 0;
         boolean held = kernel.shadow().isHeld(req.getKey());
         // 队首重发且锁已空出：自推进走复制授予路径（AWAIT_NOTIFY 后重发的
@@ -189,6 +195,11 @@ public final class ClusterRequestHandler {
         Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
             writeSync(ctx, session, bad);
+            return;
+        }
+        // 归还数为负属参数非法（与单机分发器同规则，P3-03），不入日志。
+        if (msg.getReleaseRequest().getPermits() < 0) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         ByteString payload = ReleasePayload.newBuilder()

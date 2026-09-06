@@ -23,10 +23,25 @@ package io.github.lamspace.openlatch.core.command;
  * @param key        锁键
  * @param leaseToken 租约凭证，须与当前持有匹配
  * @param threadId   发起请求的客户端线程标识
+ * @param permits    归还许可数（仅 SEMAPHORE 条目消费，{@code >= 1}；锁家族
+ *                   路径不读此参数，缺省 1）
  */
 public record ReleaseCommand(
         long sessionId,
         String key,
         long leaseToken,
-        long threadId) {
+        long threadId,
+        int permits) {
+
+    /**
+     * 锁家族便捷构造（Phase 1/2 既有调用形态）：归还数取缺省 1。
+     *
+     * @param sessionId  发起请求的会话
+     * @param key        锁键
+     * @param leaseToken 租约凭证
+     * @param threadId   客户端线程标识
+     */
+    public ReleaseCommand(long sessionId, String key, long leaseToken, long threadId) {
+        this(sessionId, key, leaseToken, threadId, 1);
+    }
 }
