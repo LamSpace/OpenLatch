@@ -38,9 +38,9 @@
 
 ## 6. P3-06 CountDownLatch（客户端）
 
-- [ ] 6.1 `OCountDownLatch` API（await/await(timeout)/countDown/countDown(n)）；无看门狗、断线重连自动重发 await
-- [ ] 6.2 `ClientLatchIT`：跨进程倒计数放行、await 零 LEASE_RENEW 流量、超时兜底
-- [ ] 6.3 验证：端到端用例全绿
+- [x] 6.1 `OCountDownLatch` API（await/await(timeout)/countDown/countDown(n)）；无看门狗、断线重连自动重发 await
+- [x] 6.2 `ClientLatchIT`：跨进程倒计数放行、await 零 LEASE_RENEW 流量、超时兜底
+- [x] 6.3 验证：端到端用例全绿
 
 ## 7. P3-07 集群行为（T1 退出档）
 

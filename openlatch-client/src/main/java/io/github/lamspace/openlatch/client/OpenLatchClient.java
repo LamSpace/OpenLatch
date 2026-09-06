@@ -19,6 +19,7 @@ package io.github.lamspace.openlatch.client;
 import io.github.lamspace.openlatch.client.internal.AwaitTracker;
 import io.github.lamspace.openlatch.client.internal.ClientConfig;
 import io.github.lamspace.openlatch.client.internal.ConnectionManager;
+import io.github.lamspace.openlatch.client.internal.LatchNotifyRegistry;
 import io.github.lamspace.openlatch.client.internal.HeldLockRegistry;
 import io.github.lamspace.openlatch.client.internal.SeedDiscovery;
 import io.github.lamspace.openlatch.client.internal.RequestMultiplexer;
@@ -26,6 +27,8 @@ import io.github.lamspace.openlatch.client.internal.SessionContext;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
+import io.github.lamspace.openlatch.protocol.LatchAwaitRequest;
+import io.github.lamspace.openlatch.protocol.LatchCountDownRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.StatusCode;
@@ -98,6 +101,8 @@ public final class OpenLatchClient implements AutoCloseable {
     private final AwaitTracker awaitTracker;
     /** 本地持锁簿记：只记归属不记重入计数（详设 §6.3）。 */
     private final HeldLockRegistry heldLockRegistry = new HeldLockRegistry();
+    /** 屏障等待的通知信号登记表（Phase 3 P3-06，按到达连接会话路由）。 */
+    private final LatchNotifyRegistry latchNotifies = new LatchNotifyRegistry();
     /**
      * 获取车道（Leader 车道，design D6）：{@code null} 即稳态单连接——home 即
      * Leader（或单机）。Leader 改连时按需建/换指向；新获取与等待走此车道，
@@ -164,7 +169,12 @@ public final class OpenLatchClient implements AutoCloseable {
         this.connectionManager.bind(multiplexer);
         this.connectionManager.setDisconnectHandler(cause ->
                 onLaneDisconnected(homeSessionId, multiplexer, awaitTracker));
-        this.connectionManager.setAwaitNotifySink(awaitTracker::onNotify);
+        this.connectionManager.setAwaitNotifySink(n -> {
+            // 先路由屏障等待（命中即终结），未命中回落锁等待队列。
+            if (!latchNotifies.signal(homeSessionId, n.getRequestIdRef())) {
+                awaitTracker.onNotify(n);
+            }
+        });
         this.connectionManager.setActiveListener(this::onHomeActive);
         this.connectionManager.setHelloListener(this::onHomeHello);
         this.multiplexer.setOrphanSink(awaitTracker::onOrphanResponse);
@@ -208,7 +218,11 @@ public final class OpenLatchClient implements AutoCloseable {
             this.awaits.setNotLeaderHandler(req -> handleNotLeader(req, this));
             this.cm.bind(mux);
             this.cm.setDisconnectHandler(cause -> onLaneDisconnected(sessionId, mux, awaits));
-            this.cm.setAwaitNotifySink(awaits::onNotify);
+            this.cm.setAwaitNotifySink(n -> {
+                if (!latchNotifies.signal(sessionId, n.getRequestIdRef())) {
+                    awaits.onNotify(n);
+                }
+            });
             this.cm.setActiveListener(this::onActive);
             this.cm.setHelloListener(this::onHello);
             this.mux.setOrphanSink(awaits::onOrphanResponse);
@@ -1231,6 +1245,110 @@ public final class OpenLatchClient implements AutoCloseable {
      */
     public OSemaphore newSemaphore(String key) {
         return new RemoteSemaphore(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 创建分布式倒计数屏障句柄（创建者/断言形态，Phase 3 详设 §2.4 /
+     * P3-06）：该句柄的每次 await/countDown 请求携带 {@code total = count}
+     * 断言——key 首建时定型，既有条目上作一致性校验。{@code countDown(0)}
+     * 语义即纯初始化（不扣减、只定型）。
+     *
+     * @param key   屏障键
+     * @param count 初始计数（{@code > 0}）
+     * @return 屏障句柄
+     * @throws IllegalArgumentException {@code count <= 0}
+     */
+    public OCountDownLatch newCountDownLatch(String key, long count) {
+        Objects.requireNonNull(key);
+        if (count <= 0) {
+            throw new IllegalArgumentException("count must be > 0");
+        }
+        return new RemoteCountDownLatch(this, key, count);
+    }
+
+    /**
+     * 创建分布式倒计数屏障句柄（纯加入形态）：不主张初始计数——对已定型的
+     * 屏障直接等待/扣减；屏障不存在时请求被服务端以 {@code INVALID_REQUEST}
+     * 拒绝（初值必须由创建者给出）。
+     *
+     * @param key 屏障键
+     * @return 屏障句柄
+     */
+    public OCountDownLatch newCountDownLatch(String key) {
+        return new RemoteCountDownLatch(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 屏障通道路由快照（P3-06）：获取车道优先、回落 home（与
+     * {@code acquireAsync} 同车道选择规则；屏障等待是 Leader 本地态，集群
+     * 下 MUST 经车道承载，深编排归 P3-07）。
+     *
+     * @return 可用路由；当前无活动会话返回 {@code null}
+     */
+    LatchRoute latchRoute() {
+        AcquireLane lane = acquireLane;
+        if (lane != null) {
+            SessionContext ls = lane.cm.session();
+            if (ls != null) {
+                return new LatchRoute(ls, lane.mux);
+            }
+        }
+        SessionContext s = connectionManager.session();
+        return s == null ? null : new LatchRoute(s, multiplexer);
+    }
+
+    /**
+     * 屏障路由：会话与出站多路复用器配对（请求 id 与发送通道同源）。
+     *
+     * @param session 路由选定时的会话
+     * @param mux     该会话所属车道的多路复用器
+     */
+    record LatchRoute(SessionContext session, RequestMultiplexer mux) {
+    }
+
+    /**
+     * 屏障通知登记表（{@link RemoteCountDownLatch} 消费）。
+     *
+     * @return 通知信号登记表
+     */
+    LatchNotifyRegistry latchNotifies() {
+        return latchNotifies;
+    }
+
+    /**
+     * 构造 LATCH_AWAIT 信封（同 id 重发复用）。
+     *
+     * @param requestId 请求 id
+     * @param key       屏障键
+     * @param total     定型断言（0 为纯加入）
+     * @return 信封
+     */
+    static Envelope latchAwaitEnvelope(long requestId, String key, long total) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(3)
+                .setType(MessageType.LATCH_AWAIT)
+                .setRequestId(requestId)
+                .setLatchAwaitRequest(LatchAwaitRequest.newBuilder().setKey(key).setTotal(total))
+                .build();
+    }
+
+    /**
+     * 构造 LATCH_COUNT_DOWN 信封。
+     *
+     * @param requestId 请求 id
+     * @param key       屏障键
+     * @param count     扣减量（{@code >= 0}）
+     * @param total     定型断言（0 为不主张）
+     * @return 信封
+     */
+    static Envelope latchCountDownEnvelope(long requestId, String key, long count, long total) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(3)
+                .setType(MessageType.LATCH_COUNT_DOWN)
+                .setRequestId(requestId)
+                .setLatchCountDownRequest(LatchCountDownRequest.newBuilder()
+                        .setKey(key).setCount(count).setTotal(total))
+                .build();
     }
 
     /**
