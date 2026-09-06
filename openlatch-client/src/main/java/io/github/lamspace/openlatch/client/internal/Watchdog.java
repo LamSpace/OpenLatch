@@ -163,7 +163,7 @@ public final class Watchdog {
             return;
         }
         Envelope renew = Envelope.newBuilder()
-                .setProtocolVersion(2)
+                .setProtocolVersion(3)
                 .setType(MessageType.LEASE_RENEW)
                 .setLeaseRenewRequest(LeaseRenewRequest.newBuilder()
                         .setKey(entry.key())

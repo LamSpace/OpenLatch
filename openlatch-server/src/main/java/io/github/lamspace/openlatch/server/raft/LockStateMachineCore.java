@@ -296,6 +296,9 @@ public final class LockStateMachineCore {
             case NOT_HELD -> ApplyStatus.NOT_HELD;
             case INVALID_TOKEN -> ApplyStatus.INVALID_TOKEN;
             case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
+            // Semaphore 通道 P3-03 前不存在，此码在集群路径不可达；出现即
+            // 说明状态含未支持条目，按内部错误兜底（P3-03 随回执码形一并接正）。
+            case OVER_RELEASE -> ApplyStatus.INTERNAL_ERROR;
         };
         ApplyResult.Builder b = ApplyResult.newBuilder().setStatus(st).setFullyReleased(r.fullyReleased());
         if (r.status() == ReleaseStatus.OK && r.fullyReleased()) {
@@ -329,6 +332,8 @@ public final class LockStateMachineCore {
             case NOT_HELD -> ApplyStatus.NOT_HELD;
             case INVALID_TOKEN -> ApplyStatus.INVALID_TOKEN;
             case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
+            // 续租通道永不产出此码（释放专属），编译器穷尽性占位。
+            case OVER_RELEASE -> ApplyStatus.INTERNAL_ERROR;
         };
         return ApplyResult.newBuilder()
                 .setStatus(st)
@@ -366,7 +371,8 @@ public final class LockStateMachineCore {
 
     /**
      * 协议锁类型数值 → core 枚举（两侧枚举序对齐：0 REENTRANT / 1 SIMPLE /
-     * 2 READ / 3 WRITE）；越界回 {@code null}。
+     * 2 READ / 3 WRITE / 4 FAIR）；越界回 {@code null}。新类型在进入本路径
+     * 前已被接入层 v3 门控拦截（握手中继/提案预检），此处仅保持映射完备。
      *
      * @param number 协议 {@code LockType} 数值
      * @return core 锁类型，越界为 {@code null}

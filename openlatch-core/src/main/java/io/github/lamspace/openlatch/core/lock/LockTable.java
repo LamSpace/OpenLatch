@@ -21,9 +21,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /**
- * key → {@link LockEntry} 的映射与条目生命周期。用 {@link ConcurrentHashMap} 承载，
- * 条目创建用 {@link #computeIfAbsent}，销毁用条件移除 {@link #remove(String, LockEntry)}，
- * 避免移除/创建竞态（设计说明书 §4.9.1）。
+ * key → {@link KeyEntry} 的映射与条目生命周期。用 {@link ConcurrentHashMap} 承载，
+ * 条目创建用 {@link #computeIfAbsent}，销毁用条件移除 {@link #remove(String, KeyEntry)}，
+ * 避免移除/创建竞态（设计说明书 §4.9.1）。值为 {@link KeyEntry} 抽象——
+Phase 3 T1 后同一张表按家族承载锁/Semaphore/Latch 条目，创建侧的
+工厂由调用方（{@code CoreEngine}）按请求家族选择。
  */
 public final class LockTable {
 
@@ -32,7 +34,7 @@ public final class LockTable {
     }
 
     /** key → 锁条目映射，并发容器承载。 */
-    private final ConcurrentHashMap<String, LockEntry> entries = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, KeyEntry> entries = new ConcurrentHashMap<>();
 
     /**
      * 键不存在则创建条目并登记。
@@ -41,7 +43,7 @@ public final class LockTable {
      * @param factory 条目创建函数，仅在键不存在时调用
      * @return 现有或新建的条目
      */
-    public LockEntry computeIfAbsent(String key, Function<String, LockEntry> factory) {
+    public KeyEntry computeIfAbsent(String key, Function<String, KeyEntry> factory) {
         return entries.computeIfAbsent(key, factory);
     }
 
@@ -51,7 +53,7 @@ public final class LockTable {
      * @param key 锁键
      * @return 条目；不存在返回 {@code null}
      */
-    public LockEntry get(String key) {
+    public KeyEntry get(String key) {
         return entries.get(key);
     }
 
@@ -62,7 +64,7 @@ public final class LockTable {
      * @param entry 期望的当前条目
      * @return 是否移除成功
      */
-    public boolean remove(String key, LockEntry entry) {
+    public boolean remove(String key, KeyEntry entry) {
         return entries.remove(key, entry);
     }
 
@@ -71,7 +73,7 @@ public final class LockTable {
      *
      * @return 全部条目的弱一致视图
      */
-    public Collection<LockEntry> values() {
+    public Collection<KeyEntry> values() {
         return entries.values();
     }
 }

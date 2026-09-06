@@ -775,7 +775,7 @@ public final class OpenLatchClient implements AutoCloseable {
         }
         long requestId = session.nextRequestId();
         Envelope envelope = Envelope.newBuilder()
-                .setProtocolVersion(2)
+                .setProtocolVersion(3)
                 .setType(MessageType.LOCK_ACQUIRE)
                 .setRequestId(requestId)
                 .setAcquireRequest(AcquireRequest.newBuilder()
@@ -1136,6 +1136,24 @@ public final class OpenLatchClient implements AutoCloseable {
      */
     public OLock newReentrantLock(String key) {
         return new RemoteLock(this, Objects.requireNonNull(key), LockType.REENTRANT);
+    }
+
+    /**
+     * 创建显式公平承诺互斥锁句柄（Phase 3 详设 §2.2/P3-02）。语义与
+     * {@link #newReentrantLock} 逐项等价（互斥、重入、租约、看门狗），
+     * 差异仅在类型标识：以 v3 {@code LOCK_TYPE_FAIR} 定型条目，向服务端
+     * 声明公平承诺——授予顺序等于排队顺序由公平性回归套件常开锁定；
+     * 与 {@code REENTRANT} 同族互通（互为重入，凭证复用）。
+     *
+     * <p><b>版本前提</b>：{@code FAIR} 为 v3 类型，仅当服务端握手中接受
+     * v3（Phase 3 服务端）时可用；旧服务端会以 {@code INVALID_REQUEST}
+     * 拒绝本类型请求。
+     *
+     * @param key 锁键
+     * @return 公平互斥锁句柄
+     */
+    public OLock newFairLock(String key) {
+        return new RemoteLock(this, Objects.requireNonNull(key), LockType.FAIR);
     }
 
     /**

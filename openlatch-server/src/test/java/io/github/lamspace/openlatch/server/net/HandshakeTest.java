@@ -143,6 +143,23 @@ class HandshakeTest {
     }
 
     @Test
+    void v3_hello_accepted_with_version_echo() {
+        // Phase 3 T1：v3 握手进入接受区间，回显请求版本 3。
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(3)
+                .setType(MessageType.HELLO)
+                .setRequestId(44)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(3))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(3);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(resp.getHelloResponse().getServerProtocolVersion())
+                .isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
+    }
+
+    @Test
     void cluster_view_on_single_node_rejected_invalid_request() {
         ch.writeInbound(hello(42, 2, "")); // 先完成 v2 握手进入业务阶段
         readOutboundEnvelope();
@@ -184,8 +201,8 @@ class HandshakeTest {
 
     @Test
     void wrong_protocol_version_rejected_and_disconnected() {
-        // v2 起接受区间为 [1,2]：越界版本（3）仍拒绝并断连。
-        ch.writeInbound(hello(1, 3, ""));
+        // v3 起接受区间为 [1,3]：越界版本（4）拒绝并断连。
+        ch.writeInbound(hello(1, 4, ""));
 
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);

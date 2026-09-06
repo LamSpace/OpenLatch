@@ -23,6 +23,7 @@ enum LockType {
   LOCK_TYPE_SIMPLE    = 1;   // 不可重入互斥
   LOCK_TYPE_READ      = 2;
   LOCK_TYPE_WRITE     = 3;
+  LOCK_TYPE_FAIR      = 4;   // v3：显式公平承诺互斥（语义等价 REENTRANT，仅对 v3 会话开放）
 }
 
 // 状态码。

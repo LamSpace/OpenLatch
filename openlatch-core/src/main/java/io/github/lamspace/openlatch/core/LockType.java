@@ -21,13 +21,13 @@ package io.github.lamspace.openlatch.core;
  * 故在此定义独立枚举，由 server 层做映射。
  *
  * <p><b>兼容性</b>：{@link #READ} 之间相互兼容（可多读者共存）；
- * {@link #READ} 与 {@link #SIMPLE}、{@link #REENTRANT}、{@link #WRITE}
- * 互斥；后三者相互之间亦互斥（同一时刻至多一个写侧持有者）。
+ * {@link #READ} 与 {@link #SIMPLE}、{@link #REENTRANT}、{@link #WRITE}、
+ * {@link #FAIR} 互斥；后四者相互之间亦互斥（同一时刻至多一个写侧持有者）。
  *
  * <p><b>重入归属</b>：归属由 {@code (sessionId, threadId)} 唯一确定。
  * {@link #SIMPLE} 不可重入（同归属重复获取将排队或拒绝）；
- * {@link #REENTRANT} 与 {@link #WRITE} 可重入；{@link #READ} 的同归属
- * 重复获取按读侧计数重入。
+ * {@link #REENTRANT}、{@link #WRITE} 与 {@link #FAIR} 可重入；
+ * {@link #READ} 的同归属重复获取按读侧计数重入。
  *
  * <p><b>同 key 同类型约定</b>（与 Redisson 约定一致）：同一 key 应始终
  * 使用一致的锁类型。条目的可重入性由首次请求定型（{@code SIMPLE} 为
@@ -41,5 +41,11 @@ public enum LockType {
     /** 读锁：读者间共享，与任何写侧互斥；整 key 共用一个租约凭证。 */
     READ,
     /** 写锁：与任何持有者互斥，可重入。 */
-    WRITE
+    WRITE,
+    /**
+     * 显式公平承诺互斥（Phase 3 T1）：语义与 {@link #REENTRANT} 逐项等价
+     * （同族别名、互通互认），作为公平承诺的 API 标识；授予顺序等于排队
+     * 顺序的保证由 FIFO 队列本体承载（详设 §2.2）。
+     */
+    FAIR
 }

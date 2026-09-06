@@ -24,6 +24,8 @@ package io.github.lamspace.openlatch.core.result;
  *
  * <p><b>返回步骤与优先级</b>：会话校验（{@link #REJECT_SESSION}）→
  * key 校验（{@link #REJECT_KEY_EMPTY} / {@link #REJECT_KEY_TOO_LONG}）→
+ * 家族判定（key 已有他家族条目 → {@link #REJECT_TYPE_MISMATCH}，先于
+ * 会话登记，条目状态零扰动）→
  * 条目内规则（重入/快路径/队首重发 → {@link #GRANTED}，立即式无快路径 →
  * {@link #DENIED}，幂等去重或入队 → {@link #QUEUED}，队列满 →
  * {@link #REJECT_QUEUE_FULL}）。会话校验在预检与条目锁内各执行一次，
@@ -47,5 +49,11 @@ public enum Outcome {
     /** 拒绝：该 key 等待队列已满，先于入队动作检查。 */
     REJECT_QUEUE_FULL,
     /** 拒绝：会话不存在或已关闭；预检与条目锁内权威校验均可返回。 */
-    REJECT_SESSION
+    REJECT_SESSION,
+    /**
+     * 拒绝：key 条目的家族与请求类型不属于同一家族（如锁 key 上请求
+     * Semaphore），条目状态与会话触及集零扰动；server 层映射协议
+     * {@code INVALID_REQUEST}。
+     */
+    REJECT_TYPE_MISMATCH
 }

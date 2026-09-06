@@ -446,14 +446,25 @@ final class ClusterHarness implements AutoCloseable {
             this.ctx = channel.pipeline().firstContext();
         }
 
-        /** 集群 HELLO 直驱（v2，S3 起与真实客户端同版本），等待 HelloResponse。 */
+        /** 集群 HELLO 直驱（v2 默认版本，既有测试保持），等待 HelloResponse。 */
         Envelope hello(long requestId) {
+            return hello(requestId, 2);
+        }
+
+        /**
+         * 指定握手版本的集群 HELLO 直驱（Phase 3 T1：v3 专属类型门控用例用）。
+         *
+         * @param requestId 请求 id
+         * @param version   客户端声明的协议版本（信封与会话字段一致）
+         * @return HelloResponse 信封
+         */
+        Envelope hello(long requestId, int version) {
             Envelope msg = Envelope.newBuilder()
-                    .setProtocolVersion(2)
+                    .setProtocolVersion(version)
                     .setType(MessageType.HELLO)
                     .setRequestId(requestId)
                     .setHelloRequest(HelloRequest.newBuilder()
-                            .setClientProtocolVersion(2).setClientName("harness"))
+                            .setClientProtocolVersion(version).setClientName("harness"))
                     .build();
             node.runtime.sessionCoordinator().handleHello(ctx, session, msg);
             return awaitOutbound(10_000);

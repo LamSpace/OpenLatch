@@ -20,6 +20,7 @@ import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
+import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
 import io.github.lamspace.openlatch.core.lock.Owner;
@@ -52,7 +53,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 调用方为多个 Netty IO 线程（业务请求）与单个租约扫描线程（{@link #expireDue}、
  * {@link #sweepNotifiedHeads}）。安全性基于两级机制：跨 key 状态由并发容器
  * （{@link LockTable}、{@link SessionRegistry}、{@link LeaseManager} 各自内部自同步）
- * 承载；单 key 状态迁移在对应 {@link LockEntry} 的条目锁内完成，任一调用路径
+ * 承载；单 key 状态迁移在对应 {@link KeyEntry} 的条目锁内完成，任一调用路径
  * 最多持有一个条目锁，不存在跨条目持锁，故无锁顺序死锁风险。
  *
  * <p><b>事件回调</b>：{@link CoreEventListener#notifyHead} 一律在条目锁之外触发
@@ -70,7 +71,7 @@ public final class CoreEngine {
     private final Clock clock;
     /** 事件出口，接收队首通知事件（条目锁外触发）。 */
     private final CoreEventListener listener;
-    /** key → 锁条目映射与条目生命周期。 */
+    /** key → 状态条目映射与条目生命周期（Phase 3 T1 后按家族承载锁/Semaphore/Latch 条目）。 */
     private final LockTable lockTable = new LockTable();
     /** 租约到期堆，供 {@link #expireDue} 扫描。 */
     private final LeaseManager leaseManager = new LeaseManager();
@@ -205,7 +206,7 @@ public final class CoreEngine {
         }
         long now = clock.nowMs();
         for (String key : keys) {
-            LockEntry e = lockTable.get(key);
+            KeyEntry e = lockTable.get(key);
             if (e == null) {
                 continue;
             }
@@ -229,6 +230,9 @@ public final class CoreEngine {
      *   <li>key 非空，否则 {@link Outcome#REJECT_KEY_EMPTY}；</li>
      *   <li>key 的 UTF-8 字节长度不超过 {@code maxKeyLength}，否则
      *       {@link Outcome#REJECT_KEY_TOO_LONG}；</li>
+     *   <li>条目锁内家族判定：key 已有他家族条目则回
+     *       {@link Outcome#REJECT_TYPE_MISMATCH}（先于会话登记，条目与
+     *       触及集零扰动）；</li>
      *   <li>条目锁内再次权威校验会话仍存活（与 {@link #sessionClosed} 原子互斥），
      *       失败仍回 {@link Outcome#REJECT_SESSION}。</li>
      * </ol>
@@ -265,14 +269,19 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
+        KeyFamily family = familyOf(cmd.lockType());
         boolean reentrant = cmd.lockType() != LockType.SIMPLE;
         long effectiveLeaseMs = clampLease(cmd.requestedLeaseMs());
 
         while (true) {
-            LockEntry e = lockTable.computeIfAbsent(key, k -> new LockEntry(k, reentrant));
+            KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant));
             synchronized (e) {
                 if (lockTable.get(key) != e) {
                     continue; // 条目在等待期间被移除，重试（design.md D4）
+                }
+                // 家族判定先于会话登记：跨家族请求对条目状态与会话触及集零扰动。
+                if (e.family() != family) {
+                    return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
                 }
                 // 权威会话校验 + 原子登记，与 sessionClosed 的 remove 原子互斥。
                 if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
@@ -281,7 +290,12 @@ public final class CoreEngine {
                     }
                     return new AcquireResult(Outcome.REJECT_SESSION, 0, 0, 0);
                 }
-                AcquireResult result = e.acquire(cmd, now, leaseTokenCounter::getAndIncrement, effectiveLeaseMs, config);
+                AcquireResult result = switch (e) {
+                    case LockEntry le -> le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
+                            effectiveLeaseMs, config);
+                    // 家族判定已保证同族，此处为家族尚无实现条目时的收口分支。
+                    default -> new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
+                };
                 if (result.outcome() == Outcome.GRANTED) {
                     leaseManager.offer(key, result.leaseToken(), now + result.grantedLeaseMs());
                 }
@@ -291,6 +305,38 @@ public final class CoreEngine {
                 return result;
             }
         }
+    }
+
+    /**
+     * 请求锁类型 → 条目家族。锁家族全部类型（REENTRANT/SIMPLE/READ/WRITE，
+     * 及 Phase 3 起的 FAIR 别名）落 {@link KeyFamily#LOCK}；SEMAPHORE/LATCH
+     * 类型接入时在此增行（编译器以 switch 穷尽性强制更新）。
+     *
+     * @param lockType 请求的锁类型
+     * @return 所属条目家族
+     */
+    private static KeyFamily familyOf(LockType lockType) {
+        return switch (lockType) {
+            case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
+        };
+    }
+
+    /**
+     * 按家族创建条目。锁家族条目构造与既有 {@code new LockEntry(k, reentrant)}
+     * 逐参数一致；未接入家族（Semaphore/Latch，P3-03/P3-05 落地）不可达。
+     *
+     * @param family    目标家族
+     * @param key       锁键
+     * @param reentrant 可重入性（仅锁家族取用，由首次请求类型定型）
+     * @return 新条目
+     * @throws IllegalStateException 家族未接入（正常路径不可达）
+     */
+    private static KeyEntry newEntry(KeyFamily family, String key, boolean reentrant) {
+        return switch (family) {
+            case LOCK -> new LockEntry(key, reentrant);
+            case SEMAPHORE, LATCH -> throw new IllegalStateException(
+                    "entry family not yet implemented: " + family);
+        };
     }
 
     /**
@@ -319,14 +365,19 @@ public final class CoreEngine {
         if (!sessions.contains(cmd.sessionId())) {
             return new ReleaseResult(ReleaseStatus.REJECT_SESSION, false);
         }
-        LockEntry e = lockTable.get(cmd.key());
+        KeyEntry e = lockTable.get(cmd.key());
         if (e == null) {
             return new ReleaseResult(ReleaseStatus.NOT_HELD, false);
         }
         List<Waiter> notify = new ArrayList<>();
         ReleaseResult result;
         synchronized (e) {
-            result = e.release(cmd, now, config.headReplyTimeoutMs(), notify);
+            // 释放按条目家族分派：锁家族走 LockEntry 计数释放；他家族条目
+            // 对本命令而言无锁持有语义，回 NOT_HELD（Semaphore 的许可释放
+            // 通道自 P3-03 起在此扩展）。
+            result = e instanceof LockEntry le
+                    ? le.release(cmd, now, config.headReplyTimeoutMs(), notify)
+                    : new ReleaseResult(ReleaseStatus.NOT_HELD, false);
             if (e.isEmpty()) {
                 lockTable.remove(cmd.key(), e);
             }
@@ -357,12 +408,16 @@ public final class CoreEngine {
         if (!sessions.contains(cmd.sessionId())) {
             return new RenewResult(ReleaseStatus.REJECT_SESSION, 0);
         }
-        LockEntry e = lockTable.get(cmd.key());
+        KeyEntry e = lockTable.get(cmd.key());
         if (e == null) {
             return new RenewResult(ReleaseStatus.NOT_HELD, 0);
         }
         synchronized (e) {
-            RenewResult result = e.renew(cmd, now, clampLease(cmd.requestedLeaseMs()));
+            // 续租同释放按家族分派：他家族条目对本命令无租约语义，回
+            // NOT_HELD（Semaphore 续租通道自 P3-03 起在此扩展）。
+            RenewResult result = e instanceof LockEntry le
+                    ? le.renew(cmd, now, clampLease(cmd.requestedLeaseMs()))
+                    : new RenewResult(ReleaseStatus.NOT_HELD, 0);
             if (result.status() == ReleaseStatus.OK) {
                 leaseManager.offer(cmd.key(), e.leaseToken(), result.newExpiresAtMs());
             }
@@ -389,7 +444,7 @@ public final class CoreEngine {
         long now = clock.nowMs();
         int count = 0;
         for (LeaseManager.HeapEntry he : leaseManager.drainExpired(now)) {
-            LockEntry e = lockTable.get(he.key());
+            KeyEntry e = lockTable.get(he.key());
             if (e == null) {
                 continue;
             }
@@ -422,7 +477,7 @@ public final class CoreEngine {
     public int sweepNotifiedHeads() {
         long now = clock.nowMs();
         int count = 0;
-        for (LockEntry e : lockTable.values()) {
+        for (KeyEntry e : lockTable.values()) {
             List<Waiter> notify = new ArrayList<>();
             synchronized (e) {
                 if (e.sweepNotifiedHead(now, config.headReplyTimeoutMs(), notify)) {

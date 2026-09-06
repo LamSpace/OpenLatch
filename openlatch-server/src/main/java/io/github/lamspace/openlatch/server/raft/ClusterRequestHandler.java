@@ -133,6 +133,12 @@ public final class ClusterRequestHandler {
             writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
+        // v3 门控（详设 §6）：与单机分发器同规则——v3 专属类型对低版本会话
+        // 消息级拒绝、不断连，先于排队预检与提案（MUST NOT 进入复制日志）。
+        if (session.protocolVersion() < 3 && RequestDispatcher.isV3OnlyLockType(req.getLockType())) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
         boolean queueWanted = req.getWaitMs() != 0;
         boolean held = kernel.shadow().isHeld(req.getKey());
         // 队首重发且锁已空出：自推进走复制授予路径（AWAIT_NOTIFY 后重发的

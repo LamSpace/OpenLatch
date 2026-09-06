@@ -131,6 +131,17 @@ class OpenLatchAspectTest {
         }
 
         /**
+         * 公平锁类型（Phase 3 T1 starter type = FAIR）。
+         *
+         * @return 固定返回值
+         */
+        @OpenLatch(key = "'fair'", type = LockType.FAIR)
+        public String fair() {
+            ran.set(true);
+            return "f";
+        }
+
+        /**
          * 业务抛异常路径。
          *
          * @return 不会返回
@@ -203,6 +214,22 @@ class OpenLatchAspectTest {
         assertThat(spec.getValue().leaseMs()).isZero();
         assertThat(spec.getValue().lockType()).isEqualTo(LockType.REENTRANT);
         assertThat(spec.getValue().key()).isEqualTo("fixed");
+        assertThat(releasedToken.get()).isEqualTo(7L);
+    }
+
+    /**
+     * type = FAIR（Phase 3 T1/P3-02）：注解取值直通 v3 公平类型，
+     * 映射为 AcquireSpec.lockType == FAIR 并正常执行与释放。
+     */
+    @Test
+    void fairTypeMapsToAcquireSpec() {
+        assertThat(service.fair()).isEqualTo("f");
+        assertThat(target.ran).isTrue();
+
+        ArgumentCaptor<AcquireSpec> spec = ArgumentCaptor.forClass(AcquireSpec.class);
+        verify(client).acquireAsync(spec.capture());
+        assertThat(spec.getValue().lockType()).isEqualTo(LockType.FAIR);
+        assertThat(spec.getValue().key()).isEqualTo("fair");
         assertThat(releasedToken.get()).isEqualTo(7L);
     }
 

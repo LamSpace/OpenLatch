@@ -35,5 +35,11 @@ public enum ReleaseStatus {
     /** 无条目、无持有者，或凭证匹配但归属不匹配（防御性）。 */
     NOT_HELD,
     /** 会话不存在或已关闭，先于一切条目检查。 */
-    REJECT_SESSION
+    REJECT_SESSION,
+    /**
+     * 拒绝：归还许可数超过该归属当前持有数（仅 Semaphore 释放通道可达，
+     * P3-03 起生效；锁与 Latch 的释放路径永不返回此值），归属持有与
+     * 许可总量零扰动；server 层映射协议 {@code INVALID_REQUEST}。
+     */
+    OVER_RELEASE
 }

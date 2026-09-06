@@ -101,6 +101,11 @@ public final class RequestDispatcher {
      */
     private Envelope dispatchAcquire(ServerSession session, Envelope msg) {
         AcquireRequest req = msg.getAcquireRequest();
+        // v3 门控（详设 §6）：新锁类型仅对握手中声明 v3 的会话开放，v1/v2
+        // 会话消息级拒绝、不断连（请求形状错误，非安全事件）。
+        if (session.protocolVersion() < 3 && isV3OnlyLockType(req.getLockType())) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         LockType lockType = toCoreLockType(req.getLockType());
         if (lockType == null) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -159,8 +164,21 @@ public final class RequestDispatcher {
             case LOCK_TYPE_SIMPLE -> LockType.SIMPLE;
             case LOCK_TYPE_READ -> LockType.READ;
             case LOCK_TYPE_WRITE -> LockType.WRITE;
+            case LOCK_TYPE_FAIR -> LockType.FAIR;
             default -> null;
         };
+    }
+
+    /**
+     * 是否 v3 专属协议锁类型：握版本 &lt;3 的会话请求这些类型 MUST 被消息级
+     * 拒绝（详设 §6 兼容性策略）。P3-02 仅 {@code FAIR}；
+     * {@code SEMAPHORE}/{@code LATCH} 随各自子任务在此增列。
+     *
+     * @param type 协议锁类型
+     * @return v3 专属返回 {@code true}
+     */
+    public static boolean isV3OnlyLockType(io.github.lamspace.openlatch.protocol.LockType type) {
+        return type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR;
     }
 
     /**
@@ -199,6 +217,9 @@ public final class RequestDispatcher {
             case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
             case REJECT_QUEUE_FULL -> StatusCode.OVERLOADED;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            // 家族误用是请求形状错误，非会话/容量问题（Phase 3 T1 design D3：
+            // 协议面不细分，统一 INVALID_REQUEST）。
+            case REJECT_TYPE_MISMATCH -> StatusCode.INVALID_REQUEST;
         };
     }
 
@@ -244,6 +265,8 @@ public final class RequestDispatcher {
             case INVALID_TOKEN -> StatusCode.INVALID_TOKEN;
             case NOT_HELD -> StatusCode.NOT_HELD;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            // 超额归还是请求参数与持有不符，非租约问题（design D3）。
+            case OVER_RELEASE -> StatusCode.INVALID_REQUEST;
         };
     }
 

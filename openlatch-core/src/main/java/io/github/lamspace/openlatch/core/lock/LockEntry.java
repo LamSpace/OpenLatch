@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.core.lock;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
+import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
@@ -57,8 +58,13 @@ import java.util.function.LongSupplier;
  * <p><b>锁类型约定</b>：同一 key 应使用一致的锁类型（与 Redisson 约定一致）。
  * {@code reentrant} 在建条目时由首次请求的锁类型确定（{@code SIMPLE} 为 false，
  * 其余为 true），建条目后不再变化。
+ *
+ * <p><b>家族归属</b>：实现 {@link KeyEntry}，{@link #family()} 恒为
+ * {@link KeyFamily#LOCK}；生命周期方法（空判定、租约读数、会话摘除、
+ * 到期回收、队首清扫）即该接口契约的锁侧实现，命令语义（获取/释放/续租）
+ * 不经接口、由 {@code CoreEngine} 分派后直接调用本类方法。
  */
-public final class LockEntry {
+public final class LockEntry implements KeyEntry {
 
     /** 锁键。 */
     private final String key;
@@ -342,6 +348,7 @@ public final class LockEntry {
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
      * @param notify             通知收集列表，由调用方在条目锁外触发
      */
+    @Override
     public synchronized void forceExpire(long now, long headReplyTimeoutMs, List<Waiter> notify) {
         writer = null;
         writeCount = 0;
@@ -361,6 +368,7 @@ public final class LockEntry {
      * @param notify             通知收集列表，由调用方在条目锁外触发
      * @return 是否移除了超时队首
      */
+    @Override
     public synchronized boolean sweepNotifiedHead(long now, long headReplyTimeoutMs, List<Waiter> notify) {
         Waiter head = waiters.peekFirst();
         if (head == null || !head.notified()) {
@@ -386,6 +394,7 @@ public final class LockEntry {
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
      * @param notify             通知收集列表，由调用方在条目锁外触发
      */
+    @Override
     public synchronized void removeSession(long sessionId, long now,
             long headReplyTimeoutMs, List<Waiter> notify) {
         if (writer != null && writer.sessionId() == sessionId) {
@@ -475,10 +484,21 @@ public final class LockEntry {
     }
 
     /**
+     * 家族判别，恒为 {@link KeyFamily#LOCK}（本类不承载 Semaphore/Latch 状态）。
+     *
+     * @return {@link KeyFamily#LOCK}
+     */
+    @Override
+    public KeyFamily family() {
+        return KeyFamily.LOCK;
+    }
+
+    /**
      * 锁键。须在持有条目锁时调用（CoreEngine 保证）。
      *
      * @return 锁键
      */
+    @Override
     public String key() {
         return key;
     }
@@ -488,6 +508,7 @@ public final class LockEntry {
      *
      * @return 租约凭证
      */
+    @Override
     public long leaseToken() {
         return leaseToken;
     }
@@ -497,6 +518,7 @@ public final class LockEntry {
      *
      * @return 到期时刻（毫秒）
      */
+    @Override
     public long leaseExpiresAtMs() {
         return leaseExpiresAtMs;
     }
@@ -506,6 +528,7 @@ public final class LockEntry {
      *
      * @return 条目为空返回 true
      */
+    @Override
     public boolean isEmpty() {
         return writer == null && readers.isEmpty() && waiters.isEmpty();
     }

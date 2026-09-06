@@ -158,7 +158,7 @@ public final class SeedDiscovery {
                 // 探针连接失效：在途请求由多路复用器超时收敛，无需额外联动
             }));
             Envelope hello = Envelope.newBuilder()
-                    .setProtocolVersion(2)
+                    .setProtocolVersion(3)
                     .setType(MessageType.HELLO)
                     .setRequestId(sc.nextRequestId())
                     .setHelloRequest(HelloRequest.newBuilder()
@@ -185,7 +185,7 @@ public final class SeedDiscovery {
                 }
                 // 地址未配置：CLUSTER_VIEW 取 Leader 自报地址（design D4 降级路径）。
                 Envelope viewReq = Envelope.newBuilder()
-                        .setProtocolVersion(2)
+                        .setProtocolVersion(3)
                         .setType(MessageType.CLUSTER_VIEW)
                         .setRequestId(sc.nextRequestId())
                         .build();
