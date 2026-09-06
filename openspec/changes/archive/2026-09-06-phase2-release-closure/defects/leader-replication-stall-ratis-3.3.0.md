@@ -1,5 +1,18 @@
 # 缺陷档案：Ratis 3.3.0 leader 复制停摆（sticky LeaderNotReady）
 
+> **状态（2026-09-06 更新，`phase2-leader-stall-followup`）：mitigated（产品侧自愈承载）+ 根因已定位 + 上游待提报。**
+> 机理收口、双 jstack 取证、三候选判定与 2B 看门狗设计输入见
+> `openspec/changes/phase2-leader-stall-followup/observations-leader-stall-rootcause.md`；
+> 规格见 `cluster-node-lifecycle`"复制停滞自愈"（delta 于该 change `specs/`）；
+> 运维口径修订见部署文档 §7（两序皆可停，推荐序降级为降概率）。
+> 库内缺陷本身仍在（deferred）：3.3.1 未发布且其已合并变更不触及本路径；上游提报经
+> 定夺**不投递**（提交不改变 B 形态实际风险等级），成稿与取证包随
+> `openspec/changes/phase2-leader-stall-followup/`（`upstream-ratis-issue-draft.md` +
+> `evidence-r5-jstack/` + `evidence-r6-control-*`）归档备查，后续时点即取即用。
+> 形态 B（选举风暴，无在任者可动作）不在看门狗覆盖面——为已记录的可用性残余风险，
+> 根治依赖我方升级评估时以 `observations-leader-stall-rootcause.md` 三条库内路径做
+> changelog 对账。
+
 - 登记：2026-09-05，`phase2-release-closure` 任务 6.1（`-Pdrill` 辅轨全套）现场捕获。
 - 级别：**P1（可用性）**——非正确性缺陷（无锁丢失/无状态分叉证据，错误全为拒绝/超时路径），但触发后该 leader 任期内写面永久不可用直至人工介入。
 - 归因：**存量**（非 `phase2-release-closure` 引入，差分实验见下）。S4 归档检查单记录的"R2 离群轮 24.22%，判定瞬态、4 轮未复现"与本档案为同一故障签名——该"瞬态"定判据本文更正。

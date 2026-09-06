@@ -7,7 +7,7 @@ Phase 2 签署发布（`docs/Phase2-验收报告.md` 标准 5 ⚠️ 条件通�
 ## What Changes
 
 - **T1 确定性复现与根因定位（spike 先行）**：构造最小化复现（in-JVM 3 节点：杀当值 Leader→其带脏条目重启归群→高频采样观察停摆率），双 jstack 复刻现场定位到库内单点路径（`LeaderStateImpl` sender 激活 / `GrpcLogAppender` INCONSISTENCY 回退后重试推进 / `startupLogEntry` 生命周期三者之一），结论入 observations 档案。
-- **T2 产品侧自愈看门狗（若 T1 判定可承受）**：leader 角色下任期提交停滞超阈 → 主动 `transferLeadership` 让位于日志最落后的健康对侧（失败兜底步序见 design D3）；含防误伤振荡保护（选举空窗/追赶窗豁免）、可观测面（log/事件）。规格化：撤销本 change `skip_specs`，`cluster-node-lifecycle`（或 `replicated-state-machine`，随机制落点）ADDED 需求"复制停滞自愈"——沿 `phase2-release-closure` 4.3 先例执行中落定。
+- **T2 产品侧自愈看门狗（若 T1 判定可承受）**：leader 角色下任期提交停滞超阈 → 主动 `transferLeadership` 让位于**日志最新（commitIndex 最大）的健康对侧**（design D3 定稿；T1 根因证明"最落后"目标会覆写已提交条目，proposal 初稿措辞废止。让位观察窗内仍冻结 → 升级进程退出交外部 supervisor，冷却窗防重启风暴，见 D3/Risks 与 `observations-leader-stall-rootcause.md`）；含防误伤振荡保护（选举空窗/追赶窗豁免、每任期一次让位配额）、可观测面（log/事件）。规格化：已撤销本 change `skip_specs`，落点 `cluster-node-lifecycle` ADDED 需求"复制停滞自愈"（`specs/cluster-node-lifecycle/spec.md`）。
 - **T3 Ratis 3.3.1 升级评估**：跟踪上游发版；若发布且相关路径（close/leader 选举/复制）变更，升级跑全套 `-Pdrill` + 10 分钟 soak 对照，可根治则**以升级替代 T2**（移除钉死/看门狗中不必要者，装配契约随实调整）；未根治则以 T1 最小复现向 Apache Ratis 提报 issue。
 - **T4 NOT_HELD 码形对齐**：定位孤立节点 RELEASE 道返回 `NOT_HELD` 的门序成因（会话本地建立→归属判先于转发失败），定夺"实现改回 NOT_LEADER/可重试码"或"注释与部署文档记录码形"——倾向后者为底、前者为客户面语义优先（design D5）。
 - 不做：多 Raft 组、ReadIndex、T2 的自动 failover 编排（属 Phase 3 运维面，如需要另行立项）。
@@ -22,7 +22,7 @@ Phase 2 签署发布（`docs/Phase2-验收报告.md` 标准 5 ⚠️ 条件通�
 
 ### Modified Capabilities
 
-（暂空——T2/T4 规格化在执行中落定时撤销 `skip_specs` 并补 delta；机制未定前不虚构需求。当前阶段为证据采集 + spike + 条件修复，`skip_specs: true`。）
+- `cluster-node-lifecycle`：ADDED 需求「复制停滞自愈」（看门狗检测双条件、让位→升级重启阶梯、防误伤与冷却、关停竞态豁免）。T4 不改协议枚举与响应形状（仅注释/文档码形说明），`wire-protocol` 无 delta。
 
 ## Impact
 

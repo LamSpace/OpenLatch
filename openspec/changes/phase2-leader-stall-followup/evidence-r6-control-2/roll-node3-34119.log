@@ -1,0 +1,359 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/home/lam/workspace/OpenLatch/openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+[main] INFO org.apache.ratis.server.RaftServer - Starting Apache Ratis Server -- RaftServerProxy n3
+[main] INFO org.apache.ratis.server.RaftServer -                version: 3.3.0
+[main] INFO org.apache.ratis.server.RaftServer -               revision: 4f4d3504f36151085d32224a200f23b3eae8d472
+[main] INFO org.apache.ratis.server.RaftServer -                   java: Java HotSpot(TM) 64-Bit Server VM 25.0.3+9-LTS-195
+[main] INFO org.apache.ratis.server.RaftServer -                   user: lam
+[main] INFO org.apache.ratis.server.RaftServer -                 memory: max: 7.637 G, total: 496 M, free: 479.977 M
+[main] INFO org.apache.ratis.server.RaftServer - raft.rpc.type = GRPC (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.admin.host = null (fallback to raft.grpc.server.host)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.admin.port = 35879 (fallback to raft.grpc.server.port)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.client.host = null (fallback to raft.grpc.server.host)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.client.port = 35879 (fallback to raft.grpc.server.port)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.port = 35879 (custom)
+[main] INFO org.apache.ratis.grpc.server.GrpcServicesImpl - raft.grpc.message.size.max = 64MB (=67108864) (default)
+[main] INFO org.apache.ratis.grpc.server.GrpcServicesImpl - raft.grpc.flow.control.window = 1MB (=1048576) (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.request.timeout = 3000ms (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.heartbeat.channel = true (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.stub.pool.size = 1 (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.appender.buffer.byte-limit = 4MB (=4194304) (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.use-epoll = true (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.boss-group.size = 0 (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.worker-group.size = 0 (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.client.worker-group.size = 0 (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.async.request.thread.pool.cached = true (default)
+[main] INFO org.apache.ratis.grpc.GrpcConfigKeys - raft.grpc.server.async.request.thread.pool.size = 32 (default)
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by org.apache.ratis.thirdparty.io.netty.util.internal.NativeLibraryUtil in an unnamed module (file:/home/lam/workspace/OpenLatch/openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+[main] INFO org.apache.ratis.server.impl.DataStreamServerImpl - raft.datastream.type = DISABLED (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.sleep.deviation.threshold = 300ms (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.close.threshold = 60s (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.leaderelection.leader.step-down.wait-time = 10s (default)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.storage.dir = [/tmp/openlatch-roll-node-4173497287471577718] (custom)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.proxy.cached = false (custom)
+[main] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.proxy.size = 4 (custom)
+[n3-impl-thread1] INFO org.apache.ratis.server.RaftServer - n3: found a subdirectory /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13
+[main] INFO org.apache.ratis.server.RaftServer - n3: addNew group-D7F925094F13:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879] returns group-D7F925094F13:java.util.concurrent.CompletableFuture@7d322cad[Not completed]
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServer$Division - n3: new RaftServerImpl for group-D7F925094F13:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879] with LockStateMachine-1:uninitialized
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.timeout.min = 400ms (custom)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.timeout.max = 800ms (custom)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.sleep.time = 25ms (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.slowness.timeout = 60s (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.leaderelection.member.majority-add = false (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: ConfigurationManager, init=conf: {index: -1, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}, confs=<EMPTY_MAP>
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.notification.no-leader.timeout = 60s (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.read.timeout = 10s (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.retrycache.expirytime = 60s (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.retrycache.statistics.expirytime = 100ms (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.read.option = DEFAULT (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.read.read-after-write-consistent.write-index-cache.expiry-time = 60s (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.appender.install.snapshot.enabled = true (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.append-entries.compose.enabled = true (default)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.server.cached = false (custom)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.server.size = 4 (custom)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.client.cached = false (custom)
+[n3-groupManagement] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.threadpool.client.size = 4 (custom)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.storage.free-space.min = 0MB (=0) (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.corruption.policy = EXCEPTION (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.storage.RaftStorageDirectory - Lock on /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/in_use.lock acquired by nodename 23180@lam
+[n3-impl-thread2] INFO org.apache.ratis.server.storage.RaftStorage - Read RaftStorageMetadata{term=1, votedFor=} from /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/current/raft-meta
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: set configuration conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3-impl-thread2] INFO io.github.lamspace.openlatch.server.raft.LockStateMachine - loaded snapshot at (t:1, i:127)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.use.memory = false (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: getLatestSnapshot(LockStateMachine-1:n3:group-D7F925094F13) returns SingleFileSnapshotInfo(t:1, i:127):[/tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/sm/snapshot.1_127]
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.RaftLog - n3@group-D7F925094F13-SegmentedRaftLog: snapshotIndexFromStateMachine = 127
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.purge.gap = 1024 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.statemachine.data.read.timeout = 1000ms (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.purge.preservation.log.num = 0 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.segment.size.max = 32MB (=33554432) (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.segment.cache.num.max = 6 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.segment.cache.size.max = 200MB (=209715200) (default)
+[n3-impl-thread2] INFO org.apache.ratis.util.AwaitToRun - Thread[#30,n3@group-D7F925094F13-cacheEviction-AwaitToRun,5,main] started
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - new n3@group-D7F925094F13-SegmentedRaftLogWorker for RaftStorageImpl:Storage Directory /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.queue.byte-limit = 64MB (=67108864) (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.queue.element-limit = 4096 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.preallocated.size = 4MB (=4194304) (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.force.sync.num = 128 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.statemachine.data.sync = true (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.statemachine.data.sync.timeout = 10s (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.statemachine.data.sync.timeout.retry = -1 (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.write.buffer.size = 8MB (=8388608) (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.unsafe-flush.enabled = false (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.async-flush.enabled = false (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.statemachine.data.caching.enabled = false (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.read.lock.enabled = true (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: set configuration conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.segmented.LogSegment - Successfully read 129 entries from segment file /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/current/log_inprogress_0
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - n3@group-D7F925094F13-SegmentedRaftLogWorker: flushIndex: setUnconditionally 0 -> 128
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - n3@group-D7F925094F13-SegmentedRaftLogWorker: safeCacheEvictIndex: setUnconditionally 0 -> -1
+[n3-impl-thread2] INFO org.apache.ratis.server.raftlog.segmented.BufferedWriteChannel - open log_inprogress_0 (append) at position 5544
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: start as a follower, conf=conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from      null to FOLLOWER at term 1 for startAsFollower
+[n3-impl-thread2] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.first-election.timeout.min = 400ms (fallback to raft.server.rpc.timeout.min)
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.first-election.timeout.max = 800ms (fallback to raft.server.rpc.timeout.max)
+[n3-impl-thread2] INFO org.apache.ratis.util.JmxRegister - Successfully registered JMX Bean with object name Ratis:service=RaftServer,group=group-D7F925094F13,id=n3
+[n3-impl-thread2] INFO org.apache.ratis.util.JmxRegister - register mxBean class org.apache.ratis.server.impl.RaftServerJmxAdapter as Ratis:service=RaftServer,group=group-D7F925094F13,id=n3
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.snapshot.trigger-when-stop.enabled = true (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.snapshot.trigger-when-remove.enabled = true (default)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.snapshot.auto.trigger.enabled = true (custom)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.snapshot.auto.trigger.threshold = 1000000 (custom)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.snapshot.retention.file.num = 2 (custom)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.log.purge.upto.snapshot.index = true (custom)
+[n3-impl-thread2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: Successfully started.
+[main] INFO org.apache.ratis.server.RaftServer - n3: start RPC server
+[main] INFO org.apache.ratis.grpc.server.GrpcServicesImpl - n3: GrpcServicesImpl started, listening on 35879
+[JvmPauseMonitor0] INFO org.apache.ratis.util.JvmPauseMonitor - JvmPauseMonitor-n3: Started
+[main] INFO io.github.lamspace.openlatch.server.raft.RaftSubsystem - Raft subsystem started: self=n3, raftPort=35879, peers=[1@127.0.0.1:38209, 2@127.0.0.1:32855, 3@127.0.0.1:35879]
+[main] INFO io.github.lamspace.openlatch.server.raft.ClusterRuntime - cluster runtime up: node=3, peers=[1@127.0.0.1:38209, 2@127.0.0.1:32855, 3@127.0.0.1:35879]
+[main] INFO io.github.lamspace.openlatch.server.OpenLatchServer - OpenLatch server started: port=34119, protocolVersion=2, maxKeyLength=512, maxQueueDepthPerKey=4096, maxInflightPerConnection=1024, defaultLeaseMs=30000, clusterEnabled=true, clusterNodeId=3
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.FollowerState - n3@group-D7F925094F13-FollowerState: change to CANDIDATE, lastRpcElapsedTime:519ms, electionTimeout:518ms
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from  FOLLOWER to CANDIDATE at term 1 for changeToCandidate
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.leaderelection.pre-vote = true (default)
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-LeaderElection1
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection1 PRE_VOTE round 0: submit vote requests at term 1 for conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.first-election.timeout.min = 400ms (fallback to raft.server.rpc.timeout.min)
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.RaftServerConfigKeys - raft.server.rpc.first-election.timeout.max = 800ms (fallback to raft.server.rpc.timeout.max)
+[n3@group-D7F925094F13-LeaderElection1-1] INFO org.apache.ratis.grpc.server.GrpcServerProtocolClient - Build channel for n1|127.0.0.1:38209
+[n3@group-D7F925094F13-LeaderElection1-2] INFO org.apache.ratis.grpc.server.GrpcServerProtocolClient - Build channel for n2|127.0.0.1:32855
+9月 06, 2026 9:42:08 上午 org.apache.ratis.thirdparty.io.grpc.netty.TcpMetrics loadEpollInfo
+信息: Epoll available during static init of TcpMetrics:true
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection - rejectedPeers: [n1, n2], emptyCommit? false
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection1: PRE_VOTE REJECTED received 2 response(s) and 0 exception(s):
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection -   Response 0: n3<-n1#1:FAIL-t1-last:(t:1, i:221)
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection -   Response 1: n3<-n2#2:FAIL-t1-last:(t:1, i:221)
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection1 PRE_VOTE round 0: result REJECTED
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from CANDIDATE to FOLLOWER at term 1 for REJECTED
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-LeaderElection1
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-LeaderElection1] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: set firstElectionSinceStartup to false for REJECTED
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.FollowerState - n3@group-D7F925094F13-FollowerState: change to CANDIDATE, lastRpcElapsedTime:785ms, electionTimeout:785ms
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from  FOLLOWER to CANDIDATE at term 1 for changeToCandidate
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-LeaderElection2
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection2 PRE_VOTE round 0: submit vote requests at term 1 for conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection2 got exception when requesting votes: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection2: PRE_VOTE REJECTED received 1 response(s) and 1 exception(s):
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection -   Response 0: n3<-n1#3:FAIL-t1-last:(t:1, i:239)
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection -   Exception 1: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection2 PRE_VOTE round 0: result REJECTED
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from CANDIDATE to FOLLOWER at term 1 for REJECTED
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-LeaderElection2
+[n3@group-D7F925094F13-LeaderElection2] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[grpc-default-executor-0] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n1@group-D7F925094F13 is not the leader, suggested leader is: n2|127.0.0.1:32855 caused by NotLeaderException
+[grpc-default-executor-1] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n2@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19)
+java.util.concurrent.CompletionException: java.io.IOException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at java.base/java.util.concurrent.CompletableFuture.wrapInCompletionException(CompletableFuture.java:323)
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:376)
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:391)
+	at java.base/java.util.concurrent.CompletableFuture$UniAccept.tryFire(CompletableFuture.java:729)
+	at java.base/java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:531)
+	at java.base/java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2221)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.completeReplyExceptionally(GrpcClientProtocolClient.java:409)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.access$000(GrpcClientProtocolClient.java:308)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onError(GrpcClientProtocolClient.java:339)
+	at org.apache.ratis.thirdparty.io.grpc.stub.ClientCalls$StreamObserverToCallListenerAdapter.onClose(ClientCalls.java:581)
+	at org.apache.ratis.thirdparty.io.grpc.PartialForwardingClientCallListener.onClose(PartialForwardingClientCallListener.java:39)
+	at org.apache.ratis.thirdparty.io.grpc.ForwardingClientCallListener.onClose(ForwardingClientCallListener.java:23)
+	at org.apache.ratis.grpc.metrics.intercept.client.MetricClientCallListener.onClose(MetricClientCallListener.java:47)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener$3.run(DelayedClientCall.java:553)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.delayOrExecute(DelayedClientCall.java:482)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.onClose(DelayedClientCall.java:537)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl.closeObserver(ClientCallImpl.java:566)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl.access$100(ClientCallImpl.java:72)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1StreamClosed.runInternal(ClientCallImpl.java:734)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1StreamClosed.runInContext(ClientCallImpl.java:715)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ContextRunnable.run(ContextRunnable.java:37)
+	at org.apache.ratis.thirdparty.io.grpc.internal.SerializingExecutor.run(SerializingExecutor.java:133)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+Caused by: java.io.IOException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at org.apache.ratis.grpc.GrpcUtil.unwrapException(GrpcUtil.java:117)
+	at org.apache.ratis.grpc.GrpcUtil.unwrapIOException(GrpcUtil.java:179)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onError(GrpcClientProtocolClient.java:338)
+	... 16 more
+Caused by: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at org.apache.ratis.thirdparty.io.grpc.Status.asRuntimeException(Status.java:532)
+	... 16 more
+Caused by: org.apache.ratis.thirdparty.io.netty.channel.AbstractChannel$AnnotatedConnectException: finishConnect(..) failed with error(-111): 连接被拒绝: /127.0.0.1:32855
+Caused by: java.net.ConnectException: finishConnect(..) failed with error(-111): 连接被拒绝
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Errors.newConnectException0(Errors.java:166)
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Errors.handleConnectErrno(Errors.java:131)
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Socket.finishConnect(Socket.java:359)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.doFinishConnect(AbstractEpollChannel.java:715)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.finishConnect(AbstractEpollChannel.java:692)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.epollOutReady(AbstractEpollChannel.java:567)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.EpollEventLoop.processReady(EpollEventLoop.java:491)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.EpollEventLoop.run(EpollEventLoop.java:399)
+	at org.apache.ratis.thirdparty.io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:1007)
+	at org.apache.ratis.thirdparty.io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+	at org.apache.ratis.thirdparty.io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+[grpc-default-executor-1] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n3@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n3@group-D7F925094F13 is not the leader caused by NotLeaderException
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.FollowerState - n3@group-D7F925094F13-FollowerState: change to CANDIDATE, lastRpcElapsedTime:409ms, electionTimeout:409ms
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from  FOLLOWER to CANDIDATE at term 1 for changeToCandidate
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-LeaderElection3
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection3 PRE_VOTE round 0: submit vote requests at term 1 for conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection3 got exception when requesting votes: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection3: PRE_VOTE REJECTED received 1 response(s) and 1 exception(s):
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection -   Response 0: n3<-n1#7:FAIL-t1-last:(t:1, i:239)
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection -   Exception 1: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection3 PRE_VOTE round 0: result REJECTED
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from CANDIDATE to FOLLOWER at term 1 for REJECTED
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-LeaderElection3
+[n3@group-D7F925094F13-LeaderElection3] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[grpc-default-executor-2] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n1@group-D7F925094F13 is not the leader caused by NotLeaderException
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.FollowerState - n3@group-D7F925094F13-FollowerState: change to CANDIDATE, lastRpcElapsedTime:474ms, electionTimeout:474ms
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from  FOLLOWER to CANDIDATE at term 1 for changeToCandidate
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-LeaderElection4
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection4 PRE_VOTE round 0: submit vote requests at term 1 for conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection4 got exception when requesting votes: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection4: PRE_VOTE REJECTED received 1 response(s) and 1 exception(s):
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection -   Response 0: n3<-n1#9:FAIL-t1-last:(t:1, i:239)
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection -   Exception 1: java.util.concurrent.ExecutionException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.LeaderElection - n3@group-D7F925094F13-LeaderElection4 PRE_VOTE round 0: result REJECTED
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from CANDIDATE to FOLLOWER at term 1 for REJECTED
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-LeaderElection4
+[n3@group-D7F925094F13-LeaderElection4] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[grpc-default-executor-1] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: receive requestVote(PRE_VOTE, n1, group-D7F925094F13, 1, (t:1, i:239))
+[grpc-default-executor-1] INFO org.apache.ratis.server.impl.VoteContext - n3@group-D7F925094F13-FOLLOWER: accept PRE_VOTE from n1: our last entry (t:1, i:128) < candidate's last entry (t:1, i:239)
+[grpc-default-executor-1] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13 replies to PRE_VOTE vote request: n1<-n3#8:OK-t1-last:(t:1, i:128). Peer's state: n3@group-D7F925094F13:t1, leader=null, voted=, raftlog=Memoized:n3@group-D7F925094F13-SegmentedRaftLog:OPENED:c127:last(t:1, i:128), conf=conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[grpc-default-executor-0] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: receive requestVote(ELECTION, n1, group-D7F925094F13, 2, (t:1, i:239))
+[grpc-default-executor-0] INFO org.apache.ratis.server.impl.VoteContext - n3@group-D7F925094F13-FOLLOWER: accept ELECTION from n1: our last entry (t:1, i:128) < candidate's last entry (t:1, i:239)
+[grpc-default-executor-0] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: changes role from  FOLLOWER to FOLLOWER at term 1 for candidate:n1
+[grpc-default-executor-0] INFO org.apache.ratis.server.impl.RoleInfo - n3: shutdown n3@group-D7F925094F13-FollowerState
+[grpc-default-executor-0] INFO org.apache.ratis.server.impl.RoleInfo - n3: start n3@group-D7F925094F13-FollowerState
+[n3@group-D7F925094F13-FollowerState] INFO org.apache.ratis.server.impl.FollowerState - n3@group-D7F925094F13-FollowerState was interrupted
+[grpc-default-executor-0] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13 replies to ELECTION vote request: n1<-n3#10:OK-t2-last:(t:1, i:128). Peer's state: n3@group-D7F925094F13:t2, leader=null, voted=n1, raftlog=Memoized:n3@group-D7F925094F13-SegmentedRaftLog:OPENED:c127:last(t:1, i:128), conf=conf: {index: 0, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[grpc-default-executor-0] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19)
+java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.LeaderNotReadyException: n1@group-D7F925094F13 is in LEADER state but not ready yet.
+	at java.base/java.util.concurrent.CompletableFuture.wrapInCompletionException(CompletableFuture.java:323)
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:376)
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:391)
+	at java.base/java.util.concurrent.CompletableFuture$UniAccept.tryFire(CompletableFuture.java:729)
+	at java.base/java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:531)
+	at java.base/java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2221)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.completeReplyExceptionally(GrpcClientProtocolClient.java:409)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.access$000(GrpcClientProtocolClient.java:308)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:327)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:313)
+	at org.apache.ratis.thirdparty.io.grpc.stub.ClientCalls$StreamObserverToCallListenerAdapter.onMessage(ClientCalls.java:568)
+	at org.apache.ratis.thirdparty.io.grpc.ForwardingClientCallListener.onMessage(ForwardingClientCallListener.java:33)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1MessagesAvailable.runInternal(ClientCallImpl.java:662)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1MessagesAvailable.runInContext(ClientCallImpl.java:649)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ContextRunnable.run(ContextRunnable.java:37)
+	at org.apache.ratis.thirdparty.io.grpc.internal.SerializingExecutor.run(SerializingExecutor.java:133)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+Caused by: org.apache.ratis.protocol.exceptions.LeaderNotReadyException: n1@group-D7F925094F13 is in LEADER state but not ready yet.
+	at org.apache.ratis.client.impl.ClientProtoUtils.toRaftClientReply(ClientProtoUtils.java:421)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:318)
+	... 10 more
+[timer6] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.AlreadyClosedException: client-42A37E31F7EF->n1 is closed. caused by AlreadyClosedException
+[grpc-default-executor-2] INFO io.github.lamspace.openlatch.server.raft.ReplicationGateway - leadership changed on node 3: leader=false
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: change Leader from null to n1 at term 2 for APPEND_ENTRIES, leader elected after 3222ms
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: Failed appendEntries, previous log entry (t:1, i:239) not found
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: appendEntries* reply n1<-n3#0:FAIL-t2,INCONSISTENCY,nextIndex=129,followerCommit=127,matchIndex=-1
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: Failed appendEntries, previous log entry (t:1, i:239) not found
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: appendEntries* reply n1<-n3#1:FAIL-t2,INCONSISTENCY,nextIndex=129,followerCommit=127,matchIndex=-1
+[grpc-default-executor-2] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: set configuration conf: {index: 240, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[grpc-default-executor-0] ERROR org.apache.ratis.client.impl.OrderedAsync -  client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n3@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n3@group-D7F925094F13 is not the leader, suggested leader is: n1|127.0.0.1:38209 caused by NotLeaderException
+[n3-server-thread1] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - n3@group-D7F925094F13-SegmentedRaftLogWorker: Rolling segment log-0_239 to index:239
+[n3@group-D7F925094F13-SegmentedRaftLogWorker] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - n3@group-D7F925094F13-SegmentedRaftLogWorker: Rolled log segment from /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/current/log_inprogress_0 to /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/current/log_0-239
+[n3@group-D7F925094F13-SegmentedRaftLogWorker] INFO org.apache.ratis.server.raftlog.segmented.BufferedWriteChannel - open log_inprogress_240 at position 0
+[n3@group-D7F925094F13-SegmentedRaftLogWorker] INFO org.apache.ratis.server.raftlog.segmented.SegmentedRaftLogWorker - n3@group-D7F925094F13-SegmentedRaftLogWorker: created new log segment /tmp/openlatch-roll-node-4173497287471577718/f0c77938-3a50-35c5-9d0a-d7f925094f13/current/log_inprogress_240
+[grpc-default-executor-0] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13: receive requestVote(PRE_VOTE, n2, group-D7F925094F13, 2, (t:2, i:327))
+[grpc-default-executor-0] INFO org.apache.ratis.server.impl.VoteContext - n3@group-D7F925094F13-FOLLOWER: reject PRE_VOTE from n2: this server is a follower and still has a valid leader n1 different than the candidate n2
+[grpc-default-executor-0] INFO org.apache.ratis.server.RaftServer$Division - n3@group-D7F925094F13 replies to PRE_VOTE vote request: n2<-n3#2:FAIL-t2-last:(t:2, i:399). Peer's state: n3@group-D7F925094F13:t2, leader=n1, voted=n1, raftlog=Memoized:n3@group-D7F925094F13-SegmentedRaftLog:OPENED:c398:last(t:2, i:399), conf=conf: {index: 240, cur=peers:[n1|127.0.0.1:38209, n2|127.0.0.1:32855, n3|127.0.0.1:35879]|listeners:[], old=null}
+[timer3] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 18 times in the last 5.001s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n1@group-D7F925094F13 is not the leader, suggested leader is: n2|127.0.0.1:32855 caused by NotLeaderException
+[timer5] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 58 times in the last 5.002s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n2@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19)
+java.util.concurrent.CompletionException: java.io.IOException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at java.base/java.util.concurrent.CompletableFuture.wrapInCompletionException(CompletableFuture.java:323)
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:376)
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:391)
+	at java.base/java.util.concurrent.CompletableFuture$UniAccept.tryFire(CompletableFuture.java:729)
+	at java.base/java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:531)
+	at java.base/java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2221)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.completeReplyExceptionally(GrpcClientProtocolClient.java:409)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.access$000(GrpcClientProtocolClient.java:308)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onError(GrpcClientProtocolClient.java:339)
+	at org.apache.ratis.thirdparty.io.grpc.stub.ClientCalls$StreamObserverToCallListenerAdapter.onClose(ClientCalls.java:581)
+	at org.apache.ratis.thirdparty.io.grpc.PartialForwardingClientCallListener.onClose(PartialForwardingClientCallListener.java:39)
+	at org.apache.ratis.thirdparty.io.grpc.ForwardingClientCallListener.onClose(ForwardingClientCallListener.java:23)
+	at org.apache.ratis.grpc.metrics.intercept.client.MetricClientCallListener.onClose(MetricClientCallListener.java:47)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener$3.run(DelayedClientCall.java:553)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.delayOrExecute(DelayedClientCall.java:482)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.onClose(DelayedClientCall.java:537)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl.closeObserver(ClientCallImpl.java:566)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl.access$100(ClientCallImpl.java:72)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1StreamClosed.runInternal(ClientCallImpl.java:734)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1StreamClosed.runInContext(ClientCallImpl.java:715)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ContextRunnable.run(ContextRunnable.java:37)
+	at org.apache.ratis.thirdparty.io.grpc.internal.SerializingExecutor.run(SerializingExecutor.java:133)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+Caused by: java.io.IOException: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at org.apache.ratis.grpc.GrpcUtil.unwrapException(GrpcUtil.java:117)
+	at org.apache.ratis.grpc.GrpcUtil.unwrapIOException(GrpcUtil.java:179)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onError(GrpcClientProtocolClient.java:338)
+	... 16 more
+Caused by: org.apache.ratis.thirdparty.io.grpc.StatusRuntimeException: UNAVAILABLE: io exception
+	at org.apache.ratis.thirdparty.io.grpc.Status.asRuntimeException(Status.java:532)
+	... 16 more
+Caused by: org.apache.ratis.thirdparty.io.netty.channel.AbstractChannel$AnnotatedConnectException: finishConnect(..) failed with error(-111): 连接被拒绝: /127.0.0.1:32855
+Caused by: java.net.ConnectException: finishConnect(..) failed with error(-111): 连接被拒绝
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Errors.newConnectException0(Errors.java:166)
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Errors.handleConnectErrno(Errors.java:131)
+	at org.apache.ratis.thirdparty.io.netty.channel.unix.Socket.finishConnect(Socket.java:359)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.doFinishConnect(AbstractEpollChannel.java:715)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.finishConnect(AbstractEpollChannel.java:692)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.AbstractEpollChannel$AbstractEpollUnsafe.epollOutReady(AbstractEpollChannel.java:567)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.EpollEventLoop.processReady(EpollEventLoop.java:491)
+	at org.apache.ratis.thirdparty.io.netty.channel.epoll.EpollEventLoop.run(EpollEventLoop.java:399)
+	at org.apache.ratis.thirdparty.io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:1007)
+	at org.apache.ratis.thirdparty.io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+	at org.apache.ratis.thirdparty.io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+[timer7] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 49 times in the last 5.000s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n3@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n3@group-D7F925094F13 is not the leader caused by NotLeaderException
+[timer6] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 30 times in the last 5.001s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n1@group-D7F925094F13 is not the leader caused by NotLeaderException
+[timer5] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 5 times in the last 5.001s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19)
+java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.LeaderNotReadyException: n1@group-D7F925094F13 is in LEADER state but not ready yet.
+	at java.base/java.util.concurrent.CompletableFuture.wrapInCompletionException(CompletableFuture.java:323)
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:376)
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:391)
+	at java.base/java.util.concurrent.CompletableFuture$UniAccept.tryFire(CompletableFuture.java:729)
+	at java.base/java.util.concurrent.CompletableFuture.postComplete(CompletableFuture.java:531)
+	at java.base/java.util.concurrent.CompletableFuture.completeExceptionally(CompletableFuture.java:2221)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.completeReplyExceptionally(GrpcClientProtocolClient.java:409)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers.access$000(GrpcClientProtocolClient.java:308)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:327)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:313)
+	at org.apache.ratis.thirdparty.io.grpc.stub.ClientCalls$StreamObserverToCallListenerAdapter.onMessage(ClientCalls.java:568)
+	at org.apache.ratis.thirdparty.io.grpc.ForwardingClientCallListener.onMessage(ForwardingClientCallListener.java:33)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.deliverMessage(DelayedClientCall.java:529)
+	at org.apache.ratis.thirdparty.io.grpc.internal.DelayedClientCall$DelayedListener.onMessage(DelayedClientCall.java:513)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1MessagesAvailable.runInternal(ClientCallImpl.java:662)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ClientCallImpl$ClientStreamListenerImpl$1MessagesAvailable.runInContext(ClientCallImpl.java:649)
+	at org.apache.ratis.thirdparty.io.grpc.internal.ContextRunnable.run(ContextRunnable.java:37)
+	at org.apache.ratis.thirdparty.io.grpc.internal.SerializingExecutor.run(SerializingExecutor.java:133)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+Caused by: org.apache.ratis.protocol.exceptions.LeaderNotReadyException: n1@group-D7F925094F13 is in LEADER state but not ready yet.
+	at org.apache.ratis.client.impl.ClientProtoUtils.toRaftClientReply(ClientProtoUtils.java:421)
+	at org.apache.ratis.grpc.client.GrpcClientProtocolClient$AsyncStreamObservers$1.onNext(GrpcClientProtocolClient.java:318)
+	... 12 more
+[timer7] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 5 times in the last 5.001s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n1@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.AlreadyClosedException: client-42A37E31F7EF->n1 is closed. caused by AlreadyClosedException
+[timer7] ERROR org.apache.ratis.client.impl.OrderedAsync -  (Repeated 3 times in the last 5.000s) client-42A37E31F7EF: Failed* RaftClientRequest:client-42A37E31F7EF->n3@group-D7F925094F13, cid=6, seq=2*, RW, Message:0801100118f69c85a387...(size=19) due to java.util.concurrent.CompletionException: org.apache.ratis.protocol.exceptions.NotLeaderException: Server n3@group-D7F925094F13 is not the leader, suggested leader is: n1|127.0.0.1:38209 caused by NotLeaderException

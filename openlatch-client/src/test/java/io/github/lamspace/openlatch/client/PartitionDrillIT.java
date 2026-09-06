@@ -52,9 +52,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <ol>
  *   <li>分区中多数派（n1/n2）照常服务：可授予、可释放、摘要收敛；</li>
  *   <li>分区中少数派节点 n3 收写的全部请求失败——合法协议序（HELLO 建本地
- *       会话后直发，S3 规格允许 Follower 握手，HELLO 成功不构成受理证据）下：
+ *       会话后直发，HELLO 回 OK 仅经 SESSION_OPEN 应用回执道，其可达本身
+ *       即证当轮 n3→Leader 复制面未被切断；HELLO 成功不构成受理证据）下：
  *       ACQUIRE ×4 判 NOT_LEADER（n3 无从当选）；RELEASE 携多数派真实持有
- *       凭证判非 OK（转发道够不到 Leader）；同键不双授；</li>
+ *       凭证判非 OK（码形二选一：复制面可达→应用点归属裁决 NOT_HELD；
+ *       不可达→转发失败 NOT_LEADER 可重试——皆非授予/释放，§11-3 均成立）；
+ *       同键不双授；</li>
  *   <li>锁存活于分区：Leader 侧以同凭证释放成功（少数派未夺锁、未误释放）；</li>
  *   <li>撤除分区后自动收敛：n3 追平多数派，digest 一致，写入恢复。</li>
  * </ol>
@@ -179,11 +182,14 @@ class PartitionDrillIT {
             release(client, majorityGrant, "partition-live");
 
             // 少数派（n3）收写全部失败（不经 SDK——客户端会沿 hint 改道多数派，
-            // 那是产品正确行为而非"少数派受理"）。判据口径（第二轮真跑修正）：
-            // HELLO 在少数派节点可完成本地握手（S3 规格允许 Follower 握手，会话
-            // 登记的复制提交在孤立窗内不落地），故合法协议序可达角色门——
-            // ① ACQUIRE 判 NOT_LEADER；② RELEASE 持真凭证判非 OK（转发道够不到
-            // Leader），且 Leader 侧同凭证可正常释放（锁不随分区被夺）。
+            // 那是产品正确行为而非"少数派受理"）。判据口径（本 change 任务 4.1
+            // 修正归因，见 observations-not-held-code-shape.md）：HELLO 回 OK 只
+            // 可能出自 SESSION_OPEN 的应用回执道（无本地握手快速道），实测
+            // "OK:NOT_HELD" 即证当轮 n3→Leader 复制面未被隔离规则切断，RELEASE
+            // 在应用点被判归属不符——若复制面真被切断，该道回 NOT_LEADER（可
+            // 重试）。两形态皆非授予/释放，§11-3 判定不依赖此区分——
+            // ① ACQUIRE 判 NOT_LEADER；② RELEASE 持真凭证判非 OK，且 Leader 侧
+            // 同凭证可正常释放（锁不随分区被夺）。
             String[] errs = new String[4];
             for (int i = 0; i < errs.length; i++) {
                 errs[i] = sessionedAcquireStatus(minority, "minority-raw");
@@ -589,7 +595,7 @@ class PartitionDrillIT {
                 + "| 少数派 n3 会话化 ACQUIRE ×4 | "
                 + (errs.length > 0 ? String.join("; ", errs) : "(无样本)") + " | 全 NOT_LEADER ✅ |\n"
                 + "| 少数派 n3 RELEASE 道（多数派真持有凭证） | " + relOnMinority
-                + " | 非 OK（转发道失败）✅ |\n"
+                + " | 非 OK（应用点归属/转发道可重试，两形态皆拒）✅ |\n"
                 + "| Leader 侧同凭证释放 | OK | 锁存活于分区、未被夺 ✅ |\n"
                 + "| 同键双授 | 无（多数派侧可重授、n3 无法受理） | 无双主授予 ✅ |\n"
                 + "| 撤分区恢复 | 自动收敛、写入恢复 | ✅ |\n\n",

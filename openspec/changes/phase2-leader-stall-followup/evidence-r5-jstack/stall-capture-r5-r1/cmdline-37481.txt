@@ -1,0 +1,1 @@
+java -Dopenlatch.config=/tmp/openlatch-roll13016527092575089455.properties -jar /home/lam/workspace/OpenLatch/openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar 

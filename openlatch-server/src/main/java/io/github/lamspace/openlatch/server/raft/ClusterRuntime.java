@@ -31,8 +31,8 @@ import java.io.IOException;
  *
  * <p><b>构造顺序契约</b>：{@link #create} 完成全部装配并启动 Raft 服务——
  * 调用方 MUST 在开放客户端接入端口之前完成（spec"先组网后开端口"）；
- * {@link #close} 逆序：在途回执以可重试错误终结 → 摘除探针/扫描线程 →
- * 关停 Raft 服务。
+ * {@link #close} 逆序：停摆看门狗先停（杜绝关停竞态中让位/退出）→ 在途回执以
+ * 可重试错误终结 → 摘除探针/扫描线程 → 关停 Raft 服务。
  *
  * <p><b>线程模型</b>：装配/关停由服务器启动/关停线程独占；创建后各组件
  * 并发性遵循各自类注释（网关在应用线程回调，探针在守护线程）。
@@ -56,22 +56,25 @@ public final class ClusterRuntime {
     private final ClusterRequestHandler requestHandler;
     /** Leader 提示单源视图（s3 design D3：HELLO/NOT_LEADER/CLUSTER_VIEW 共用）。 */
     private final LeaderTracker leaderTracker;
+    /** 复制停摆自愈看门狗（T2/2B.1，design D2/D3/D6：让位一次→超时升级重启）。 */
+    private final ReplicationStallWatchdog stallWatchdog;
 
     /**
      * 私有装配构造（仅 {@link #create} 调用）。
      *
-     * @param subsystem          Raft 子系统
-     * @param waitQueue          等待队列
-     * @param gateway            复制网关
+     * @param subsystem      Raft 子系统
+     * @param waitQueue      等待队列
+     * @param gateway        复制网关
      * @param sessionCoordinator 会话协调器
-     * @param expiryDriver       到期驱动
-     * @param requestHandler     写请求处理器
-     * @param leaderTracker      Leader 提示视图
+     * @param expiryDriver   到期驱动
+     * @param requestHandler 写请求处理器
+     * @param leaderTracker  Leader 提示视图
+     * @param stallWatchdog  复制停摆自愈看门狗
      */
     private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
                            ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
                            LeaseExpiryDriver expiryDriver, ClusterRequestHandler requestHandler,
-                           LeaderTracker leaderTracker) {
+                           LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
@@ -79,6 +82,7 @@ public final class ClusterRuntime {
         this.expiryDriver = expiryDriver;
         this.requestHandler = requestHandler;
         this.leaderTracker = leaderTracker;
+        this.stallWatchdog = stallWatchdog;
     }
 
     /**
@@ -109,9 +113,12 @@ public final class ClusterRuntime {
         expiryDriver.start();
         ClusterRequestHandler handler =
                 new ClusterRequestHandler(gateway, subsystem.core(), waitQueue, config, leaderTracker);
+        // 复制停摆自愈看门狗（T2）：装配末位——全部判据通道（division/gateway/
+        // client 池）此时均已就绪；阈值由 election-timeout 折算钉死（D6）。
+        ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
-                expiryDriver, handler, leaderTracker);
+                expiryDriver, handler, leaderTracker, stallWatchdog);
     }
 
     /**
@@ -124,9 +131,11 @@ public final class ClusterRuntime {
     }
 
     /**
-     * 逆序关停：在途可重试终结 → 探针/扫描线程 → Raft 服务。幂等。
+     * 逆序关停：停摆看门狗（杜绝关停竞态中触发自愈动作）→ 在途可重试终结 →
+     * 探针/扫描线程 → Raft 服务。幂等。
      */
     public void close() {
+        stallWatchdog.close();
         gateway.close();
         sessionCoordinator.close();
         expiryDriver.close();

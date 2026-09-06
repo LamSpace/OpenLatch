@@ -101,6 +101,9 @@ message ReleaseRequest {
 }
 
 message ReleaseResponse {
+  // 转发道码形（v2）：INVALID_TOKEN/NOT_HELD 仅产生于条目经多数派提交后的应用点
+  // 归属裁决（权威判定；收到即"该会话确未持有该锁"的事实，非改道信号）；
+  // 转发够不到当值 Leader 恒回 NOT_LEADER（可重试码，随附提示，MUST NOT 读作锁已丢）。
   StatusCode status          = 1;  // OK / INVALID_TOKEN / NOT_HELD / NOT_LEADER(v2，仅转发失败路径)
   bool       fully_released  = 2;  // 可重入计数归零时为 true
   int64      leader_node_id  = 3;  // v2：仅 NOT_LEADER 时随附；Leader nodeId，-1=本节点暂不知晓 Leader
@@ -114,6 +117,8 @@ message LeaseRenewRequest {
 }
 
 message LeaseRenewResponse {
+  // 转发道码形（v2）：同 ReleaseResponse——INVALID_TOKEN/NOT_HELD 仅出自多数派
+  // 提交后的应用点权威裁决；转发失败恒 NOT_LEADER（可重试，非锁失效判定）。
   StatusCode status              = 1;  // OK / INVALID_TOKEN / NOT_HELD / NOT_LEADER(v2，仅转发失败路径)
   int64      lease_expires_at_ms = 2;
   int64      leader_node_id      = 3;  // v2：仅 NOT_LEADER 时随附；Leader nodeId，-1=本节点暂不知晓 Leader

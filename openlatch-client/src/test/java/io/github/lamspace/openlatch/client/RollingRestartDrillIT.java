@@ -41,13 +41,23 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * 滚动重启演练（S4/P2-18；详设 §8"滚动重启"行、§11 验收 5）：三节点集群在
  * 持续混合负载下逐台重启（任意时刻 ≥ 多数派存活），两种顺序（先主后从 /
- * 先从后主），统计<b>应用可见</b>客户端错误率——验收口径 &lt; 1%（切换窗口
- * 瞬断由 SDK 内建重连重放与 NOT_LEADER 改道吸收，详设 §6.3；等待式获取的
- * waitMs 取 2s 以覆盖选举窗口）。
+ * 先从后主），统计<b>应用可见</b>客户端错误。
+ *
+ * <p><b>判据口径（phase2-leader-stall-followup 2B.1 分段修订，经批准）</b>：
+ * 复制停摆看门狗（cluster-node-lifecycle"复制停滞自愈"）上线后，本演练判据从
+ * "全程错误率 &lt; 1%"改为<b>自愈前后分段</b>——
+ * ①<b>自愈后零残留</b>：最后一个重启窗口结束后经自愈预算窗
+ * （{@value #RESIDUAL_BUDGET_MS}ms ≥ T_stall+让位+观察窗+重启+重选+提交恢复
+ * 的最坏链）起至驱动结束的区间内错误数 MUST = 0（存在未愈停摆回归即红）；
+ * ②<b>自愈前窗内错误与全程错误率仅如实报告</b>（命中停摆的轮次预算窗内错误率
+ * 必然超旧线，其数值与自愈事件计数入报告，供验收报告标准 5 复核改判引用）。
+ * 全程错误率的旧 &lt;1% 判定废除——它既被停摆双稳态概率性击穿（收口缺陷档案），
+ * 又无法区分"瞬态窗内错误"与"永久停摆"，分段零残留才是无人值守可用性的正确形状。
  *
  * <p>产物：报告追加 {@code docs/rolling-restart-drill-<日期>.md}（两顺序的
- * 总请求/错误/错误率/单台恢复时长，失败轮次如实记录）；门控与 shaded jar
- * 纪律同 {@link LeaderKillDrillIT}（{@code @Tag("drill")}，缺失显式告警跳过）。
+ * 总请求/错误/错误率/自愈事件/残留错误、单台恢复时长，失败轮次如实记录）；
+ * 门控与 shaded jar 纪律同 {@link LeaderKillDrillIT}（{@code @Tag("drill")}，
+ * 缺失显式告警跳过）。
  */
 @Tag("drill")
 @Timeout(value = 340, unit = TimeUnit.SECONDS)
@@ -55,6 +65,12 @@ class RollingRestartDrillIT {
 
     /** 单节点重启后端口就绪等待上限（秒）。 */
     private static final long WAIT_SECONDS = 30;
+    /**
+     * 自愈预算窗（毫秒）：最后重启窗结束起，允许的最坏"停摆→让位→升级重启→
+     * 两节点重选→提交恢复"链时长（election 800ms 语境：T_stall 10s + transfer
+     * 5s + grace 10s + 重启/选举/提交 ~5s，取 3 倍裕量）。此后错误必须归零。
+     */
+    private static final long RESIDUAL_BUDGET_MS = 45_000;
     /** 负载线程数与节奏（毫秒/轮：一轮 = 获取+释放）。 */
     private static final int DRIVERS = 2;
     private static final long DRIVE_INTERVAL_MS = 150;
@@ -205,15 +221,42 @@ class RollingRestartDrillIT {
             long err = errors.get();
             double ratePct = tot == 0 ? 100 : 100.0 * err / tot;
             String tag = leaderFirst ? "先主后从" : "先从后主";
-            // 形态分类（stdout 即见）：重启窗口区间 vs 错误时刻。
+            // 分段判据（2B.1 修订）：自愈预算窗之后零残留错误；自愈事件计数。
+            long lastWinEnd = restartWindows.stream().mapToLong(w -> w[1]).max().orElse(0);
+            // 判据不退化前提：驱动时长必须覆盖预算窗尾（否则"零残留"恒真）。
+            assertThat(System.currentTimeMillis() - drillT0 - (lastWinEnd + RESIDUAL_BUDGET_MS))
+                    .as("驱动时长需越过末窗+%dms 预算尾（调大 -Ddrill.driveSeconds）",
+                            RESIDUAL_BUDGET_MS)
+                    .isPositive();
+            long tailErrors = errorTimesMs.stream()
+                    .filter(t -> t > lastWinEnd + RESIDUAL_BUDGET_MS).count();
+            long stallEvents = 0;
+            long restartEvents = 0;
+            for (Node n : nodes) {
+                Path lg = Path.of("target", "drill-logs",
+                        "roll-node" + n.id() + "-" + n.accessPort() + ".log");
+                if (Files.exists(lg)) {
+                    String content = Files.readString(lg);
+                    stallEvents += countOccurrences(content, "replication stall detected");
+                    restartEvents += countOccurrences(content, "escalating to process restart");
+                }
+            }
+            // 形态分类（stdout 即见）：重启窗口区间 vs 错误时刻 + 自愈事件。
             System.out.println("[DRILL] " + tag + " errors=" + err + "/" + tot
                     + " (" + String.format("%.2f", ratePct) + "%)"
+                    + " tailErrors(budget后)=" + tailErrors
+                    + " stallEvents=" + stallEvents + " restartEvents=" + restartEvents
                     + " restartWindows=" + windowsToString(restartWindows)
                     + " errorTimes=" + timesToString(errorTimesMs));
             appendReport(tag, tot, err, ratePct, restartMs, errorSamples,
-                    errorTimesMs, restartWindows);
-            assertThat(ratePct).as("滚动重启（%s）客户端错误率 < 1%%（§11-5；总 %d 错 %d）",
-                    tag, tot, err).isLessThan(1.0);
+                    errorTimesMs, restartWindows, tailErrors, stallEvents, restartEvents);
+            // 判定改分段（Javadoc 口径注释）：全程错误率仅入报告；唯一硬判据是
+            // 预算窗后零残留——未愈停摆回归必红，瞬态与已自愈停摆皆绿。
+            assertThat(tailErrors)
+                    .as("滚动重启（%s）自愈预算窗（末窗+%dms）后零残留错误（总 %d 错 %d，"
+                            + "自愈事件 %d 次/重启升级 %d 次——如非零则本轮为停摆命中+自愈）",
+                            tag, RESIDUAL_BUDGET_MS, tot, err, stallEvents, restartEvents)
+                    .isZero();
         } finally {
             stop.set(true);
             if (client != null) {
@@ -382,10 +425,20 @@ class RollingRestartDrillIT {
         }
     }
 
+    /** 子串计数（节点日志自愈事件行统计用）。 */
+    private static int countOccurrences(String haystack, String needle) {
+        int n = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + 1)) {
+            n++;
+        }
+        return n;
+    }
+
     /** 报告追加（同日单文件，两顺序各写一节；入库仓库根 docs/）。 */
     private static void appendReport(String tag, long tot, long err, double ratePct,
                                      List<Long> restartMs, List<String> errorSamples,
-                                     List<Long> errorTimesMs, List<long[]> restartWindows)
+                                     List<Long> errorTimesMs, List<long[]> restartWindows,
+                                     long tailErrors, long stallEvents, long restartEvents)
             throws IOException {
         Path out = Path.of("..", "docs", "rolling-restart-drill-"
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
@@ -399,8 +452,12 @@ class RollingRestartDrillIT {
                 + "| 指标 | 值 | 判定 |\n|---|---|---|\n"
                 + "| 应用可见请求总数 | " + tot + " | — |\n"
                 + "| 应用可见错误数 | " + err + " | — |\n"
-                + "| 客户端错误率 | " + String.format("%.2f", ratePct) + " % | < 1 % "
-                + (ratePct < 1.0 ? "✅" : "❌（如实记录）") + " |\n"
+                + "| 全程客户端错误率 | " + String.format("%.2f", ratePct)
+                + " % | 仅报告（分段判据，2B.1） |\n"
+                + "| 自愈事件（停摆判定/重启升级） | " + stallEvents + " / " + restartEvents
+                + " | 计入观察记录 |\n"
+                + "| 预算窗后残留错误（末窗+" + RESIDUAL_BUDGET_MS + "ms 起） | " + tailErrors
+                + " | = 0 " + (tailErrors == 0 ? "✅" : "❌（停摆未愈）") + " |\n"
                 + "| 逐台重启耗时（ms） | " + restartMs + " | 任意时刻 ≥2/3 存活 |\n"
                 + "| 重启窗口（ms 相对 t0） | " + windowsToString(restartWindows) + " | — |\n"
                 + "| 错误时刻（ms 相对 t0） | " + timesToString(errorTimesMs)

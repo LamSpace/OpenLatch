@@ -151,6 +151,11 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <!-- 故障注入演练（@Tag("drill")）默认排除，-Pdrill 时纳入
+                         （与 openlatch-client 同纪律；phase2-leader-stall-followup T1） -->
+                    <excludedGroups>drill</excludedGroups>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>
@@ -162,4 +167,23 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 演练 profile：仅运行 @Tag("drill") 用例（in-JVM 停摆复现采样器等），
+             与 openlatch-client 的同名 profile 同纪律（combine.self 覆盖默认排除） -->
+        <profile>
+            <id>drill</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <groups>drill</groups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

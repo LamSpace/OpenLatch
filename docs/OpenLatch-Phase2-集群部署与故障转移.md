@@ -15,7 +15,7 @@
 推荐 3 节点（容忍 1 节点故障）或 5 节点（容忍 2 节点）。每个节点是**同一份二进制**，一个 Raft 副本 + 一套完整客户端接入层。客户端可连接**任意节点**：
 
 - 写请求（ACQUIRE）必须由 Leader 处理；连到 Follower 时服务端回 `NOT_LEADER` + Leader 提示，v2 客户端自动改连；
-- 存量锁的释放/续租（RELEASE/RENEW）落在任意存活节点皆可——Follower 会经内部通道转发给当值 Leader 复制执行（详见 §3）；
+- 存量锁的释放/续租（RELEASE/RENEW）落在任意存活节点皆可——Follower 会经内部通道转发给当值 Leader 复制执行（详见 §3）。码形不相交：`NOT_LEADER` 只出自转发/角色道（可重试，随附提示改道），**不是**锁失效判定；`NOT_HELD`/`INVALID_TOKEN` 只产生于条目经多数派提交后在应用点的权威归属裁决——收到即该会话确未持有该锁；
 - HELLO / PING / CLUSTER_VIEW 任意节点可应答。
 
 ## 2. 服务端配置
@@ -158,10 +158,13 @@ mvn -s <settings> -pl openlatch-server -am package
 
 | 演练 | 命令 | 报告 / 判据 |
 |---|---|---|
-| 滚动重启（两顺序，客户端错误率 <1%） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=RollingRestartDrillIT` | `docs/rolling-restart-drill-<日期>.md`（实测 先从后主 0.80% / 先主后从 0.00%，§11-5；先主后从序存在存量 P1 停摆风险，见下方运维推荐序） |
+| 滚动重启（两顺序；判据 2B.1 起分段：自愈预算窗后零残留错误，全程错误率仅报告） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=RollingRestartDrillIT` | `docs/rolling-restart-drill-<日期>.md`（§11-5；命中停摆的轮次自愈前错误率超旧线属预期，报告含自愈事件计数，见下方运维推荐序与自愈说明） |
 | 网络分区（netns 真分区，需 passwordless sudo） | `mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=PartitionDrillIT` | `docs/partition-drill-<日期>.md`；无特权环境显式跳过（辅轨 `MinorityQuorumTest` 提供近似判据，§11-3；主轨已于 2026-09-06 真分区全绿：少数派授予/释放道全拒、锁存活、撤分区自动收敛） |
 | 混沌（随机杀/重启 + 共享 key 竞争不变式） | `mvn -s <settings> -pl openlatch-client test -Dtest=ClientChaosIT` | 零双授冲突 / 停载后锁表空 / 副本摘要收敛（§11-6；常规回归，短租约有界窗口） |
 
 进程级杀 Leader 计时演练（P2-14，§11-2）见 §5。
 
-**运维推荐序（滚动重启，v1.5 收口补录）**：逐台重启请按**"先从不先主"**顺序（先重启全部 Follower，最后重启 Leader，令其在两节点多数派之上从容重加入）。"先主后从"序存在存量 Ratis 3.3.0 缺陷风险：旧 Leader 带脏条目重启归群的时序下，新 Leader 任期提交可能停摆（表现为写请求持续被拒 >200 秒不自愈、复制组无错误日志）。故障表征与差分归因、跟进计划见 `openspec/changes/phase2-release-closure/defects/leader-replication-stall-ratis-3.3.0.md`。
+**复制停摆与自愈（滚动重启，v1.6 修订）**：存量 Ratis 3.3.0 缺陷——滚动重启时序下新 Leader 任期提交可能永久冻结（写面 `LeaderNotReady` 持续被拒、复制组无错误日志，机理与取证见 `openspec/changes/phase2-leader-stall-followup/observations-leader-stall-rootcause.md` 与收口档案 `openspec/changes/archive/2026-09-06-phase2-release-closure/defects/leader-replication-stall-ratis-3.3.0.md`）。
+
+- **产品侧自愈已上线（`cluster-node-lifecycle`"复制停滞自愈"）**：Leader 任期超 `T_stall = max(10s, 5×election-timeout)` 且 commitIndex 连续 3 个采样周期零推进 → 先向日志最新的健康对侧让位一次；观察窗内仍冻结 → 进程以退出码 1 自杀退出，**交外部 supervisor 拉起**（以纯 follower 身份归群为确定复位路径）。日志特征行 `replication stall detected` / `escalating to process restart`；重启带 5 分钟进程内冷却，supervisor 侧请配置 ≥ 冷却窗的重启退避。**无 supervisor 的部署只获得让位段自愈与告警**，升级段需人工重启该节点。
+- **运维推荐序降级说明（v1.6）**："先从不先主"（v1.5 补录）经 `phase2-leader-stall-followup` 重放复核实测**两序皆可停**（14 测试 3 命中，含先从后主序 1 次）——该顺序仅降概率、非免疫；无人值守可用性以看门狗自愈承载。
