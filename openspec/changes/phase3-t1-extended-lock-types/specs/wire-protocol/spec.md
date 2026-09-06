@@ -16,13 +16,13 @@
 
 #### Scenario: 非存在屏障的纯加入被拒
 
-- **WHEN** 对不存在（或已归零回收）的 LATCH key 发送 `total = 0` 的 LATCH_AWAIT 或 LATCH_COUNT_DOWN
+- **WHEN** 对从未定型的 LATCH key 发送 `total = 0` 的 LATCH_AWAIT 或 LATCH_COUNT_DOWN
 - **THEN** 服务端以 `INVALID_REQUEST` 拒绝（纯加入与无断言扣减 MUST NOT 隐式创建屏障）
 
 #### Scenario: 纯初始化调用
 
 - **WHEN** 对不存在的屏障发送 `count = 0, total = n` 的 LATCH_COUNT_DOWN
-- **THEN** 以 `n` 创建屏障并返回 `remaining = n`；对已存在且定型值相符的屏障，同一调用为空操作返回当前剩余
+- **THEN** 以 `n` 创建屏障并返回 `remaining = n`；对已存在且定型值相符的屏障，同一调用为空操作返回当前剩余（屏障条目自定型起存续至节点重启，不随归零或参与者散尽回收）
 
 ## MODIFIED Requirements
 

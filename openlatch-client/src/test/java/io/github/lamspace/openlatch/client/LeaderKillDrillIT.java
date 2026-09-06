@@ -214,6 +214,144 @@ class LeaderKillDrillIT {
     }
 
     /**
+     * 场景 C（Phase 3 T1/P3-07）：kill -9 当值 Leader——Semaphore 许可池与
+     * Latch 计数为复制状态，切换后可见性/扣减/放行全链路在新 Leader 上收敛；
+     * 死主车道上的旧客户端经重连改道后归还许可无泄漏。
+     */
+    @Test
+    void killLeaderPreservesExtendedPrimitiveState() throws Exception {
+        Path jar = requireServerJar();
+        List<Node> nodes = startCluster(jar);
+        OpenLatchClient a = null;
+        OpenLatchClient b = null;
+        try {
+            Node leader = waitLeader(nodes);
+            a = OpenLatchClient.builder()
+                    .seeds(nodes.stream().map(n -> "127.0.0.1:" + n.accessPort()).toList())
+                    .requestTimeout(Duration.ofSeconds(5))
+                    .reconnectInitialBackoff(Duration.ofMillis(100))
+                    .reconnectMaxBackoff(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(20))
+                    .build();
+            b = OpenLatchClient.builder()
+                    .seeds(nodes.stream().map(n -> "127.0.0.1:" + n.accessPort()).toList())
+                    .requestTimeout(Duration.ofSeconds(5))
+                    .defaultWaitTimeout(Duration.ofSeconds(20))
+                    .build();
+            a.connectAsync().get(WAIT_SECONDS, TimeUnit.SECONDS);
+            b.connectAsync().get(WAIT_SECONDS, TimeUnit.SECONDS);
+
+            OSemaphore sa = a.newSemaphore("drill-sem", 3);
+            sa.acquire(2);                       // 池剩 1（复制态）
+            OCountDownLatch la = a.newCountDownLatch("drill-latch", 2);
+            assertThat(la.init()).isEqualTo(2);
+            assertThat(la.countDown()).isEqualTo(1);
+
+            logRoles("C:kill前", nodes);
+            leader.process().destroyForcibly();
+            leader.process().waitFor(10, TimeUnit.SECONDS);
+            waitLeader(nodes);                   // 新 Leader 当选
+            awaitActive(b);                      // B 的 home 可能是死主：等重连收敛
+            awaitActive(a);
+
+            // 许可池存续于复制状态：A 的 2 许可在 A 会话被失联清理前仍占池，
+            // 清理归还后 B 可取 2——以"最终可取 2"为收敛判据（不赌清理时序）。
+            OSemaphore sb = b.newSemaphore("drill-sem", 3);
+            awaitSemAvailable(sb, 2, 30_000);
+
+            // 屏障计数存续：剩 1 → B 归零（幂等重试容忍瞬断）→ 双方 await 即过。
+            assertThat(retryCountDown(b.newCountDownLatch("drill-latch", 2))).isZero();
+            assertThat(b.newCountDownLatch("drill-latch").await(15, TimeUnit.SECONDS)).isTrue();
+            assertThat(a.newCountDownLatch("drill-latch").await(15, TimeUnit.SECONDS))
+                    .as("死主客户端改道后 await 放行").isTrue();
+
+            // 归还不泄漏：B 的 2 归还（瞬断重试；旧会话条目丢失视作已回收）后
+            // 满量 3 可再取。
+            releaseEventually(sb, 2);
+            awaitSemAvailable(b.newSemaphore("drill-sem", 3), 3, 20_000);
+            releaseEventually(b.newSemaphore("drill-sem", 3), 3);
+
+            appendReport("## 场景 C：kill -9 Leader × 扩展原语存续\n\n"
+                    + "| 指标 | 判定 |\n|---|---|\n"
+                    + "| 切换后许可池收敛 | 会话清理归还可得 ✅ |\n"
+                    + "| 切换后屏障计数存续 | 1→0→await 放行 ✅ |\n"
+                    + "| 归还无泄漏 | 满量可得 ✅ |\n\n");
+        } finally {
+            if (a != null) {
+                a.shutdown();
+            }
+            if (b != null) {
+                b.shutdown();
+            }
+            for (Node n : nodes) {
+                if (n.process().isAlive()) {
+                    n.process().destroyForcibly();
+                }
+            }
+        }
+    }
+
+    /** 等待客户端连接活跃（kill 后自动重连收敛）。 */
+    private static void awaitActive(OpenLatchClient client) throws Exception {
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline && !client.isActive()) {
+            Thread.sleep(100);
+        }
+        assertThat(client.isActive()).as("客户端重连活跃").isTrue();
+    }
+
+    /** 许可获取收敛环：瞬断与"暂不可得"均容忍，直至获授或预算耗尽。 */
+    private static void awaitSemAvailable(OSemaphore sem, int permits, long budgetMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                if (sem.tryAcquire(permits)) {
+                    return;
+                }
+            } catch (OpenLatchException transient0) {
+                // 重连/改道窗：瞬断重试。
+            }
+            Thread.sleep(250);
+        }
+        throw new AssertionError("sem permits " + permits + " not acquired within budget");
+    }
+
+    /** 许可归还收敛环：瞬断重试；本地条目已随失锁裁决移除视作达成。 */
+    private static void releaseEventually(OSemaphore sem, int permits) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 20_000;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                sem.release(permits);
+                return;
+            } catch (IllegalMonitorStateException alreadyGone) {
+                return; // 旧会话条目已被失锁裁决移除：池由服务端清理归还
+            } catch (OpenLatchException transient0) {
+                Thread.sleep(250);
+            }
+        }
+        throw new AssertionError("release budget exhausted");
+    }
+
+    /** countDown 重试环（结果不可知语义下仅容忍传输类异常；屏障幂等归零使重复扣减无副作用）。 */
+    private static long retryCountDown(OCountDownLatch latch) {
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return latch.countDown();
+            } catch (OpenLatchException transient0) { // 含超时/不可用子类
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(ie);
+                }
+            }
+        }
+        throw new AssertionError("countDown budget exhausted");
+    }
+
+    /**
      * 杀点前角色快照：逐节点 HELLO 自报 hint，供失败复盘（判杀对象角色、
      * 定位提示漂移；打印走 stdout 入 failsafe 日志）。
      */

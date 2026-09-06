@@ -36,6 +36,7 @@ import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
 import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
+import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
@@ -158,6 +159,7 @@ public final class LockStateMachineCore {
                     case LOCK_RELEASE_ENTRY -> applyRelease(entry);
                     case LEASE_RENEW_ENTRY -> applyRenew(entry);
                     case LEASE_EXPIRE_ENTRY -> applyExpire(entry, t);
+                    case LATCH_COUNT_DOWN_ENTRY -> applyLatchCountDown(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -261,7 +263,7 @@ public final class LockStateMachineCore {
                         ? RequestDispatcher.normalizedPermits(req.getPermits()) : 1;
                 shadow.grantDelta(p.getSessionId(), req.getThreadId(), req.getKey(),
                         req.getLockType().getNumber(), r.leaseToken(), r.grantedLeaseMs(), expiresAt,
-                        holderDelta);
+                        holderDelta, req.getPermitsTotal());
                 yield ApplyResult.newBuilder()
                         .setStatus(ApplyStatus.OK)
                         .setLeaseToken(r.leaseToken())
@@ -271,6 +273,9 @@ public final class LockStateMachineCore {
             }
             case DENIED -> ApplyResult.newBuilder().setStatus(ApplyStatus.DENIED).build();
             case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            // v3 形状拒绝（家族误用/总量断言）：参数非法回执，P3-04 码形接正。
+            case REJECT_TYPE_MISMATCH, REJECT_SEMAPHORE_TOTAL, REJECT_LATCH_TOTAL ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
             // 引擎集群路径 queueIfBusy=false 且恒无等待项：QUEUED/QUEUE_FULL 不可达，
             // key 非法已由接入预检拒绝——抵达此处即说明上游校验被绕过，显式失败。
             default -> error("unreachable acquire outcome " + r.outcome(), entry);
@@ -304,9 +309,8 @@ public final class LockStateMachineCore {
             case NOT_HELD -> ApplyStatus.NOT_HELD;
             case INVALID_TOKEN -> ApplyStatus.INVALID_TOKEN;
             case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
-            // Semaphore 通道 P3-03 前不存在，此码在集群路径不可达；出现即
-            // 说明状态含未支持条目，按内部错误兜底（P3-03 随回执码形一并接正）。
-            case OVER_RELEASE -> ApplyStatus.INTERNAL_ERROR;
+            // 超额归还：参数与持有不符，回执 INVALID_REQUEST（P3-07 码形接正）。
+            case OVER_RELEASE -> ApplyStatus.INVALID_REQUEST;
         };
         ApplyResult.Builder b = ApplyResult.newBuilder().setStatus(st).setFullyReleased(r.fullyReleased());
         if (r.status() == ReleaseStatus.OK && r.fullyReleased()) {
@@ -409,6 +413,43 @@ public final class LockStateMachineCore {
      */
     private ApplyResult error(String msg, RaftLogEntry entry) {
         return error(msg, entry, null);
+    }
+
+    /**
+     * LATCH_COUNT_DOWN_ENTRY：引擎倒计数（创建/断言/扣减全在引擎内，家族误用与
+     * 总量断言拒回 {@link ApplyStatus#INVALID_REQUEST}），OK 时镜像影子表
+     * （条目创建与剩余计数回写、参与会话登记）并随回执携带 {@code remaining}
+     * 供 Leader 侧归零广播判定（design D5/D6）。
+     *
+     * @param entry 条目（载荷为 {@link LatchCountDownPayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyLatchCountDown(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        LatchCountDownPayload p = LatchCountDownPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        var req = p.getRequest();
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        io.github.lamspace.openlatch.core.result.LatchCountDownResult r = engine.countDown(
+                new io.github.lamspace.openlatch.core.command.LatchCountDownCommand(
+                        local, req.getKey(), req.getCount(), req.getTotal()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                shadow.latchApplied(req.getKey(), p.getSessionId(),
+                        req.getTotal() != 0 ? req.getTotal() : shadow.latchTotalOf(req.getKey()),
+                        r.remaining());
+                yield ApplyResult.newBuilder()
+                        .setStatus(ApplyStatus.OK)
+                        .setLatchRemaining(r.remaining())
+                        .build();
+            }
+            case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_LATCH_TOTAL, REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable latch countDown outcome " + r.outcome(), entry);
+        };
     }
 
     /**
@@ -530,7 +571,8 @@ public final class LockStateMachineCore {
                     holders.add(new CoreStateRestore.Holder(internal, h.getThreadId(), h.getCount()));
                 }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
-                        l.getLeaseMs(), l.getExpiresAtMs(), holders));
+                        l.getLeaseMs(), l.getExpiresAtMs(), holders,
+                        l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount()));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

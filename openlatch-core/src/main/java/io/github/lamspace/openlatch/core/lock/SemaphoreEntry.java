@@ -201,7 +201,11 @@ public final class SemaphoreEntry implements KeyEntry {
                 leaseExpiresAtMs = now + effectiveLeaseMs;
                 return new AcquireResult(Outcome.GRANTED, token, effectiveLeaseMs, 0);
             }
-            // 队首但池内不足：保持排队（通知窗口内许可可能继续归还）。
+            // 队首但池内不足：保持排队并续约其通知窗口（重发抵达即存活证明，
+            // 与集群 WaitQueue.enqueue 的续约规则对称）。
+            Waiter rearmed = head.withDeadline(now + cfg.headReplyTimeoutMs());
+            waiters.pollFirst();
+            waiters.addFirst(rearmed);
             return new AcquireResult(Outcome.QUEUED, 0, 0, 1);
         }
 

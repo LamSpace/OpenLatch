@@ -32,6 +32,10 @@ import java.util.List;
  *       幂等去重（不二次入队，返回当前位次）；</li>
  *   <li>深度限额 {@code maxQueueDepthPerKey}（超限回 {@code -1}，调用方映射
  *       {@code OVERLOADED}）；</li>
+ *   <li>等待项携带请求许可数（{@code permits}，锁与屏障恒 1）：Semaphore 的
+ *       队首唤醒须"可用许可 ≥ 队首请求"方可通知（防大请求饥饿，Phase 3 T1
+ *       design D4——与单机 {@code SemaphoreEntry} 判定语义等价）；屏障归零
+ *       经 {@link #broadcastKey} 全体放行；</li>
  *   <li>队首唤醒一次性：{@link #onKeyFreed} 只标记"已通知"并返回待推送项，
  *       截止 {@code headReplyTimeoutMs} 前不重复通知；超时未重发由
  *       {@link #sweepNotified} 摘除并让位下一队首（AWAIT_NOTIFY 丢失兜底，
@@ -56,8 +60,21 @@ public final class WaitQueue {
      * @param sessionId 逻辑会话 id
      * @param requestId 原 ACQUIRE 请求 id
      * @param key       锁键
+     * @param permits   请求许可数（锁/屏障恒 1，Semaphore 为申请量）
      */
-    public record Waiter(long sessionId, long requestId, String key) { }
+    public record Waiter(long sessionId, long requestId, String key, int permits) {
+
+        /**
+         * 单许可等待项便捷构造（锁与屏障路径）。
+         *
+         * @param sessionId 逻辑会话 id
+         * @param requestId 原 ACQUIRE 请求 id
+         * @param key       锁键
+         */
+        public Waiter(long sessionId, long requestId, String key) {
+            this(sessionId, requestId, key, 1);
+        }
+    }
 
     /** 队列节点：等待项 + 已通知标记（0=未通知，否则为通知时刻）。 */
     private static final class Node {
@@ -100,19 +117,40 @@ public final class WaitQueue {
      * @param sessionId 逻辑会话 id
      * @param requestId 原 ACQUIRE 请求 id（去重键）
      * @param key       锁键
+     * @param now       当前时刻（毫秒，幂等命中的通知窗口续约用）
      * @return 1 起位次；深度超限返回 {@code -1}
      */
-    public synchronized int enqueue(long sessionId, long requestId, String key) {
+    public synchronized int enqueue(long sessionId, long requestId, String key, long now) {
+        return enqueue(sessionId, requestId, key, 1, now);
+    }
+
+    /**
+     * 入队（携带请求许可数；幂等命中返回位次）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param permits   请求许可数（Semaphore）；锁与屏障传 1
+     * @param now       当前时刻（毫秒）——幂等命中且该等待项处于"已通知"
+     *                  窗口时用以续约（重发抵达即存活证明，窗口重新起算；
+     *                  Semaphore 的"通知时池足量、重发时池又被占"竞态由此
+     *                  不丢队列位）
+     * @return 1 起位次；深度超限返回 {@code -1}
+     */
+    public synchronized int enqueue(long sessionId, long requestId, String key, int permits, long now) {
         ArrayDeque<Node> q = queues.computeIfAbsent(key, k -> new ArrayDeque<>());
         for (Node n : q) {
             if (n.waiter.sessionId() == sessionId && n.waiter.requestId() == requestId) {
+                if (n.notifiedAtMs != 0) {
+                    n.notifiedAtMs = now; // 已通知队首重发抵达：窗口续约
+                }
                 return indexOf(q, n); // 幂等：重复请求返回当前位次，不二次入队
             }
         }
         if (q.size() >= maxDepthPerKey) {
             return -1;
         }
-        q.addLast(new Node(new Waiter(sessionId, requestId, key)));
+        q.addLast(new Node(new Waiter(sessionId, requestId, key, permits)));
         return q.size();
     }
 
@@ -125,16 +163,70 @@ public final class WaitQueue {
      * @return 至多一个待通知等待项（可能为空）
      */
     public synchronized List<Waiter> onKeyFreed(String key, long now) {
+        return onKeyFreedPermits(key, now, Integer.MAX_VALUE);
+    }
+
+    /**
+     * 许可感知的队首推进（Phase 3 T1 design D4）：仅当可用许可满足队首请求
+     * 时通知队首；队首不满足时不检查任何后续条目（防大请求饥饿）。锁路径
+     * {@code available} 传 {@link Integer#MAX_VALUE} 与 {@link #onKeyFreed} 等价。
+     *
+     * @param key       锁键
+     * @param now       当前时刻（毫秒）
+     * @param available 该 key 当前可用许可数
+     * @return 至多一个待通知等待项
+     */
+    public synchronized List<Waiter> onKeyFreedPermits(String key, long now, int available) {
         ArrayDeque<Node> q = queues.get(key);
         if (q == null || q.isEmpty()) {
             return List.of();
         }
         Node head = q.peekFirst();
-        if (head.notifiedAtMs == 0) {
-            head.notifiedAtMs = now;
-            return List.of(head.waiter);
+        if (head.notifiedAtMs != 0) {
+            return List.of(); // 已通知未超时：等重发，不重复推
         }
-        return List.of(); // 已通知未超时：等重发，不重复推
+        if (head.waiter.permits() > available) {
+            return List.of(); // 队首不满足：全体原地等待
+        }
+        head.notifiedAtMs = now;
+        return List.of(head.waiter);
+    }
+
+    /**
+     * 屏障归零全体广播（Phase 3 T1）：标记全部未通知等待项为已通知并返回
+     * 待推送列表；已通知项不重复推（其重发自行抵达放行）。条目不离队——
+     * 等待者经重发命中"已归零"时由 {@link #onGranted} 出队。
+     *
+     * @param key 屏障键
+     * @param now 当前时刻（毫秒）
+     * @return 需推送通知的等待项列表
+     */
+    public synchronized List<Waiter> broadcastKey(String key, long now) {
+        ArrayDeque<Node> q = queues.get(key);
+        if (q == null || q.isEmpty()) {
+            return List.of();
+        }
+        List<Waiter> out = new ArrayList<>();
+        for (Node n : q) {
+            if (n.notifiedAtMs == 0) {
+                n.notifiedAtMs = now;
+                out.add(n.waiter);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 撤销队首的已通知标记（清扫推进遇 Semaphore 队首许可不足时的回退臂）：
+     * 下一轮清扫重新评估通知资格。
+     *
+     * @param key 锁键
+     */
+    public synchronized void deferHead(String key) {
+        ArrayDeque<Node> q = queues.get(key);
+        if (q != null && !q.isEmpty()) {
+            q.peekFirst().notifiedAtMs = 0;
+        }
     }
 
     /**

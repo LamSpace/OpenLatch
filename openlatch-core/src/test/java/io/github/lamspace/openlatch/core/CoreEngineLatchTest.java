@@ -118,10 +118,10 @@ class CoreEngineLatchTest {
         assertThat(engine.latchAwait(new LatchAwaitCommand(w2, 12, "l", 0)).outcome()).isEqualTo(Outcome.GRANTED);
         assertThat(engine.latchAwait(new LatchAwaitCommand(w3, 13, "l", 0)).outcome()).isEqualTo(Outcome.GRANTED);
 
-        // 全员离队但参与者未散：归零护栏仍有效（晚到纯加入也直接放行）。
+        // 全员离队后一次性护栏持续（条目存续至节点重启，design D5 修订）：
+        // 参与者散尽也不回收，晚到纯加入始终直接放行。
         assertThat(engine.latchAwait(new LatchAwaitCommand(w4, 15, "l", 0)).outcome())
                 .isEqualTo(Outcome.GRANTED);
-        // 参与者散尽 → 条目回收 → 护栏终结：晚到纯加入被拒。
         engine.sessionClosed(creator);
         engine.sessionClosed(w1);
         engine.sessionClosed(w2);
@@ -129,7 +129,7 @@ class CoreEngineLatchTest {
         engine.sessionClosed(w4);
         long w5 = engine.sessionOpened();
         assertThat(engine.latchAwait(new LatchAwaitCommand(w5, 16, "l", 0)).outcome())
-                .isEqualTo(Outcome.REJECT_LATCH_TOTAL);
+                .isEqualTo(Outcome.GRANTED);
     }
 
     @Test

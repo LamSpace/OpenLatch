@@ -53,19 +53,28 @@ Phase 3 交付概要设计 §4.1 的 P2 功能，对应实施计划工作项 T1�
 //   LOCK_TYPE_LATCH     = 6;   // CountDownLatch
 
 // AcquireRequest 新增：
-//   int32 permits = 6;   // 仅 SEMAPHORE 有效，默认 1；其他类型必须为 0/1
+//   int32 permits = 6;        // 仅 SEMAPHORE 有效，默认 1；其他类型必须为 0/1
+//   int32 permits_total = 7;  // SEMAPHORE 许可总量断言（勘误增补，见下）
 
 // ReleaseRequest 新增：
 //   int32 permits = 4;   // SEMAPHORE 释放的许可数
 
 // 新增消息（Latch 专用，走独立通道而非 ACQUIRE）：
-message LatchCountDownRequest { string key = 1; int64 count = 2; }
+message LatchCountDownRequest { string key = 1; int64 count = 2; int64 total = 3; }
 message LatchCountDownResponse { StatusCode status = 1; int64 remaining = 2; }
-message LatchAwaitRequest { string key = 1; }        // 复用 QUEUED/通知机制
-message LatchAwaitResponse { StatusCode status = 1; } // OK=已归零；QUEUED=挂起等待
+message LatchAwaitRequest { string key = 1; int64 total = 2; }  // 复用 QUEUED/通知机制
+message LatchAwaitResponse { StatusCode status = 1; int32 queue_position = 2; }
 ```
 
 对应新增 `MessageType`：`LATCH_COUNT_DOWN = 8`、`LATCH_AWAIT = 9`。`AWAIT_NOTIFY` 复用（按 `request_id_ref` 关联）。
+
+> **P3-03/05 实施勘误（2026-09-06，change phase3-t1-extended-lock-types design D1）**：
+> 原文的四个 Latch 消息与 Acquire/Release 扩展**缺少初始值设定通道**——Semaphore
+> 的许可总量与 Latch 的初始计数都没有第一条可以建立它们的请求。补齐为"首次定型
+> 断言"：`AcquireRequest.permits_total` 与 `LatchCountDownRequest/LatchAwaitRequest.total`
+> ——非零时条目不存在即创建（`countDown` 以 `count=0` 即为纯初始化调用）、存在则
+> 须与定型值一致；`0` 为不主张（纯加入，条目不存在即拒绝，不隐式创建）。
+> `total=0` 的 await/countDown 一律不建条目。
 
 ### 2.2 FairLock
 
@@ -95,7 +104,7 @@ message LatchAwaitResponse { StatusCode status = 1; } // OK=已归零；QUEUED=�
 - **数据结构**：`LatchEntry`：`count`、`awaiters`；
 - `countDown(n)`：计数减至 0 下限；归零瞬间对 **全部** awaiter 广播通知（CDL 的唤醒语义本就是全体放行，不构成惊群问题）；
 - `await()`：计数已为 0 → 立即成功；否则入队挂起（复用 `QUEUED` + `AWAIT_NOTIFY` 通道）；
-- **一次性**：归零后永久放行；不支持重置——新的屏障使用新的 key（文档明示）；
+- **一次性**：归零后永久放行；不支持重置——新的屏障使用新的 key（文档明示）。屏障条目一经定型即存续至节点重启（不随归零或参与者散尽回收，P3-05 实施定夺：参与者驱动的回收会在"晚到放行"与"重建屏障"之间引入时序歧义，且集群影子镜像无法与引擎 GC 对齐）；遗弃屏障的治理走 key 命名约定（每轮屏障带轮次标识）；
 - **等待者无租约**：await 不持有任何资源，不参与租约/看门狗；断连时随会话清理摘除；
 - **集群**：`count` 与 countDown 走复制日志；awaiter 队列为 Leader 内存（切换后 await 失败重试，与锁等待者一致）。
 

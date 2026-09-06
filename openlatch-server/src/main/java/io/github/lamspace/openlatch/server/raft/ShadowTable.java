@@ -16,6 +16,7 @@
 
 package io.github.lamspace.openlatch.server.raft;
 
+import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
@@ -90,6 +91,16 @@ public final class ShadowTable {
         private long leaseMs;
         /** 持有者 → 计数（可重入逐层），插入序=首次持有序。 */
         private final LinkedHashMap<Holder, Integer> holders = new LinkedHashMap<>();
+        /** SEMAPHORE 条目：许可总量（其余家族 0）。 */
+        private int permitsTotal;
+        /** SEMAPHORE 条目：当前可用许可数（其余家族 0）。 */
+        private int permitsAvailable;
+        /** LATCH 条目：定型初始计数（其余家族 0）。 */
+        private long latchTotal;
+        /** LATCH 条目：当前剩余计数（其余家族 0）。 */
+        private long latchCount;
+        /** LATCH 条目：参与会话集（逻辑 sid，插入序；其余家族空）。 */
+        private final LinkedHashSet<Long> latchParticipants = new LinkedHashSet<>();
 
         /**
          * 构造复制态条目。
@@ -169,7 +180,7 @@ public final class ShadowTable {
      */
     public void grant(long sessionId, long threadId, String key, int lockType,
                       long token, long leaseMs, long expiresAt) {
-        grantDelta(sessionId, threadId, key, lockType, token, leaseMs, expiresAt, 1);
+        grantDelta(sessionId, threadId, key, lockType, token, leaseMs, expiresAt, 1, 0);
     }
 
     /**
@@ -185,18 +196,25 @@ public final class ShadowTable {
      * @param token       当前租约凭证
      * @param leaseMs     实际生效租期
      * @param expiresAt   到期时刻
-     * @param holderDelta 本次授予新增持有计数（{@code >= 1}）
+     * @param holderDelta  本次授予新增持有计数（{@code >= 1}；Semaphore 为许可数）
+     * @param permitsTotal Semaphore 建条目的许可总量（其余家族 0）
      */
     public void grantDelta(long sessionId, long threadId, String key, int lockType,
-                           long token, long leaseMs, long expiresAt, int holderDelta) {
+                           long token, long leaseMs, long expiresAt, int holderDelta,
+                           int permitsTotal) {
         SLock l = locks.get(key);
         if (l == null) {
             l = new SLock(lockType, token, expiresAt, leaseMs);
+            l.permitsTotal = permitsTotal;
+            l.permitsAvailable = permitsTotal;
             locks.put(key, l);
         } else {
             l.leaseToken = token;
             l.expiresAtMs = expiresAt;
             l.leaseMs = leaseMs;
+        }
+        if (lockType == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+            l.permitsAvailable -= holderDelta;
         }
         l.holders.merge(new Holder(sessionId, threadId), holderDelta, Integer::sum);
         heldIndex.put(key, new HeldRef(token, expiresAt, Set.copyOf(l.holders.keySet())));
@@ -250,6 +268,9 @@ public final class ShadowTable {
         Holder h = new Holder(sessionId, threadId);
         Integer count = l.holders.get(h);
         if (count != null) {
+            if (l.lockType == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+                l.permitsAvailable += releaseDelta;
+            }
             if (count <= releaseDelta) {
                 l.holders.remove(h);
             } else {
@@ -313,6 +334,18 @@ public final class ShadowTable {
         List<String> removedKeys = new ArrayList<>();
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
             SLock l = en.getValue();
+            if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
+                // 屏障条目存续不随参与者散尽而回收（一次性护栏，design D5
+                // 修订）：仅摘除参与身份，条目留在表内。
+                l.latchParticipants.remove(sessionId);
+                continue;
+            }
+            for (Map.Entry<Holder, Integer> hh : l.holders.entrySet()) {
+                if (hh.getKey().sessionId() == sessionId
+                        && l.lockType == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+                    l.permitsAvailable += hh.getValue();
+                }
+            }
             l.holders.keySet().removeIf(h -> h.sessionId() == sessionId);
             if (l.holders.isEmpty()) {
                 removedKeys.add(en.getKey());
@@ -394,6 +427,12 @@ public final class ShadowTable {
                         .setThreadId(h.getKey().threadId())
                         .setCount(h.getValue()));
             }
+            // v3 家族字段：仅相关家族写入（锁条目保持既有序列化字节形）。
+            if (l.lockType == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+                lb.setPermitsTotal(l.permitsTotal);
+            } else if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
+                lb.setLatchTotal(l.latchTotal).setLatchCount(l.latchCount);
+            }
             b.addLocks(lb);
         }
         for (long s : sessions) {
@@ -418,9 +457,29 @@ public final class ShadowTable {
             for (SnapshotHolder h : l.getHoldersList()) {
                 sl.holders.put(new Holder(h.getSessionId(), h.getThreadId()), h.getCount());
             }
-            locks.put(l.getKey(), sl);
-            heldIndex.put(l.getKey(),
-                    new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
+            if (l.getLockTypeValue() == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+                sl.permitsTotal = l.getPermitsTotal();
+                int held = 0;
+                for (Integer c : sl.holders.values()) {
+                    held += c;
+                }
+                sl.permitsAvailable = sl.permitsTotal - held;
+                locks.put(l.getKey(), sl);
+                heldIndex.put(l.getKey(),
+                        new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
+            } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
+                sl.latchTotal = l.getLatchTotal();
+                sl.latchCount = l.getLatchCount();
+                // 装载的屏障无参与会话（参与者不入快照）：首个 countDown
+                // 恢复参与关系；期间条目不得被 dropSessionHolders 误删——
+                // 空参与者集仅在"曾有参与者且全散"时才是回收信号，装载态
+                // 条目由后续日志重放补回参与者，语义与未截断副本收敛一致。
+                locks.put(l.getKey(), sl);
+            } else {
+                locks.put(l.getKey(), sl);
+                heldIndex.put(l.getKey(),
+                        new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
+            }
         }
         sessions.addAll(st.getSessionsList());
         sessionIndex.addAll(st.getSessionsList());
@@ -439,6 +498,95 @@ public final class ShadowTable {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 不可用", e);
         }
+    }
+
+    /**
+     * 屏障倒计数应用点镜像（Phase 3 T1）：条目不存在则按 {@code total}
+     * 创建（纯初始化的复制落点），存在则刷新剩余计数并登记参与会话。
+     * 参与者散尽的回收经 {@link #dropSessionHolders} 同路径完成。
+     *
+     * @param key       屏障键
+     * @param sessionId 逻辑会话 id（参与者）
+     * @param total     定型初始计数（创建时使用）
+     * @param remaining 生效后的剩余计数
+     */
+    public void latchApplied(String key, long sessionId, long total, long remaining) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            // GRANTED 且条目缺席 = 引擎刚创建（countDown/初始化的复制落点），
+            // 按 total 镜像建条目；total 为 0 的病态序列（引擎无创建依据）零扰动。
+            if (total <= 0) {
+                return;
+            }
+            l = new SLock(LockType.LOCK_TYPE_LATCH_VALUE, 0, 0, 0);
+            l.latchTotal = total;
+            locks.put(key, l);
+        }
+        if (l.lockType != LockType.LOCK_TYPE_LATCH_VALUE) {
+            // 家族冲突（引擎已回 REJECT_TYPE_MISMATCH）：影子零扰动。
+            return;
+        }
+        l.latchCount = remaining;
+        l.latchParticipants.add(sessionId);
+    }
+
+    /**
+     * key 是否为屏障条目（含装载态）。
+     *
+     * @param key 屏障键
+     * @return 存在 LATCH 条目为 {@code true}
+     */
+    public boolean hasLatch(String key) {
+        SLock l = locks.get(key);
+        return l != null && l.lockType == LockType.LOCK_TYPE_LATCH_VALUE;
+    }
+
+    /**
+     * 屏障定型初始计数（既有镜像条目读取；不存在或非屏障返回 0）。
+     *
+     * @param key 屏障键
+     * @return 定型初始计数
+     */
+    public long latchTotalOf(String key) {
+        SLock l = locks.get(key);
+        return l != null && l.lockType == LockType.LOCK_TYPE_LATCH_VALUE ? l.latchTotal : 0;
+    }
+
+    /**
+     * 屏障剩余计数（Leader 本地 await 裁决读侧）。
+     *
+     * @param key 屏障键
+     * @return 剩余计数；条目不存在或非屏障为 {@code -1}
+     */
+    public long latchCount(String key) {
+        SLock l = locks.get(key);
+        return l != null && l.lockType == LockType.LOCK_TYPE_LATCH_VALUE ? l.latchCount : -1;
+    }
+
+    /**
+     * key 是否为 Semaphore 条目。
+     *
+     * @param key 锁键
+     * @return 存在 SEMAPHORE 条目为 {@code true}
+     */
+    public boolean isSemaphore(String key) {
+        SLock l = locks.get(key);
+        return l != null && l.lockType == LockType.LOCK_TYPE_SEMAPHORE_VALUE;
+    }
+
+    /**
+     * Semaphore 当前可用许可数（Leader 队首推进判定读侧）。
+     *
+     * @param key 锁键
+     * @return 可用许可数；条目不存在（已回收，池即全量待重建）时返回
+     *         {@link Integer#MAX_VALUE}（队首可自立总量重主张）
+     */
+    public int permitsAvailable(String key) {
+        SLock l = locks.get(key);
+        if (l == null || l.lockType != LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return l.permitsAvailable;
     }
 
     /**

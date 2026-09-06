@@ -76,17 +76,39 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      * @param leaseToken  当前租约凭证（{@code >= 1}）
      * @param leaseMs     实际生效租期（{@code >= 1}）
      * @param expiresAtMs 当前到期时刻（{@code >= 1}）
-     * @param holders     持有者列表（非空；{@code READ} 允许多持有者）
+     * @param holders     持有者列表（锁/Semaphore 非空；Latch 恒空。Semaphore
+     *                    条目的 {@code count} 语义为持有许可数）
+     * @param permitsTotal Semaphore 条目的许可总量（非 Semaphore 恒 0）
+     * @param latchTotal  Latch 条目的定型初始计数（非 Latch 恒 0）
+     * @param latchCount  Latch 条目的当前剩余计数（非 Latch 恒 0）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
-                        long expiresAtMs, List<Holder> holders) {
+                        long expiresAtMs, List<Holder> holders,
+                        int permitsTotal, long latchTotal, long latchCount) {
 
         /**
-         * 构造并校验条目形态自洽性。
+         * 锁家族便捷构造（Phase 1/2 既有形态）：许可与屏障字段取缺省 0。
          *
-         * @throws IllegalArgumentException 租约字段非正、持有者列表为空、
-         *         写类条目持有者多于一个、{@code SIMPLE} 条目计数不为 1
-         *         （非可重入类型不可能有多层持有）
+         * @param key         锁键
+         * @param lockType    锁类型
+         * @param leaseToken  当前租约凭证
+         * @param leaseMs     实际生效租期
+         * @param expiresAtMs 当前到期时刻
+         * @param holders     持有者列表
+         */
+        public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
+                long expiresAtMs, List<Holder> holders) {
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0);
+        }
+
+        /**
+         * 构造并校验条目形态自洽性（按家族分支）：锁条目沿用 Phase 1 规则
+         * （租约三元组非正、持有者列表为空、写类条目多持有者、{@code SIMPLE}
+         * 多层持有均拒绝）；Semaphore 条目额外要求总量不小于持有和且持有者
+         * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
+         * 计数须在 {@code [0, total]} 内且 {@code total >= 1}。
+         *
+         * @throws IllegalArgumentException 家族自洽性违例
          */
         public Entry {
             if (key == null || key.isEmpty()) {
@@ -95,15 +117,43 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             if (lockType == null) {
                 throw new IllegalArgumentException("entry lockType must be non-null");
             }
-            if (leaseToken < 1 || leaseMs < 1 || expiresAtMs < 1) {
-                throw new IllegalArgumentException(
-                        "lease triple must be positive: key=" + key);
-            }
             holders = List.copyOf(holders);
-            if (holders.isEmpty()) {
-                throw new IllegalArgumentException("entry must have holders: key=" + key);
+            if (lockType == LockType.LATCH) {
+                if (latchTotal < 1 || latchCount < 0 || latchCount > latchTotal) {
+                    throw new IllegalArgumentException(
+                            "bad latch counters: key=" + key + " total=" + latchTotal
+                                    + " count=" + latchCount);
+                }
+                if (!holders.isEmpty()) {
+                    throw new IllegalArgumentException("latch entry must have no holders: key=" + key);
+                }
+            } else {
+                if (leaseToken < 1 || leaseMs < 1 || expiresAtMs < 1) {
+                    throw new IllegalArgumentException(
+                            "lease triple must be positive: key=" + key);
+                }
+                if (holders.isEmpty()) {
+                    throw new IllegalArgumentException("entry must have holders: key=" + key);
+                }
+                if (lockType == LockType.SEMAPHORE) {
+                    int held = 0;
+                    for (Holder h : holders) {
+                        held += h.count();
+                    }
+                    if (permitsTotal < 1 || held > permitsTotal) {
+                        throw new IllegalArgumentException(
+                                "bad semaphore counters: key=" + key + " total=" + permitsTotal
+                                        + " held=" + held);
+                    }
+                } else {
+                    if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                        throw new IllegalArgumentException(
+                                "lock entry must not carry family counters: key=" + key);
+                    }
+                }
             }
-            if (lockType != LockType.READ && holders.size() != 1) {
+            if (lockType != LockType.READ && lockType != LockType.LATCH
+                    && lockType != LockType.SEMAPHORE && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }

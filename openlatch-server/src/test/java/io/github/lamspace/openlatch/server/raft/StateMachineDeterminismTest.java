@@ -110,6 +110,50 @@ class StateMachineDeterminismTest {
     }
 
     @Test
+    void semaphorePoolMirrorsDeterministicallyAcrossReplays() throws Exception {
+        List<RaftLogEntry> seq = List.of(
+                RaftEntrySamples.sessionOpen(61, 1_000, 1),
+                RaftEntrySamples.sessionOpen(62, 1_000, 2),
+                RaftEntrySamples.acquireSemaphore(61, 601, "sem", 2_000, 2, 3, 3, 60_000),
+                RaftEntrySamples.acquireSemaphore(62, 602, "sem", 3_000, 1, 0, 4, 60_000),
+                RaftEntrySamples.releasePermits(61, "sem", 1, 2, 4_000, 5));
+        assertThat(replay(seq)).isEqualTo(replay(seq));
+        // 语义钉住：池 3 − 2 − 1 + 2 = 2 可用；62 仍持 1。
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        for (RaftLogEntry e : seq) {
+            core.applyEntry(e.toByteArray());
+        }
+        assertThat(core.shadow().permitsAvailable("sem")).isEqualTo(2);
+        assertThat(core.shadow().isHeldBy(62, 7, "sem")).isTrue();
+    }
+
+    @Test
+    void latchCountersDeterministicAndRejectsMapped() throws Exception {
+        List<RaftLogEntry> seq = List.of(
+                RaftEntrySamples.sessionOpen(71, 1_000, 1),
+                RaftEntrySamples.latchCountDown(71, "lat", 0, 3, 2_000, 2),
+                RaftEntrySamples.latchCountDown(71, "lat", 2, 0, 3_000, 3));
+        assertThat(replay(seq)).isEqualTo(replay(seq));
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        for (RaftLogEntry e : seq) {
+            core.applyEntry(e.toByteArray());
+        }
+        assertThat(core.shadow().hasLatch("lat")).isTrue();
+        assertThat(core.shadow().latchCount("lat")).isEqualTo(1);
+        // 定型不符与家族误用回 INVALID_REQUEST 码形（P3-07 接正）。
+        ApplyResult bad = ApplyResult.parseFrom(core.applyEntry(
+                RaftEntrySamples.latchCountDown(71, "lat", 0, 9, 4_000, 4).toByteArray()));
+        assertThat(bad.getStatus()).isEqualTo(ApplyStatus.INVALID_REQUEST);
+        ApplyResult fam = ApplyResult.parseFrom(core.applyEntry(
+                RaftEntrySamples.acquire(71, 5, "lat", 5_000, io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_REENTRANT, 5).toByteArray()));
+        assertThat(fam.getStatus()).isEqualTo(ApplyStatus.INVALID_REQUEST);
+        // INVALID_REQUEST 释放/归还映射。
+        ApplyResult over = ApplyResult.parseFrom(core.applyEntry(
+                RaftEntrySamples.releasePermits(71, "nope", 1, 5, 6_000, 6).toByteArray()));
+        assertThat(over.getStatus()).isNotEqualTo(ApplyStatus.INTERNAL_ERROR);
+    }
+
+    @Test
     void unregisteredSessionAcquireRejectedWithoutStateChange() throws Exception {
         LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
         ApplyResult r = ApplyResult.parseFrom(core.applyEntry(

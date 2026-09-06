@@ -29,6 +29,7 @@ import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
 import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
+import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.server.session.ServerSession;
@@ -146,24 +147,33 @@ public final class ClusterRequestHandler {
             return;
         }
         boolean queueWanted = req.getWaitMs() != 0;
+        boolean semaphore = req.getLockType() == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE;
         boolean held = kernel.shadow().isHeld(req.getKey());
         // 重入豁免（Phase 3 T1）：请求归属已在持有集内时不得被 busy 拦截——
         // 与单机引擎"重入先于队列规则"对齐；重入判定读无锁快照（可旧不可错，
         // 误放行由应用路径裁决）。
         boolean reentrantHold = held && kernel.shadow().isHeldBy(
                 session.sessionId(), req.getThreadId(), req.getKey());
-        // 队首重发且锁已空出：自推进走复制授予路径（AWAIT_NOTIFY 后重发的
-        // Phase 1 语义在集群路径的等价形态；onGranted 负责出队）。
-        boolean selfPromotion = !held && waitQueue.isHead(
-                session.sessionId(), msg.getRequestId(), req.getKey());
-        boolean busy = (held && !reentrantHold)
+        // 许可感知 busy（design D4）：Semaphore 的"占用"是池不足而非有人持有
+        // （多持有者共存是常态）；条目已回收视同池满量（重发带断言重建）。
+        int permits = RequestDispatcher.normalizedPermits(req.getPermits());
+        boolean poolShort = kernel.shadow().isSemaphore(req.getKey())
+                && kernel.shadow().permitsAvailable(req.getKey()) < permits;
+        // 队首重发且授予条件成立（锁：无人持有；Semaphore：池足量）：自推进
+        // 走复制授予路径（AWAIT_NOTIFY 后重发的 Phase 1 语义等价形态；
+        // onGranted 负责出队）。
+        boolean selfPromotion = waitQueue.isHead(
+                session.sessionId(), msg.getRequestId(), req.getKey())
+                && (semaphore ? !poolShort : !held);
+        boolean busy = (semaphore ? poolShort : (held && !reentrantHold))
                 || (!selfPromotion && waitQueue.hasWaiters(req.getKey()));
         if (busy) {
             if (!queueWanted) {
                 writeSync(ctx, session, acquireErrorResponse(msg, StatusCode.DENIED));
                 return;
             }
-            int pos = waitQueue.enqueue(session.sessionId(), msg.getRequestId(), req.getKey());
+            int pos = waitQueue.enqueue(session.sessionId(), msg.getRequestId(), req.getKey(),
+                    permits, System.currentTimeMillis());
             if (pos < 0) {
                 writeSync(ctx, session, acquireErrorResponse(msg, StatusCode.OVERLOADED));
                 return;
@@ -254,6 +264,197 @@ public final class ClusterRequestHandler {
      * @param requireLeader 是否要求本节点为当值 Leader（ACQUIRE 车道 true）
      * @return 需立即写回的错误应答；通过预检为 {@code null}
      */
+    /**
+     * LATCH_COUNT_DOWN 集群路径（Phase 3 T1，转发车道）：计数变更属复制状态，
+     * 与 RELEASE 同车道不设角色门——Follower 提交经内部通道由当值 Leader
+     * 复制执行；等待队列不在日志内（design D9 同构）。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleLatchCountDown(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        Envelope bad = validateEnvelope(msg, session, false);
+        if (bad != null) {
+            writeSync(ctx, session, bad);
+            return;
+        }
+        if (session.protocolVersion() < 3) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getLatchCountDownRequest();
+        if (req.getCount() < 0 || req.getTotal() < 0) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        ByteString payload = LatchCountDownPayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.LATCH_COUNT_DOWN_ENTRY, payload)
+                .whenComplete((r, err) -> respondAsync(ctx, session,
+                        err == null ? mapLatchCountDown(msg, r) : commitFailure(msg, err)));
+    }
+
+    /**
+     * LATCH_AWAIT 集群路径（Phase 3 T1，ACQUIRE 车道 + Leader 本地裁决）：
+     * await MUST NOT 进日志——但携带 {@code total} 的定型创建属计数变更，
+     * 先经 {@code LATCH_COUNT_DOWN_ENTRY(count=0)} 复制定型（design D1/D6
+     * 精化），提交确认后回到本地裁决；已归零直接放行（幂等重发抵达处），
+     * 未归零在 Leader 内存队列挂起（归零广播经 {@code AWAIT_NOTIFY}）。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleLatchAwait(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, bad);
+            return;
+        }
+        if (session.protocolVersion() < 3) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getLatchAwaitRequest();
+        if (req.getTotal() < 0) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var shadow = kernel.shadow();
+        // 家族误用预检（与引擎家族判定对齐）：key 已有他家族条目时直接
+        // INVALID_REQUEST，不进入定型创建也不入队。
+        if (!shadow.hasLatch(req.getKey()) && shadow.isHeld(req.getKey())) {
+            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (!shadow.hasLatch(req.getKey()) && req.getTotal() > 0) {
+            // 定型创建：纯初始化条目进日志，应用确认后回本地 await 裁决。
+            ByteString payload = LatchCountDownPayload.newBuilder()
+                    .setSessionId(session.sessionId())
+                    .setRequest(io.github.lamspace.openlatch.protocol.LatchCountDownRequest.newBuilder()
+                            .setKey(req.getKey()).setCount(0).setTotal(req.getTotal()))
+                    .build().toByteString();
+            gateway.submit(RaftEntryType.LATCH_COUNT_DOWN_ENTRY, payload)
+                    .whenComplete((r, err) -> {
+                        if (err != null) {
+                            respondAsync(ctx, session, commitFailure(msg, err));
+                            return;
+                        }
+                        if (r.getStatus() != ApplyStatus.OK) {
+                            respondAsync(ctx, session, mapLatchAwait(msg, r));
+                            return;
+                        }
+                        latchAwaitLocal(session, msg, ctx);
+                    });
+            return;
+        }
+        latchAwaitLocal(session, msg, ctx);
+    }
+
+    /**
+     * await 的 Leader 本地裁决：屏障不存在（含纯加入）回
+     * {@code INVALID_REQUEST}；已归零回 {@code OK}（顺带出队重发抵达的
+     * 等待项）；未归零挂本地队列回 {@code QUEUED} 位次。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    private void latchAwaitLocal(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        var req = msg.getLatchAwaitRequest();
+        var shadow = kernel.shadow();
+        long count = shadow.latchCount(req.getKey());
+        if (count < 0) {
+            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.INVALID_REQUEST, 0));
+            return;
+        }
+        if (count == 0) {
+            waitQueue.onGranted(session.sessionId(), msg.getRequestId());
+            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.OK, 0));
+            return;
+        }
+        int pos = waitQueue.enqueue(session.sessionId(), msg.getRequestId(), req.getKey(),
+                System.currentTimeMillis());
+        if (pos < 0) {
+            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.OVERLOADED, 0));
+            return;
+        }
+        writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.QUEUED, pos));
+    }
+
+    /**
+     * 屏障等待应答构造。
+     *
+     * @param msg    原请求
+     * @param status 状态码
+     * @param pos    队列位次（QUEUED 有效）
+     * @return 应答信封
+     */
+    private static Envelope latchAwaitResponse(Envelope msg, StatusCode status, int pos) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.LATCH_AWAIT)
+                .setRequestId(msg.getRequestId())
+                .setLatchAwaitResponse(io.github.lamspace.openlatch.protocol.LatchAwaitResponse
+                        .newBuilder().setStatus(status).setQueuePosition(pos))
+                .build();
+    }
+
+    /**
+     * {@link ApplyResult} → LatchCountDownResponse（码形与单机
+     * {@code toLatchStatus} 对齐；OK 携带剩余计数）。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapLatchCountDown(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.LATCH_COUNT_DOWN)
+                .setRequestId(msg.getRequestId())
+                .setLatchCountDownResponse(io.github.lamspace.openlatch.protocol.LatchCountDownResponse
+                        .newBuilder().setStatus(st).setRemaining(result.getLatchRemaining()))
+                .build();
+    }
+
+    /**
+     * {@link ApplyResult} → LatchAwaitResponse（定型创建提交失败路径的
+     * 回执翻译；本地裁决不经此）。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapLatchAwait(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return latchAwaitResponse(msg, st, 0);
+    }
+
+    /**
+     * 写请求统一预检：载荷在场性、键长、会话登记；{@code requireLeader} 为
+     * 真时先过角色门（ACQUIRE 车道——排队裁决与通知是 Leader 本地态）。
+     * 通过返回 {@code null}，否则返回应即写回的拒绝信封。
+     *
+     * @param msg           请求信封
+     * @param session       会话
+     * @param requireLeader 是否要求当值 Leader
+     * @return 拒绝信封；通过为 {@code null}
+     */
     private Envelope validateEnvelope(Envelope msg, ServerSession session, boolean requireLeader) {
         if (requireLeader && !gateway.isLeaderAuthoritative()) {
             // ACQUIRE 车道角色门：用权威角色而非事件标志——降级空窗内拒绝
@@ -264,6 +465,8 @@ public final class ClusterRequestHandler {
             case LOCK_ACQUIRE -> msg.hasAcquireRequest();
             case LOCK_RELEASE -> msg.hasReleaseRequest();
             case LEASE_RENEW -> msg.hasLeaseRenewRequest();
+            case LATCH_COUNT_DOWN -> msg.hasLatchCountDownRequest();
+            case LATCH_AWAIT -> msg.hasLatchAwaitRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -272,6 +475,8 @@ public final class ClusterRequestHandler {
         String key = switch (msg.getType()) {
             case LOCK_ACQUIRE -> msg.getAcquireRequest().getKey();
             case LOCK_RELEASE -> msg.getReleaseRequest().getKey();
+            case LATCH_COUNT_DOWN -> msg.getLatchCountDownRequest().getKey();
+            case LATCH_AWAIT -> msg.getLatchAwaitRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -393,6 +598,7 @@ public final class ClusterRequestHandler {
             case DENIED -> StatusCode.DENIED;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
             case QUEUE_FULL -> StatusCode.OVERLOADED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
             default -> StatusCode.INTERNAL_ERROR;
         };
         AcquireResponse.Builder b = AcquireResponse.newBuilder().setStatus(st);
@@ -424,6 +630,7 @@ public final class ClusterRequestHandler {
             case NOT_HELD -> StatusCode.NOT_HELD;
             case INVALID_TOKEN -> StatusCode.INVALID_TOKEN;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
             default -> StatusCode.INTERNAL_ERROR;
         };
         return Envelope.newBuilder()

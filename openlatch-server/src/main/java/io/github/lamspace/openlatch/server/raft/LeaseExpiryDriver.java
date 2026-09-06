@@ -113,6 +113,10 @@ public final class LeaseExpiryDriver implements AutoCloseable {
                 return;
             }
             long now = System.currentTimeMillis();
+            // Leader 侧等待队列的"已通知队首超时清扫"（Phase 3 T1 接上生产
+            // 调用边：通知丢失/等待者放弃后队列须自行推进，许可感知回退臂
+            // 见 ReplicationGateway#sweepWaitQueue）。
+            gateway.sweepWaitQueue(now);
             for (Map.Entry<String, ShadowTable.HeldRef> en : kernel.shadow().heldEntries().entrySet()) {
                 ShadowTable.HeldRef ref = en.getValue();
                 if (ref.expiresAtMs() > now) {

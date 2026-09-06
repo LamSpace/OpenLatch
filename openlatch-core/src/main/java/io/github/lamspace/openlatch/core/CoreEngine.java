@@ -114,9 +114,11 @@ public final class CoreEngine {
      *
      * <p><b>注入内容</b>（与原生演化终态逐项对齐）：
      * <ol>
-     *   <li>锁条目：经 {@link LockEntry#restored} 直写持有与租约三元组
-     *       （凭证/租期/到期时刻按快照原值，不经状态迁移规则、不经
-     *       {@link Clock}），等待队列恒空；</li>
+     *   <li>条目按家族重建：锁条目经 {@link LockEntry#restored}、Semaphore
+     *       条目经 {@link SemaphoreEntry#restored}（持有计数即许可数、池
+     *       余量按总量−持有和推导）、Latch 条目经 {@link LatchEntry#restored}
+     *       （计数直写、无租约）——均直写快照原值，不经状态迁移规则、不经
+     *       {@link Clock}，等待队列恒空；</li>
      *   <li>会话登记：{@code sessions} 全集逐个登记（内部 sid 由调用方在
      *       构造前经 {@link #sessionOpened()} 预生成亦可——本方法幂等于
      *       登记表 {@code putIfAbsent} 语义）；持有者所属会话触及的 key
@@ -144,6 +146,29 @@ public final class CoreEngine {
                     "restoreFrom is allowed once on a fresh zero-state engine");
         }
         for (CoreStateRestore.Entry en : restore.entries()) {
+            if (en.lockType() == LockType.LATCH) {
+                // 屏障条目：无租约、无持有者（计数直写；等待者/参与者为
+                // Leader 本地态，恢复后恒空，后续操作重新登记）。
+                LatchEntry le = LatchEntry.restored(en.key(), en.latchTotal(), en.latchCount());
+                lockTable.computeIfAbsent(en.key(), k -> le);
+                continue;
+            }
+            if (en.lockType() == LockType.SEMAPHORE) {
+                Map<Owner, Integer> holders = new HashMap<>();
+                int held = 0;
+                for (CoreStateRestore.Holder h : en.holders()) {
+                    holders.put(new Owner(h.sessionId(), h.threadId()), h.count());
+                    held += h.count();
+                    sessions.register(h.sessionId());
+                    sessions.touchIfPresent(h.sessionId(), en.key());
+                }
+                SemaphoreEntry se = SemaphoreEntry.restored(en.key(), en.permitsTotal(),
+                        en.permitsTotal() - held, holders, en.leaseToken(), en.leaseMs(),
+                        en.expiresAtMs());
+                lockTable.computeIfAbsent(en.key(), k -> se);
+                leaseManager.offer(en.key(), en.leaseToken(), en.expiresAtMs());
+                continue;
+            }
             boolean isRead = en.lockType() == LockType.READ;
             Owner writer = null;
             int writeCount = 0;
@@ -550,9 +575,8 @@ public final class CoreEngine {
                     }
                     return new LatchCountDownResult(Outcome.REJECT_SESSION, 0);
                 }
-                long remaining = ((LatchEntry) e).countDown(cmd.count(), cmd.sessionId(),
+                result = ((LatchEntry) e).countDown(cmd.count(), cmd.total(), cmd.sessionId(),
                         now, config.headReplyTimeoutMs(), notify);
-                result = new LatchCountDownResult(Outcome.GRANTED, remaining);
                 if (e.isEmpty()) {
                     lockTable.remove(key, e);
                 }

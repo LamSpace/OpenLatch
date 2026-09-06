@@ -274,7 +274,10 @@ public final class ReplicationGateway implements ApplyObserver {
                         .parseFrom(entry.getCommandPayload().toByteArray());
                 if (ap.getRequest().getWaitMs() != 0) {
                     int pos = waitQueue.enqueue(ap.getSessionId(), ap.getRequestId(),
-                            ap.getRequest().getKey());
+                            ap.getRequest().getKey(),
+                            io.github.lamspace.openlatch.server.dispatch.RequestDispatcher
+                                    .normalizedPermits(ap.getRequest().getPermits()),
+                            System.currentTimeMillis());
                     if (pos > 0) {
                         return ApplyResult.newBuilder()
                                 .setStatus(ApplyStatus.QUEUED)
@@ -289,11 +292,46 @@ public final class ReplicationGateway implements ApplyObserver {
                 log.warn("acquire payload unparsable in rewrite (seq={})", entry.getSeq());
             }
         }
-        // 唤醒推进：任何完全空出的 key（释放/到期/会话关闭的 freed_keys）。
+        // 唤醒推进：任何空出/归还的 key（释放/到期/会话关闭的 freed_keys）。
+        // 许可感知（design D4）：Semaphore 按影子表可用数判定队首是否满足，
+        // 锁与条目已消失场景等价于"无限量"（队首恒可推进）。
         long now = System.currentTimeMillis();
         for (String key : result.getFreedKeysList()) {
-            for (WaitQueue.Waiter w : waitQueue.onKeyFreed(key, now)) {
+            for (WaitQueue.Waiter w : waitQueue.onKeyFreedPermits(key, now,
+                    kernel.shadow().permitsAvailable(key))) {
                 pushAwaitNotify(w, key);
+            }
+        }
+        // 部分释放的 Semaphore（条目未空、池已归还）同样驱动队首检查。
+        if (entry.getType() == RaftEntryType.LOCK_RELEASE_ENTRY
+                && result.getStatus() == ApplyStatus.OK
+                && result.getFullyReleased() == false) {
+            try {
+                var rp = io.github.lamspace.openlatch.protocol.raft.ReleasePayload
+                        .parseFrom(entry.getCommandPayload().toByteArray());
+                String skey = rp.getRequest().getKey();
+                if (kernel.shadow().isSemaphore(skey)) {
+                    for (WaitQueue.Waiter w : waitQueue.onKeyFreedPermits(skey, now,
+                            kernel.shadow().permitsAvailable(skey))) {
+                        pushAwaitNotify(w, skey);
+                    }
+                }
+            } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                log.warn("release payload unparsable in wake (seq={})", entry.getSeq());
+            }
+        }
+        // 屏障归零：全体 awaiter 广播放行（design D5）。
+        if (entry.getType() == RaftEntryType.LATCH_COUNT_DOWN_ENTRY
+                && result.getStatus() == ApplyStatus.OK && result.getLatchRemaining() == 0) {
+            try {
+                var lp = io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload
+                        .parseFrom(entry.getCommandPayload().toByteArray());
+                String lkey = lp.getRequest().getKey();
+                for (WaitQueue.Waiter w : waitQueue.broadcastKey(lkey, now)) {
+                    pushAwaitNotify(w, lkey);
+                }
+            } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+                log.warn("latch payload unparsable in broadcast (seq={})", entry.getSeq());
             }
         }
         if (entry.getType() == RaftEntryType.SESSION_CLOSE) {
@@ -365,6 +403,33 @@ public final class ReplicationGateway implements ApplyObserver {
      * 本网关的等待队列（测试与到期驱动观察）。
      *
      * @return 等待队列
+     */
+    /**
+     * 已通知队首超时清扫（Leader 侧周期驱动，Phase 3 T1）：摘除超时未重发
+     * 的队首并推进新队首通知；Semaphore 的新队首须许可足量方可推送，不足
+     * 则撤销其已通知标记（{@code deferHead}），由下一轮清扫/下一次归还
+     * 重新评估——与单机 {@code SemaphoreEntry} 的队首检查语义等价。
+     *
+     * @param now 当前时刻（毫秒）
+     */
+    public void sweepWaitQueue(long now) {
+        if (!isLeaderAuthoritative()) {
+            return;
+        }
+        for (WaitQueue.Waiter w : waitQueue.sweepNotified(now)) {
+            if (kernel.shadow().isSemaphore(w.key())
+                    && kernel.shadow().permitsAvailable(w.key()) < w.permits()) {
+                waitQueue.deferHead(w.key());
+                continue;
+            }
+            pushAwaitNotify(w, w.key());
+        }
+    }
+
+    /**
+     * Leader 侧等待队列（测试与指标观测口）。
+     *
+     * @return 等待队列实例
      */
     public WaitQueue waitQueue() {
         return waitQueue;

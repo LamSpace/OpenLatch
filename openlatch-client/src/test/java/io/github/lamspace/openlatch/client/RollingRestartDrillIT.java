@@ -117,6 +117,107 @@ class RollingRestartDrillIT {
         runRoll(false);
     }
 
+    /**
+     * 场景 C（Phase 3 T1/P3-07）：扩展原语跨全量滚动重启存续——Latch 计数
+     * 纯复制态必达零并放行；Semaphore 许可池在"持有方归还或租约到期"两径
+     * 之一收敛后满量可再取（不赌到期时序，预算 120s 覆盖 60s 租约）。
+     */
+    @Test
+    void extendedPrimitivesSurviveRollingRestart() throws Exception {
+        Path jar = requireServerJar();
+        List<Node> nodes = startCluster(jar);
+        OpenLatchClient a = null;
+        OpenLatchClient b = null;
+        try {
+            waitLeader(nodes);
+            a = OpenLatchClient.builder()
+                    .seeds(nodes.stream().map(n -> "127.0.0.1:" + n.accessPort()).toList())
+                    .requestTimeout(Duration.ofSeconds(5))
+                    .reconnectInitialBackoff(Duration.ofMillis(200))
+                    .reconnectMaxBackoff(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(30))
+                    .build();
+            b = OpenLatchClient.builder()
+                    .seeds(nodes.stream().map(n -> "127.0.0.1:" + n.accessPort()).toList())
+                    .requestTimeout(Duration.ofSeconds(5))
+                    .defaultWaitTimeout(Duration.ofSeconds(30))
+                    .build();
+            a.connectAsync().get(WAIT_SECONDS, TimeUnit.SECONDS);
+            b.connectAsync().get(WAIT_SECONDS, TimeUnit.SECONDS);
+
+            OSemaphore sa = a.newSemaphore("roll-sem", 3);
+            sa.acquire(2);
+            OCountDownLatch la = a.newCountDownLatch("roll-latch", 2);
+            la.init();
+            assertThat(la.countDown()).isEqualTo(1);
+
+            // 全量滚动（leader 先序）：逐节点停止→重启→等端口与选主。
+            Node leader0 = waitLeader(nodes);
+            List<Node> order = new ArrayList<>();
+            order.add(leader0);
+            nodes.stream().filter(n -> n != leader0).forEach(order::add);
+            for (Node n : order) {
+                n.process.destroy();
+                n.process.waitFor(15, TimeUnit.SECONDS);
+                n.process = relaunch(n, nodes);
+                waitForAccess(n);
+                waitLeader(nodes);
+            }
+
+            // 屏障：B 归零（重试容忍改道窗）→ 双方 await 放行。
+            OCountDownLatch lb = b.newCountDownLatch("roll-latch", 2);
+            long remaining = -1;
+            long zeroDeadline = System.currentTimeMillis() + 60_000;
+            while (remaining != 0 && System.currentTimeMillis() < zeroDeadline) {
+                try {
+                    remaining = lb.countDown();
+                } catch (OpenLatchException transient0) {
+                    Thread.sleep(500);
+                }
+            }
+            assertThat(remaining).as("屏障计数跨三节点滚动存续并归零").isZero();
+            assertThat(b.newCountDownLatch("roll-latch").await(20, TimeUnit.SECONDS)).isTrue();
+            assertThat(a.newCountDownLatch("roll-latch").await(20, TimeUnit.SECONDS)).isTrue();
+
+            // 许可池终态：A 归还或到期后满量可再取（两径之一，不赌时序）。
+            awaitSemUntilFull(b, "roll-sem", 3, 120_000);
+            System.out.println("[drill-C] extended primitives survived rolling restart");
+        } finally {
+            if (a != null) {
+                a.shutdown();
+            }
+            if (b != null) {
+                b.shutdown();
+            }
+            for (Node n : nodes) {
+                if (n.process != null && n.process.isAlive()) {
+                    n.process.destroyForcibly();
+                }
+            }
+        }
+    }
+
+    /** 循环限时获取 n 许可并即时归还，直至某轮成功（池满信号）——终态收敛判据。 */
+    private static void awaitSemUntilFull(OpenLatchClient client, String key, int permits,
+            long budgetMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        while (System.currentTimeMillis() < deadline) {
+            OSemaphore probe = client.newSemaphore(key, permits);
+            try {
+                if (probe.tryAcquire(permits)) {
+                    probe.release(permits);
+                    return;
+                }
+            } catch (OpenLatchException transient0) {
+                // 改道/重连窗：瞬断重试。
+            } catch (IllegalMonitorStateException ignore) {
+                return; // 获授即失（罕见交叠）：视为已达终态
+            }
+            Thread.sleep(500);
+        }
+        throw new AssertionError("pool did not converge to full within budget");
+    }
+
     /** 一轮滚动重启演练：起集群→双线程负载→按序重启三节点→错误率判定→报告。 */
     private void runRoll(boolean leaderFirst) throws Exception {
         // 调试可用 -Ddrill.driveSeconds=<s> 缩短稳态时长快速迭代（默认 DRIVE_SECONDS）。

@@ -14,6 +14,11 @@ Semaphore 的授予、释放、租约到期与 Latch 的 `countDown` SHALL 经�
 - **WHEN** `countDown` 提交后查询任一回放副本的 latch 状态
 - **THEN** 计数一致下降；归零后各副本状态一致为放行态
 
+#### Scenario: 池回收后的队首重发（Semaphore 集群生命周期）
+
+- **WHEN** Semaphore 池随持有清零被回收后，Leader 队列中的队首以不携带总量断言的请求重发获取
+- **THEN** 该请求以 `INVALID_REQUEST` 显式拒绝（纯加入者 MUST NOT 隐式重建池）；携带相符总量断言的重发则重建同规模池并按队首授予，位次序保持
+
 #### Scenario: await 零日志增长
 
 - **WHEN** 多个客户端在 Leader 上 await 同一未归零屏障

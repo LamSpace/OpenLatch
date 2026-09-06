@@ -44,14 +44,14 @@
 
 ## 7. P3-07 集群行为（T1 退出档）
 
-- [ ] 7.1 raft 日志：`LATCH_COUNT_DOWN_ENTRY`；Semaphore 复用 ACQUIRE/RELEASE 载荷透传；`LatchAwait` 不入日志（Leader 本地裁决 + `WaitQueue` 登记）；**回执码形接正**：`REJECT_SEMAPHORE_TOTAL`/`OVER_RELEASE` 在集群 apply 侧的 ApplyStatus 映射（当前 default→INTERNAL_ERROR，P3-04 集群档实证）
-- [ ] 7.2 `WaitQueue.Node` 携带 permits（锁恒填 1）；Leader 队首门控推广至许可数判定（"可用 ≥ 队首请求"才通知）——**P3-04 集群档实证缺口**：Semaphore 部分释放（条目未空、池已腾出）当前经 `freedKeys` 无通知通道（锁的 `fullyReleased` 语义正确、许可族需回执携带 `permits_available` 并影子表镜像许可池）； latch 归零 `purgeKey` 式全体广播
-- [ ] 7.3 影子表与快照：`SnapshotState` 条目消息新增 family/许可/latch 字段（编号只增）；`StateComparisons` 扩三类条目
-- [ ] 7.4 确定性：`StateMachineDeterminismTest` 扩 Semaphore/Latch 条目（同序列两次回放逐字段一致）
-- [ ] 7.5 演练扩展：`ClusterSnapshotTest`/`ClusterSnapshotRecoveryTest` 含新条目往返；`LeaderKillDrillIT`/`RollingRestartDrillIT` 各加 Semaphore/Latch 场景（许可不丢不泄漏、awaiter 重发收敛、failover 后计数一致）
-- [ ] 7.6 验证：§7 T1 集群用例矩阵全绿 + 全反应堆 `mvn -s /home/lam/repo/settings.xml clean verify` 全绿 = **T1 退出**
+- [x] 7.1 raft 日志：`LATCH_COUNT_DOWN_ENTRY`；Semaphore 复用 ACQUIRE/RELEASE 载荷透传；`LatchAwait` 不入日志（Leader 本地裁决 + `WaitQueue` 登记）；**回执码形接正**：`REJECT_SEMAPHORE_TOTAL`/`OVER_RELEASE` 在集群 apply 侧的 ApplyStatus 映射（当前 default→INTERNAL_ERROR，P3-04 集群档实证）
+- [x] 7.2 `WaitQueue.Node` 携带 permits（锁恒填 1）；Leader 队首门控推广至许可数判定（"可用 ≥ 队首请求"才通知）——**P3-04 集群档实证缺口**：Semaphore 部分释放（条目未空、池已腾出）当前经 `freedKeys` 无通知通道（锁的 `fullyReleased` 语义正确、许可族需回执携带 `permits_available` 并影子表镜像许可池）； latch 归零 `purgeKey` 式全体广播
+- [x] 7.3 影子表与快照：`SnapshotState` 条目消息新增 family/许可/latch 字段（编号只增）；`StateComparisons` 扩三类条目
+- [x] 7.4 确定性：`StateMachineDeterminismTest` 扩 Semaphore/Latch 条目（同序列两次回放逐字段一致）
+- [x] 7.5 演练扩展：`ClusterSnapshotTest`/`ClusterSnapshotRecoveryTest` 含新条目往返；`LeaderKillDrillIT`/`RollingRestartDrillIT` 各加 Semaphore/Latch 场景（许可不丢不泄漏、awaiter 重发收敛、failover 后计数一致）
+- [x] 7.6 验证：§7 T1 集群用例矩阵全绿 + 全反应堆 `mvn -s /home/lam/repo/settings.xml clean verify` 全绿 = **T1 退出**
 
 ## 8. 文档与验收证据
 
-- [ ] 8.1 Phase 3 设计说明书 §2.1 勘误回写（`permits_total` 字段、`LatchAwaitRequest.count`、D5 回收推论）
-- [ ] 8.2 验收对照：详设 §8 的 T1 相关项（1/2/6）逐项证据索引（CI 常开截图/测试报告）挂 change 目录
+- [x] 8.1 Phase 3 设计说明书 §2.1 勘误回写（`permits_total` 字段、`LatchAwaitRequest.count`、D5 回收推论）
+- [x] 8.2 验收对照：详设 §8 的 T1 相关项（1/2/6）逐项证据索引（CI 常开截图/测试报告）挂 change 目录

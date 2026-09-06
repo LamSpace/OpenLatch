@@ -1,11 +1,13 @@
 package io.github.lamspace.openlatch.server.raft;
 
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
+import io.github.lamspace.openlatch.protocol.LatchCountDownRequest;
 import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
 import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
+import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
@@ -55,6 +57,47 @@ final class RaftEntrySamples {
                         .setRequest(AcquireRequest.newBuilder()
                                 .setKey(key).setLockType(type)
                                 .setThreadId(threadId).setLeaseMs(leaseMs).setWaitMs(waitMs))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** Semaphore 获取条目（许可请求与总量断言）。 */
+    static RaftLogEntry acquireSemaphore(long sessionId, long requestId, String key, long wallMs,
+                                         int permits, int permitsTotal, long seq, long leaseMs) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.LOCK_ACQUIRE_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(AcquirePayload.newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId)
+                        .setRequest(AcquireRequest.newBuilder()
+                                .setKey(key).setLockType(LockType.LOCK_TYPE_SEMAPHORE)
+                                .setThreadId(7).setLeaseMs(leaseMs).setWaitMs(-1)
+                                .setPermits(permits).setPermitsTotal(permitsTotal))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** Semaphore 归还条目（许可数）。 */
+    static RaftLogEntry releasePermits(long sessionId, String key, long token, int permits,
+                                       long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.LOCK_RELEASE_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(ReleasePayload.newBuilder()
+                        .setSessionId(sessionId)
+                        .setRequest(ReleaseRequest.newBuilder()
+                                .setKey(key).setLeaseToken(token).setThreadId(7).setPermits(permits))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** 屏障倒计数条目（count=0 且 total>0 为纯初始化）。 */
+    static RaftLogEntry latchCountDown(long sessionId, String key, long count, long total,
+                                       long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.LATCH_COUNT_DOWN_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(LatchCountDownPayload.newBuilder()
+                        .setSessionId(sessionId)
+                        .setRequest(LatchCountDownRequest.newBuilder()
+                                .setKey(key).setCount(count).setTotal(total))
                         .build().toByteString())
                 .build();
     }

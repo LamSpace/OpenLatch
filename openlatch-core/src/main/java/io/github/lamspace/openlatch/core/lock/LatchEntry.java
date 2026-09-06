@@ -21,6 +21,7 @@ import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
+import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 
 import java.util.ArrayDeque;
@@ -38,9 +39,10 @@ import java.util.Set;
  *       {@code count}（当前剩余，下限 0）；</li>
  *   <li>等待队列 {@code awaiters}（FIFO，元素复用 {@link Waiter} 形态，
  *       {@code lockType} 恒 {@link LockType#LATCH}）；</li>
- *   <li>参与会话集 {@code participants}——屏障无租约，其存活期由参与者
- *       兴趣支撑：定型/扣减/等待的会话都登记，全部参与者消失且无人等待
- *       时条目可回收（防止被遗弃的未归零屏障永久驻留）。</li>
+ *   <li>屏障一经定型即存续至节点重启（一次性语义不随参与者散尽而失效）：
+ *       参与者身份仍被记录用于观测与调试，但 MUST NOT 触发条目回收——
+ *       回收归零屏障会使晚到者误重建同名屏障，破坏一次性护栏；未归零
+ *       屏障的遗弃由 key 命名约定（每轮新 key）管理。</li>
  * </ul>
  *
  * <p><b>与租约机制的关系</b>：{@link #leaseToken()}/{@link #leaseExpiresAtMs()}
@@ -65,7 +67,7 @@ public final class LatchEntry implements KeyEntry {
     private long count;
     /** 等待队列（FIFO，归零后各等待者经重发命中离队）。 */
     private final ArrayDeque<Waiter> awaiters = new ArrayDeque<>();
-    /** 参与会话集（定型/扣减/等待者登记，全部消失即条目可回收）。 */
+    /** 参与会话集（定型/扣减/等待者登记，观测用；不驱动回收，见类注释）。 */
     private final Set<Long> participants = new HashSet<>();
 
     /**
@@ -157,18 +159,27 @@ public final class LatchEntry implements KeyEntry {
      * {@code notify}（CDL 的唤醒语义本就是全体放行；等待者在各自重发命中
      * 规则 2 时离队，故广播不摘队、条目不因广播即刻可回收）。
      *
+     * <p>判定顺序：非零 {@code total} 断言与定型值不符 →
+     * {@link Outcome#REJECT_LATCH_TOTAL}（零扰动，先于参与者登记之外的
+     * 一切迁移）；已归零 → 无操作返回剩余 0；否则扣减并在首次落零时广播。
+     *
      * @param n                  扣减量（{@code >= 0}，0 为纯初始化/断言）
+     * @param total              定型断言（0 不主张）
      * @param sessionId          发起会话（登记参与者）
      * @param now                当前时刻（毫秒）
      * @param headReplyTimeoutMs 通知响应超时（毫秒）
      * @param notify             通知收集列表，由调用方在条目锁外触发
-     * @return 生效后的剩余计数
+     * @return 结果：GRANTED 携带剩余计数，或总量断言拒绝
      */
-    public synchronized long countDown(long n, long sessionId, long now,
+    public synchronized LatchCountDownResult countDown(long n, long total, long sessionId, long now,
             long headReplyTimeoutMs, List<Waiter> notify) {
+        // 总量断言（与 await 规则 1 同口径；0 为不主张）。
+        if (total != 0 && total != this.total) {
+            return new LatchCountDownResult(Outcome.REJECT_LATCH_TOTAL, 0);
+        }
         participants.add(sessionId);
         if (count == 0) {
-            return 0;
+            return new LatchCountDownResult(Outcome.GRANTED, 0);
         }
         long before = count;
         count = Math.max(0, count - n);
@@ -183,7 +194,7 @@ public final class LatchEntry implements KeyEntry {
             awaiters.clear();
             awaiters.addAll(updated);
         }
-        return count;
+        return new LatchCountDownResult(Outcome.GRANTED, count);
     }
 
     /**
@@ -262,16 +273,14 @@ public final class LatchEntry implements KeyEntry {
     }
 
     /**
-     * 是否可回收：计数已归零（或从未有扣减需求……以 count==0 为准）且无人
-     * 等待且无参与会话——参与者未清空前条目必须存活（未归零屏障等待
-     * countDown 的载体）；参与者全散且无等待者时，无论计数如何都可回收
-     * （被遗弃的屏障不驻留）。
+     * 恒 {@code false}：屏障条目不随操作收尾回收——未归零屏障必须存活等待
+     * 扣减，已归零屏障以条目存续承载一次性护栏（见类注释与 design D5 修订）。
      *
-     * @return 条目可回收返回 true
+     * @return 恒 {@code false}
      */
     @Override
     public boolean isEmpty() {
-        return awaiters.isEmpty() && participants.isEmpty();
+        return false;
     }
 
     /**

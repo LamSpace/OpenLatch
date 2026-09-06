@@ -66,9 +66,9 @@ public enum Outcome {
     REJECT_SEMAPHORE_TOTAL,
     /**
      * 拒绝：Latch 初始计数断言不成立——屏障不存在且请求（countDown/await
-     * 任一通道）未携带 {@code > 0} 的 {@code total}，或既有屏障上非零主张
-     * 与定型值不符（Phase 3 详设 §2.4 / design D1）；条目状态零扰动，
-     * server 层映射协议 {@code INVALID_REQUEST}。
+     * 任一通道）未携带 {@code > 0} 的 {@code total}（含对不存在屏障的无断言
+     * 扣减/挂起），或既有屏障上非零主张与定型值不符（Phase 3 详设 §2.4 /
+     * design D1）；条目状态零扰动，server 层映射协议 {@code INVALID_REQUEST}。
      */
     REJECT_LATCH_TOTAL
 }
