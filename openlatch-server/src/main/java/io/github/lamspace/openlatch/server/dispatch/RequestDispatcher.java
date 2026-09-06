@@ -19,9 +19,13 @@ package io.github.lamspace.openlatch.server.dispatch;
 import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
+import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
+import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
@@ -34,6 +38,8 @@ import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
+import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
+import io.github.lamspace.openlatch.protocol.LatchCountDownResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.server.session.ServerSession;
@@ -84,8 +90,84 @@ public final class RequestDispatcher {
             case LEASE_RENEW -> msg.hasLeaseRenewRequest()
                     ? dispatchRenew(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case LATCH_COUNT_DOWN -> msg.hasLatchCountDownRequest()
+                    ? dispatchLatchCountDown(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case LATCH_AWAIT -> msg.hasLatchAwaitRequest()
+                    ? dispatchLatchAwait(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
+        };
+    }
+
+    /**
+     * 分发屏障倒计数（Phase 3 P3-05，详设 §2.4）：负参数在协议层拒绝；
+     * v3 门控——LATCH 消息对握版本 &lt;3 的会话消息级拒绝、不断连。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchLatchCountDown(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 3) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        var req = msg.getLatchCountDownRequest();
+        if (req.getCount() < 0 || req.getTotal() < 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        var result = core.countDown(new LatchCountDownCommand(
+                session.sessionId(), req.getKey(), req.getCount(), req.getTotal()));
+        return envelope(msg, MessageType.LATCH_COUNT_DOWN, b -> b.setLatchCountDownResponse(
+                LatchCountDownResponse.newBuilder()
+                        .setStatus(toLatchStatus(result.outcome()))
+                        .setRemaining(result.remaining())));
+    }
+
+    /**
+     * 分发屏障等待（Phase 3 P3-05）：判定与门控同上；QUEUED 携带位次，
+     * 归零经 {@code AWAIT_NOTIFY} 推送后由客户端同 id 重发。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchLatchAwait(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 3) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        var req = msg.getLatchAwaitRequest();
+        if (req.getTotal() < 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        LatchAwaitResult result = core.latchAwait(new LatchAwaitCommand(
+                session.sessionId(), msg.getRequestId(), req.getKey(), req.getTotal()));
+        return envelope(msg, MessageType.LATCH_AWAIT, b -> b.setLatchAwaitResponse(
+                LatchAwaitResponse.newBuilder()
+                        .setStatus(toLatchStatus(result.outcome()))
+                        .setQueuePosition(result.queuePosition())));
+    }
+
+    /**
+     * 屏障命令结果 → 协议状态码（映射表与 {@link #toAcquireStatus} 同规则：
+     * GRANTED=OK、拒绝细分同码，design D3 协议面不新增状态码）。
+     *
+     * @param outcome 屏障命令结果状态
+     * @return 协议状态码
+     */
+    static StatusCode toLatchStatus(Outcome outcome) {
+        return switch (outcome) {
+            case GRANTED -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case DENIED -> StatusCode.DENIED;
+            case REJECT_KEY_EMPTY -> StatusCode.KEY_EMPTY;
+            case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
+            case REJECT_QUEUE_FULL -> StatusCode.OVERLOADED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_TYPE_MISMATCH -> StatusCode.INVALID_REQUEST;
+            case REJECT_SEMAPHORE_TOTAL -> StatusCode.INVALID_REQUEST;
+            case REJECT_LATCH_TOTAL -> StatusCode.INVALID_REQUEST;
         };
     }
 
@@ -225,7 +307,8 @@ public final class RequestDispatcher {
      */
     public static boolean isV3OnlyLockType(io.github.lamspace.openlatch.protocol.LockType type) {
         return type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR
-                || type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE;
+                || type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE
+                || type == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_LATCH;
     }
 
     /**
@@ -250,25 +333,14 @@ public final class RequestDispatcher {
     }
 
     /**
-     * core 获取结果状态 → 协议状态码（全表映射）。
+     * core 获取结果状态 → 协议状态码（全表映射，与屏障命令共用
+     * {@link #toLatchStatus} 单表——Outcome 对两类命令的码形语义一致）。
      *
      * @param outcome core 获取结果状态
      * @return 协议状态码
      */
     static StatusCode toAcquireStatus(Outcome outcome) {
-        return switch (outcome) {
-            case GRANTED -> StatusCode.OK;
-            case QUEUED -> StatusCode.QUEUED;
-            case DENIED -> StatusCode.DENIED;
-            case REJECT_KEY_EMPTY -> StatusCode.KEY_EMPTY;
-            case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
-            case REJECT_QUEUE_FULL -> StatusCode.OVERLOADED;
-            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
-            // 家族误用与总量断言不成立都是请求形状错误，非会话/容量问题
-            // （Phase 3 T1 design D3：协议面不细分，统一 INVALID_REQUEST）。
-            case REJECT_TYPE_MISMATCH -> StatusCode.INVALID_REQUEST;
-            case REJECT_SEMAPHORE_TOTAL -> StatusCode.INVALID_REQUEST;
-        };
+        return toLatchStatus(outcome);
     }
 
     /**
@@ -364,6 +436,11 @@ public final class RequestDispatcher {
             // v2：CLUSTER_VIEW 自带 status，拒绝路径状态码在线路可见（空成员表）。
             case CLUSTER_VIEW -> b.setClusterView(
                     io.github.lamspace.openlatch.protocol.ClusterView.newBuilder().setStatus(status));
+            // v3：LATCH 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
+            case LATCH_COUNT_DOWN -> b.setLatchCountDownResponse(
+                    LatchCountDownResponse.newBuilder().setStatus(status));
+            case LATCH_AWAIT -> b.setLatchAwaitResponse(
+                    LatchAwaitResponse.newBuilder().setStatus(status));
             default -> {
             }
         }

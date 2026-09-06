@@ -59,7 +59,7 @@ key 条目 SHALL 由首次创建它的请求定型所属家族：LOCK（`REENTRA
 
 ### Requirement: Latch 倒计数与一次性屏障
 
-`LatchEntry` SHALL 承载倒计数：初始值由首个 `await` 请求的 `count` 定型；`countDown(n)` 以 `count = max(0, count − n)` 更新，归零瞬间 MUST 对**全部**等待者发出通知（全体放行）；归零后 `await` MUST 立即通过、`countDown` MUST 为无操作。Latch 的等待者 MUST NOT 登记租约（不参与到期堆与续租），会话关闭仅摘除其等待者身份且 MUST NOT 影响计数。计数归零且无等待者后条目 SHALL 可被回收，回收即丧失一次性护栏（该 key 的后续带值 await 将新建屏障）。
+`LatchEntry` SHALL 承载倒计数：初始值由首个携带非零 `total` 断言的请求（`countDown` 或 `await` 任一通道）定型；`countDown(n)` 以 `count = max(0, count − n)` 更新，归零瞬间 MUST 对**全部**等待者发出通知（全体放行，等待者在各自重发命中"已归零"时离队）；归零后 `await` MUST 立即通过、`countDown` MUST 为无操作。Latch 的等待者 MUST NOT 登记租约（不参与到期堆与续租），会话关闭仅摘除其等待者身份且 MUST NOT 影响计数。条目存续由参与者集支撑（定型/扣减/等待的会话均为参与者）：全部参与会话关闭且无等待者后条目 SHALL 被回收，回收即丧失一次性护栏（该 key 的后续带 `total` 请求将新建屏障，纯加入被拒；参与者未散尽时归零屏障保持放行态）。
 
 #### Scenario: 归零全体广播
 

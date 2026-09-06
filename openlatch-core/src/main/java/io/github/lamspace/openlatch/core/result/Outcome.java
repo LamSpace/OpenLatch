@@ -63,5 +63,12 @@ public enum Outcome {
      * （Phase 3 T1 详设 §2.3 / design D1）；条目状态零扰动，server 层
      * 映射协议 {@code INVALID_REQUEST}。
      */
-    REJECT_SEMAPHORE_TOTAL
+    REJECT_SEMAPHORE_TOTAL,
+    /**
+     * 拒绝：Latch 初始计数断言不成立——屏障不存在且请求（countDown/await
+     * 任一通道）未携带 {@code > 0} 的 {@code total}，或既有屏障上非零主张
+     * 与定型值不符（Phase 3 详设 §2.4 / design D1）；条目状态零扰动，
+     * server 层映射协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_LATCH_TOTAL
 }

@@ -31,10 +31,10 @@
 
 ## 5. P3-05 CountDownLatch（core + 协议）
 
-- [ ] 5.1 proto：`LockType.LOCK_TYPE_LATCH`、`MessageType.LATCH_COUNT_DOWN=8`/`LATCH_AWAIT=9`、四 payload（`LatchAwaitRequest.count` 首请求定型，0=纯加入）；`Envelope` oneof 扩展
-- [ ] 5.2 `LatchEntry`（归零广播全体、一次性、`isEmpty` 即回收（D5）、无租约不入到期堆）；`CoreEngine` latch 命令入口（countDown/await）与 `CoreEventListener` 复用
-- [ ] 5.3 `CoreEngineLatchTest`：归零全体广播、归零后 await 即过、countDown no-op、纯加入拒、断连摘除不影响计数、多轮 expireDue 零触及
-- [ ] 5.4 验证：CDL 语义用例全绿
+- [x] 5.1 proto：`LockType.LOCK_TYPE_LATCH`、`MessageType.LATCH_COUNT_DOWN=8`/`LATCH_AWAIT=9`、四 payload（`LatchAwaitRequest.count` 首请求定型，0=纯加入）；`Envelope` oneof 扩展
+- [x] 5.2 `LatchEntry`（归零广播全体、一次性、`isEmpty` 即回收（D5）、无租约不入到期堆）；`CoreEngine` latch 命令入口（countDown/await）与 `CoreEventListener` 复用
+- [x] 5.3 `CoreEngineLatchTest`：归零全体广播、归零后 await 即过、countDown no-op、纯加入拒、断连摘除不影响计数、多轮 expireDue 零触及
+- [x] 5.4 验证：CDL 语义用例全绿
 
 ## 6. P3-06 CountDownLatch（客户端）
 

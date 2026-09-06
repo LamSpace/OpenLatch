@@ -53,5 +53,11 @@ public enum LockType {
      * 类型的命令由门面分派至 {@code SemaphoreEntry}（详设 §2.3），不参与
      * 上述互斥矩阵。
      */
-    SEMAPHORE
+    SEMAPHORE,
+    /**
+     * 倒计数屏障（Phase 3 T1）：非锁家族类型，仅作 key 定型判别——屏障
+     * 操作经门面独立入口（{@code countDown}/{@code latchAwait}）进入
+     * {@code LatchEntry}（详设 §2.4），不经获取/释放/续租命令通道。
+     */
+    LATCH
 }

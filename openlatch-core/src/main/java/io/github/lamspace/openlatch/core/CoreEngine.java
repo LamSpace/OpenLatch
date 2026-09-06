@@ -17,10 +17,13 @@
 package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
+import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
+import io.github.lamspace.openlatch.core.lock.LatchEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
 import io.github.lamspace.openlatch.core.lock.SemaphoreEntry;
@@ -28,6 +31,8 @@ import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
+import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
@@ -270,6 +275,11 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
+        // LATCH 不经获取通道（详设 §2.1"走独立通道"）：ACQUIRE 携带 LATCH
+        // 类型属请求形状错误，协议层 v3 门控之后由本守卫兜底。
+        if (cmd.lockType() == LockType.LATCH) {
+            return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
+        }
         KeyFamily family = familyOf(cmd.lockType());
         // Semaphore 建条目预检：条目不存在时总量主张必须 > 0（design D1）。
         // 竞态良性：他者抢先建条目后本请求按"既有条目断言"规则处理。
@@ -328,6 +338,7 @@ public final class CoreEngine {
         return switch (lockType) {
             case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
             case SEMAPHORE -> KeyFamily.SEMAPHORE;
+            case LATCH -> KeyFamily.LATCH;
         };
     }
 
@@ -347,8 +358,10 @@ public final class CoreEngine {
         return switch (family) {
             case LOCK -> new LockEntry(key, reentrant);
             case SEMAPHORE -> new SemaphoreEntry(key, cmd.permitsTotal());
+            // LATCH 条目只能经屏障专属命令（latchAwait/countDown）创建，
+            // ACQUIRE 携带 LATCH 类型在入口即拒（见 acquire 首行守卫）。
             case LATCH -> throw new IllegalStateException(
-                    "entry family not yet implemented: " + family);
+                    "latch entries are created only via latch channels");
         };
     }
 
@@ -439,6 +452,132 @@ public final class CoreEngine {
             }
             return result;
         }
+    }
+
+    /**
+     * 等待屏障（Phase 3 详设 §2.4 / P3-05）：校验会话与 key 后，
+     * 已归零立即通过、挂起排队或拒绝。
+     *
+     * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 校验 →
+     * 条目定位：key 无条目时 MUST 携带 {@code total > 0} 定型创建（否则
+     * {@link Outcome#REJECT_LATCH_TOTAL}）；条目锁内回查存活、家族判定
+     * （锁/Semaphore 条目 → {@link Outcome#REJECT_TYPE_MISMATCH}）、权威
+     * 会话校验与触及登记（与 {@link #sessionClosed} 原子互斥）→
+     * {@link LatchEntry#await} 规则集。参与者散尽后条目随既有回收路径移除。
+     *
+     * @param cmd 等待命令
+     * @return 等待结果：GRANTED=已归零通过；QUEUED=挂起（1 起位次）
+     */
+    public LatchAwaitResult latchAwait(LatchAwaitCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return new LatchAwaitResult(Outcome.REJECT_SESSION, 0);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return new LatchAwaitResult(keyBad, 0);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.total() <= 0) {
+                    return new LatchAwaitResult(Outcome.REJECT_LATCH_TOTAL, 0);
+                }
+                e = lockTable.computeIfAbsent(key, k -> new LatchEntry(k, cmd.total()));
+            }
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态移除，重试（design.md D4 同机制）
+                }
+                if (e.family() != KeyFamily.LATCH) {
+                    return new LatchAwaitResult(Outcome.REJECT_TYPE_MISMATCH, 0);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    if (e.isEmpty()) {
+                        lockTable.remove(key, e);
+                    }
+                    return new LatchAwaitResult(Outcome.REJECT_SESSION, 0);
+                }
+                LatchAwaitResult result = ((LatchEntry) e).await(cmd, now, config);
+                if (e.isEmpty()) {
+                    lockTable.remove(key, e);
+                }
+                return result;
+            }
+        }
+    }
+
+    /**
+     * 倒计数（Phase 3 详设 §2.4 / P3-05）：条目定位与会话校验同
+     * {@link #latchAwait}；生效扣减后计数首次归零时对全部等待者广播
+     * 通知（锁外经 {@link CoreEventListener} 触发）。归零屏障上的
+     * countDown 为无操作（一次性语义）。
+     *
+     * @param cmd 倒计数命令（{@code count = 0} 携带 {@code total} 为纯初始化）
+     * @return 倒计数结果：GRANTED 携带生效后的剩余计数
+     */
+    public LatchCountDownResult countDown(LatchCountDownCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return new LatchCountDownResult(Outcome.REJECT_SESSION, 0);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return new LatchCountDownResult(keyBad, 0);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.total() <= 0) {
+                    return new LatchCountDownResult(Outcome.REJECT_LATCH_TOTAL, 0);
+                }
+                e = lockTable.computeIfAbsent(key, k -> new LatchEntry(k, cmd.total()));
+            }
+            List<Waiter> notify = new ArrayList<>();
+            LatchCountDownResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue;
+                }
+                if (e.family() != KeyFamily.LATCH) {
+                    return new LatchCountDownResult(Outcome.REJECT_TYPE_MISMATCH, 0);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    if (e.isEmpty()) {
+                        lockTable.remove(key, e);
+                    }
+                    return new LatchCountDownResult(Outcome.REJECT_SESSION, 0);
+                }
+                long remaining = ((LatchEntry) e).countDown(cmd.count(), cmd.sessionId(),
+                        now, config.headReplyTimeoutMs(), notify);
+                result = new LatchCountDownResult(Outcome.GRANTED, remaining);
+                if (e.isEmpty()) {
+                    lockTable.remove(key, e);
+                }
+            }
+            fireNotify(notify, key);
+            return result;
+        }
+    }
+
+    /**
+     * key 形状校验的共享出口：空与超长分别回
+     * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
+     * 合法返回 {@code null}。
+     *
+     * @param key 待校验键
+     * @return 拒绝结果；合法为 {@code null}
+     */
+    private Outcome validateKey(String key) {
+        if (key == null || key.isEmpty()) {
+            return Outcome.REJECT_KEY_EMPTY;
+        }
+        if (key.getBytes(StandardCharsets.UTF_8).length > config.maxKeyLength()) {
+            return Outcome.REJECT_KEY_TOO_LONG;
+        }
+        return null;
     }
 
     /**

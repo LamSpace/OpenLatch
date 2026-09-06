@@ -2,7 +2,7 @@
 
 ### Requirement: v3 消息与字段增量
 
-协议 SHALL 以纯增量方式扩展 v3：`LockType` 新增 `LOCK_TYPE_FAIR = 4`、`LOCK_TYPE_SEMAPHORE = 5`、`LOCK_TYPE_LATCH = 6`；`AcquireRequest` 新增 `permits`（field 6，请求许可数，仅 SEMAPHORE 有效，缺省语义为 1）与 `permits_total`（field 7，总许可数，仅 SEMAPHORE 建条目时要求）；`ReleaseRequest` 新增 `permits`（field 4，归还许可数，缺省语义为 1）；新增 `LatchCountDownRequest { key, count }` / `LatchCountDownResponse { status, remaining }` 与 `LatchAwaitRequest { key, count }` / `LatchAwaitResponse { status }` 四个 payload 消息，`count` 为本次扣减量（countDown）或屏障初始计数（await，0 表示纯加入）。既有字段编号与语义 MUST NOT 变更。
+协议 SHALL 以纯增量方式扩展 v3：`LockType` 新增 `LOCK_TYPE_FAIR = 4`、`LOCK_TYPE_SEMAPHORE = 5`、`LOCK_TYPE_LATCH = 6`；`AcquireRequest` 新增 `permits`（field 6，请求许可数，仅 SEMAPHORE 有效，缺省语义为 1）与 `permits_total`（field 7，总许可数，仅 SEMAPHORE 建条目时要求）；`ReleaseRequest` 新增 `permits`（field 4，归还许可数，缺省语义为 1）；新增 `MessageType` `LATCH_COUNT_DOWN = 8`、`LATCH_AWAIT = 9` 与四个 payload 消息：`LatchCountDownRequest { key, count, total }` / `LatchCountDownResponse { status, remaining }`、`LatchAwaitRequest { key, total }` / `LatchAwaitResponse { status }`。`count` 为本次扣减量；`total` 为屏障初始计数的定型断言——非零时条目不存在则创建、存在则须与定型值一致，`0` 为不主张（`countDown` 不主张且屏障不存在、`await` 不主张且屏障不存在均被拒绝；`count = 0` 携带非零 `total` 即纯初始化调用）。初始计数经 countDown 与 await 双通道定型，杜绝"worker 先于创建者 await 到达即丢失扣减"的初始化竞态。既有字段编号与语义 MUST NOT 变更。
 
 #### Scenario: 许可字段合法性
 
@@ -11,13 +11,18 @@
 
 #### Scenario: 首次定型与不符拒绝
 
-- **WHEN** SEMAPHORE 首次 ACQUIRE 未携带 `permits_total`，或既有条目上的请求携带与其总许可数不符的非零 `permits_total`；或 LATCH 首次 LATCH_AWAIT 未携带 `count`，或既有屏障上的 await 携带与其定型值不符的非零 `count`
+- **WHEN** SEMAPHORE 首次 ACQUIRE 未携带 `permits_total`，或既有条目上的请求携带与其总许可数不符的非零 `permits_total`；或 LATCH 请求（LATCH_COUNT_DOWN / LATCH_AWAIT）对不存在的屏障未携带非零 `total`，或对既有屏障携带与其定型值不符的非零 `total`
 - **THEN** 服务端以 `INVALID_REQUEST` 拒绝，条目状态零扰动
 
 #### Scenario: 非存在屏障的纯加入被拒
 
-- **WHEN** 对不存在（或已归零回收）的 LATCH key 发送 `count = 0` 的 LATCH_AWAIT
-- **THEN** 服务端以 `INVALID_REQUEST` 拒绝（纯加入 MUST NOT 隐式创建屏障）
+- **WHEN** 对不存在（或已归零回收）的 LATCH key 发送 `total = 0` 的 LATCH_AWAIT 或 LATCH_COUNT_DOWN
+- **THEN** 服务端以 `INVALID_REQUEST` 拒绝（纯加入与无断言扣减 MUST NOT 隐式创建屏障）
+
+#### Scenario: 纯初始化调用
+
+- **WHEN** 对不存在的屏障发送 `count = 0, total = n` 的 LATCH_COUNT_DOWN
+- **THEN** 以 `n` 创建屏障并返回 `remaining = n`；对已存在且定型值相符的屏障，同一调用为空操作返回当前剩余
 
 ## MODIFIED Requirements
 

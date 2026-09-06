@@ -25,7 +25,7 @@
 
 ### D1 初始值定型通道：首次请求者定型（增补协议字段）
 
-**Latch**：`LatchAwaitRequest { key, count }`——`count > 0` 且 key 无条目 → 以该值创建屏障；条目已存在 → 非零 `count` 与定型值不符回 `INVALID_REQUEST`，`count = 0` 为"纯加入"（不主张初值，条目不存在即拒绝）。**Semaphore**：`AcquireRequest` 增补 `permits_total = 7`（文档 §2.1 只有 `permits = 6`）——建条目时必填 > 0，既有条目上非零值须匹配，0 为纯请求。
+**Latch**（P3-05 实施时精化）：初值定型经**双通道**——`LatchCountDownRequest { key, count, total }` 与 `LatchAwaitRequest { key, total }` 均携带可选 `total` 断言：非零时条目不存在则创建、存在则须匹配（`0` 为不主张，条目不存在即拒绝）。精化动因：若仅 await 可定型，"创建者 await 之前 worker 的 countDown 先到"即丢失扣减（初始化竞态）；`countDown(0, total=n)` 提供非阻塞显式初始化，与 Java"创建器构造屏障"的用法同构。`count = 0` 且 `total = 0` 的 countDown 非法（无扣减无断言）。**Semaphore**：`AcquireRequest` 增补 `permits_total = 7`（文档 §2.1 只有 `permits = 6`）——建条目时必填 > 0，既有条目上非零值须匹配，0 为纯请求。
 
 *备选*：B. `ACQUIRE(type=LATCH)` 做初始化——搅浑 ACQUIRE 语义、违背 §2.1"走独立通道"原意，否；C. `countDown` 负值表示初始化——语义最脏，否。A 与"条目由首次请求定型"的既有约定同构，代价仅为文档勘误。"先加入者定规则"的隐晦性由 `count = 0` 纯加入通道兜底：不知 N 的等待者仍可安全 await。
 
@@ -50,7 +50,7 @@
 
 ### D5 Latch 生命周期：归零即空、随框架回收
 
-归零瞬间对全部 awaiter 广播（逐个 `listener.notifyHead`，接口零改动）→ awaiter 清空 → `isEmpty() == true` → 走既有条目回收路径删除。一次性护栏的窗口 = 条目存续期；归零回收后晚到的 `count = 0` await 被拒（条目不存在）、晚到的带值 await 新建屏障——这是"新屏障 = 新 key"（详设 §2.4）文档明示约定的推论，换取**零状态泄漏**（每请求一个 latch 是 CDL 的常态用法，永久保留归零条目不可接受）。*备选*：归零条目永久保留/带 TTL 保留——泄漏或新增配置面，均否。Latch 无租约：`LatchEntry.leaseToken()` 恒 0、永不入到期堆（`CoreEngine.expireDue` 遍历处按家族跳过，实际因不入堆而零分支成本）。
+归零瞬间对全部 awaiter 广播（逐个 `listener.notifyHead`，接口零改动）；广播不离队——awaiter 各自重发 await 命中"已归零"规则时离队。条目存续由**参与者集**（await/countDown 触达的会话）支撑：全部参与会话关闭且无等待者后条目回收。这同时解决两个问题：未归零且暂时无 awaiter 的屏障不被误 GC（等待扣减的载体必须存活），而归零屏障的护栏窗口 = 参与者存续期（参与者散尽即回收，"新屏障 = 新 key"约定推论，换取零状态泄漏——每请求一个 latch 是 CDL 常态用法，永久保留不可接受）。*备选*：`isEmpty = count==0 && awaiters 空`——未归零屏障被 GC，错误；归零永久保留/TTL——泄漏或新增配置面，否。Latch 无租约：`LatchEntry.leaseToken()` 恒 0、永不入到期堆（`CoreEngine.expireDue` 实际因不入堆而零分支成本）。
 
 ### D6 集群日志与消息路由
 
