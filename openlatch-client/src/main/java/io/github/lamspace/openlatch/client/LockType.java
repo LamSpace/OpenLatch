@@ -45,7 +45,13 @@ public enum LockType {
     /** 互斥写锁。 */
     WRITE(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_WRITE),
     /** 显式公平承诺互斥锁（v3，语义等价 {@link #REENTRANT}）。 */
-    FAIR(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR);
+    FAIR(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_FAIR),
+    /**
+     * 许可门闸（v3，Phase 3 T1）：非锁类型，仅 {@link OSemaphore} 内部
+     * 使用；应用侧经 {@link OpenLatchClient#newSemaphore} 创建信号量，
+     * 不经本枚举的公开锁工厂。
+     */
+    SEMAPHORE(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE);
 
     /** 对应的协议枚举值。 */
     private final io.github.lamspace.openlatch.protocol.LockType wireType;

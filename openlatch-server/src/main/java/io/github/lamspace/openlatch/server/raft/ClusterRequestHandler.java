@@ -147,11 +147,17 @@ public final class ClusterRequestHandler {
         }
         boolean queueWanted = req.getWaitMs() != 0;
         boolean held = kernel.shadow().isHeld(req.getKey());
+        // 重入豁免（Phase 3 T1）：请求归属已在持有集内时不得被 busy 拦截——
+        // 与单机引擎"重入先于队列规则"对齐；重入判定读无锁快照（可旧不可错，
+        // 误放行由应用路径裁决）。
+        boolean reentrantHold = held && kernel.shadow().isHeldBy(
+                session.sessionId(), req.getThreadId(), req.getKey());
         // 队首重发且锁已空出：自推进走复制授予路径（AWAIT_NOTIFY 后重发的
         // Phase 1 语义在集群路径的等价形态；onGranted 负责出队）。
         boolean selfPromotion = !held && waitQueue.isHead(
                 session.sessionId(), msg.getRequestId(), req.getKey());
-        boolean busy = held || (!selfPromotion && waitQueue.hasWaiters(req.getKey()));
+        boolean busy = (held && !reentrantHold)
+                || (!selfPromotion && waitQueue.hasWaiters(req.getKey()));
         if (busy) {
             if (!queueWanted) {
                 writeSync(ctx, session, acquireErrorResponse(msg, StatusCode.DENIED));

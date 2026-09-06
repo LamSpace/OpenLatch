@@ -256,8 +256,12 @@ public final class LockStateMachineCore {
         return switch (r.outcome()) {
             case GRANTED -> {
                 long expiresAt = entry.getWallClockMs() + r.grantedLeaseMs();
-                shadow.grant(p.getSessionId(), req.getThreadId(), req.getKey(),
-                        req.getLockType().getNumber(), r.leaseToken(), r.grantedLeaseMs(), expiresAt);
+                // Semaphore 授予按许可数镜像持有增量；锁家族恒 1（P3-03/P3-07）。
+                int holderDelta = lockType == LockType.SEMAPHORE
+                        ? RequestDispatcher.normalizedPermits(req.getPermits()) : 1;
+                shadow.grantDelta(p.getSessionId(), req.getThreadId(), req.getKey(),
+                        req.getLockType().getNumber(), r.leaseToken(), r.grantedLeaseMs(), expiresAt,
+                        holderDelta);
                 yield ApplyResult.newBuilder()
                         .setStatus(ApplyStatus.OK)
                         .setLeaseToken(r.leaseToken())
@@ -292,7 +296,8 @@ public final class LockStateMachineCore {
                 local, req.getKey(), req.getLeaseToken(), req.getThreadId(),
                 RequestDispatcher.normalizedPermits(req.getPermits())));
         if (r.status() == ReleaseStatus.OK) {
-            shadow.release(p.getSessionId(), req.getThreadId(), req.getKey());
+            // 引擎归还多少镜像回退多少：锁恒 1、Semaphore 为归还许可数。
+            shadow.release(p.getSessionId(), req.getThreadId(), req.getKey(), r.releasedCount());
         }
         ApplyStatus st = switch (r.status()) {
             case OK -> ApplyStatus.OK;

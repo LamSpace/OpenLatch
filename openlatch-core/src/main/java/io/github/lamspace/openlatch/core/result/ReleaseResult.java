@@ -21,6 +21,20 @@ package io.github.lamspace.openlatch.core.result;
  *
  * @param status        释放状态
  * @param fullyReleased 持有计数归零（锁完全释放）时为 true
+ * @param releasedCount 本次成功释放实际归还的持有计数（锁逐层恒 1，
+ *                      Semaphore 为归还许可数；非 {@code OK} 恒 0）——
+ *                      集群影子表按此增量镜像回退，与引擎计数严格对称
  */
-public record ReleaseResult(ReleaseStatus status, boolean fullyReleased) {
+public record ReleaseResult(ReleaseStatus status, boolean fullyReleased, int releasedCount) {
+
+    /**
+     * 无成功归还语义的构造便捷形态（{@code releasedCount = 0}）：
+     * 拒绝类结果统一使用。
+     *
+     * @param status        释放状态
+     * @param fullyReleased 是否完全释放
+     */
+    public ReleaseResult(ReleaseStatus status, boolean fullyReleased) {
+        this(status, fullyReleased, 0);
+    }
 }

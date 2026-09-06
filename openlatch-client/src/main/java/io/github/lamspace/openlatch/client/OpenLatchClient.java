@@ -783,7 +783,11 @@ public final class OpenLatchClient implements AutoCloseable {
                         .setLockType(spec.lockType().wireType())
                         .setThreadId(spec.threadId())
                         .setLeaseMs(spec.leaseMs())
-                        .setWaitMs(spec.waitMs() == 0 ? 0 : -1))
+                        .setWaitMs(spec.waitMs() == 0 ? 0 : -1)
+                        // Phase 3 T1 许可参数：锁家族恒 permits=1 / total=0，
+                        // 与服务端缺省归一一致（线路零扰动）。
+                        .setPermits(spec.permits())
+                        .setPermitsTotal(spec.permitsTotal()))
                 .build();
         long totalTimeoutMs;
         if (spec.waitMs() == 0) {
@@ -803,12 +807,28 @@ public final class OpenLatchClient implements AutoCloseable {
      * 服务端按凭据与归属裁决：凭据不匹配回 {@code INVALID_TOKEN}，
      * 未持有回 {@code NOT_HELD}，均以携带状态码的异常完成。
      *
+     * 锁家族便捷形态（等价 {@code permits = 1}，线路缺省零扰动）。
+     *
      * @param key        锁键
      * @param leaseToken 获取时签发的租约凭据
      * @param threadId   申请释放的线程标识
      * @return 释放结果 future；服务端确认释放后正常完成
      */
     public CompletableFuture<Void> releaseAsync(String key, long leaseToken, long threadId) {
+        return releaseAsync(key, leaseToken, threadId, 0);
+    }
+
+    /**
+     * 异步释放（Phase 3 T1 扩展）：携带归还许可数（{@code 0} 为缺省单许可，
+     * 仅 Semaphore 条目消费；锁路径不读）。
+     *
+     * @param key        锁键
+     * @param leaseToken 获取时签发的租约凭据
+     * @param threadId   申请释放的线程标识
+     * @param permits    归还许可数（{@code >= 0}，0 按 1 处理）
+     * @return 释放结果 future；服务端确认释放后正常完成
+     */
+    public CompletableFuture<Void> releaseAsync(String key, long leaseToken, long threadId, int permits) {
         if (closed) {
             CompletableFuture<Void> failed = new CompletableFuture<>();
             failed.completeExceptionally(new IllegalStateException("client is shut down"));
@@ -823,7 +843,8 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setReleaseRequest(ReleaseRequest.newBuilder()
                         .setKey(key)
                         .setLeaseToken(leaseToken)
-                        .setThreadId(threadId));
+                        .setThreadId(threadId)
+                        .setPermits(permits));
         return targetMux.send(builder, config.requestTimeout().toMillis())
                 .thenApply(resp -> {
                     StatusCode status = resp.getReleaseResponse().getStatus();
@@ -1180,6 +1201,36 @@ public final class OpenLatchClient implements AutoCloseable {
         return new RemoteReadWriteLock(key,
                 new RemoteLock(this, key, LockType.READ),
                 new RemoteLock(this, key, LockType.WRITE));
+    }
+
+    /**
+     * 创建分布式信号量句柄并主张许可总量（Phase 3 详设 §2.3 / P3-04）：
+     * key 首建时以 {@code totalPermits} 定型，既有条目上作为一致性断言
+     * （与定型值不符的获取请求被服务端以 {@code INVALID_REQUEST} 拒绝）。
+     *
+     * @param key          信号量键
+     * @param totalPermits 许可总量（{@code > 0}）
+     * @return 信号量句柄
+     * @throws IllegalArgumentException {@code totalPermits <= 0}
+     */
+    public OSemaphore newSemaphore(String key, int totalPermits) {
+        Objects.requireNonNull(key);
+        if (totalPermits <= 0) {
+            throw new IllegalArgumentException("totalPermits must be > 0");
+        }
+        return new RemoteSemaphore(this, key, totalPermits);
+    }
+
+    /**
+     * 创建分布式信号量句柄（纯加入形态）：不主张许可总量——对已定型的
+     * key 直接参与计数；key 不存在时获取请求被服务端拒绝（总量必须由
+     * 建条目者给出）。
+     *
+     * @param key 信号量键
+     * @return 信号量句柄
+     */
+    public OSemaphore newSemaphore(String key) {
+        return new RemoteSemaphore(this, Objects.requireNonNull(key), 0);
     }
 
     /**

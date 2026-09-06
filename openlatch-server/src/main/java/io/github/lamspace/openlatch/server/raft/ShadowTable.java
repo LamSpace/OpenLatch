@@ -38,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p><b>职责</b>：①跨副本一致性摘要的载体（{@link #digest()}，P2-10 退出门与
  * S4 快照比对共用）；②快照序列化结构（{@link #toProto()}/{@link #load}，
  * §7.1 内容 = 锁条目 + 会话注册表，<b>不含</b>等待队列与本地配置，design D9）；
- * ③Leader 侧预检查与到期扫描的无锁读索引（{@link #isHeld}/{@link #heldEntries()}，
+ * ③Leader 侧预检查与到期扫描的无锁读索引（{@link #isHeld}/{@link #isHeldBy}/{@link #heldEntries()}，
  * 供 {@code ReplicationGateway} 与到期驱动消费）。
  *
  * <p><b>与引擎的双写核算</b>：每次条目应用同时驱动
@@ -68,12 +68,15 @@ public final class ShadowTable {
     public record Holder(long sessionId, long threadId) { }
 
     /**
-     * 无锁索引的投影记录：当前租约凭证与到期时刻。
+     * 无锁索引的投影记录：当前租约凭证、到期时刻与持有者集快照
+     * （重入预检消费；快照仅在授予/装载时刷新，摘除可短暂滞后，
+     * 判定容错语义见 {@link #isHeldBy}）。
      *
      * @param leaseToken  当前租约凭证
      * @param expiresAtMs 到期时刻（毫秒时间戳）
+     * @param holders     持有者集快照（授予时点的不可变拷贝）
      */
-    public record HeldRef(long leaseToken, long expiresAtMs) { }
+    public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -166,6 +169,26 @@ public final class ShadowTable {
      */
     public void grant(long sessionId, long threadId, String key, int lockType,
                       long token, long leaseMs, long expiresAt) {
+        grantDelta(sessionId, threadId, key, lockType, token, leaseMs, expiresAt, 1);
+    }
+
+    /**
+     * 授予登记（计数增量形态，Phase 3 T1）：Semaphore 一次授予归还多许可，
+     * 影子表按引擎实际持有增量镜像（{@code holderDelta = permits}），锁家族
+     * 恒 1——保持与引擎 {@code holders} 计数严格对称，digest 与释放回退
+     * 不因许可语义漂移。
+     *
+     * @param sessionId   逻辑会话 id
+     * @param threadId    持有线程 id
+     * @param key         锁键
+     * @param lockType    协议锁类型数值
+     * @param token       当前租约凭证
+     * @param leaseMs     实际生效租期
+     * @param expiresAt   到期时刻
+     * @param holderDelta 本次授予新增持有计数（{@code >= 1}）
+     */
+    public void grantDelta(long sessionId, long threadId, String key, int lockType,
+                           long token, long leaseMs, long expiresAt, int holderDelta) {
         SLock l = locks.get(key);
         if (l == null) {
             l = new SLock(lockType, token, expiresAt, leaseMs);
@@ -175,8 +198,8 @@ public final class ShadowTable {
             l.expiresAtMs = expiresAt;
             l.leaseMs = leaseMs;
         }
-        l.holders.merge(new Holder(sessionId, threadId), 1, Integer::sum);
-        heldIndex.put(key, new HeldRef(token, expiresAt));
+        l.holders.merge(new Holder(sessionId, threadId), holderDelta, Integer::sum);
+        heldIndex.put(key, new HeldRef(token, expiresAt, Set.copyOf(l.holders.keySet())));
     }
 
     /**
@@ -208,6 +231,38 @@ public final class ShadowTable {
     }
 
     /**
+     * 释放登记（计数增量形态，Phase 3 T1）：归还 {@code releaseDelta} 个
+     * 持有计数，归零摘除归属；条目无持有者时移除 key。
+     *
+     * @param sessionId     逻辑会话 id
+     * @param threadId      持有线程 id
+     * @param key           锁键
+     * @param releaseDelta  引擎实际归还计数（{@code >= 0}，0 为无操作）
+     */
+    public void release(long sessionId, long threadId, String key, int releaseDelta) {
+        if (releaseDelta <= 0) {
+            return;
+        }
+        SLock l = locks.get(key);
+        if (l == null) {
+            return;
+        }
+        Holder h = new Holder(sessionId, threadId);
+        Integer count = l.holders.get(h);
+        if (count != null) {
+            if (count <= releaseDelta) {
+                l.holders.remove(h);
+            } else {
+                l.holders.put(h, count - releaseDelta);
+            }
+        }
+        if (l.holders.isEmpty()) {
+            locks.remove(key);
+            heldIndex.remove(key);
+        }
+    }
+
+    /**
      * 续租登记（RENEW OK 应用点）：刷新到期时刻（凭证不变），同步无锁索引。
      *
      * @param key          锁键
@@ -221,7 +276,7 @@ public final class ShadowTable {
         }
         l.expiresAtMs = newExpiresAt;
         l.leaseMs = newLeaseMs;
-        heldIndex.computeIfPresent(key, (k, ref) -> new HeldRef(ref.leaseToken(), newExpiresAt));
+        heldIndex.computeIfPresent(key, (k, ref) -> new HeldRef(ref.leaseToken(), newExpiresAt, ref.holders()));
     }
 
     /**
@@ -302,6 +357,23 @@ public final class ShadowTable {
     }
 
     /**
+     * 指定归属当前是否持有该 key（Phase 3 T1 重入预检通道）：读取
+     * {@code heldIndex} 快照的持有者集——快照仅在授予/装载时刷新，
+     * 持有者移除后可短暂滞后（"结果可旧不可错"：误判重入也只是多一次
+     * 提案，授予与否恒由应用路径引擎裁决；同归属先后授予经
+     * 应答-请求程序序 + 并发容器可见性保证不滞后）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param threadId  持有线程 id
+     * @param key       锁键
+     * @return 快照显示该归属在持有为 {@code true}
+     */
+    public boolean isHeldBy(long sessionId, long threadId, String key) {
+        HeldRef ref = heldIndex.get(key);
+        return ref != null && ref.holders().contains(new Holder(sessionId, threadId));
+    }
+
+    /**
      * 当前复制状态的全量 proto 形态（快照与 digest 的统一序列化入口）。
      *
      * @return 按声明序构建的 {@link SnapshotState}
@@ -347,7 +419,8 @@ public final class ShadowTable {
                 sl.holders.put(new Holder(h.getSessionId(), h.getThreadId()), h.getCount());
             }
             locks.put(l.getKey(), sl);
-            heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs()));
+            heldIndex.put(l.getKey(),
+                    new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
         }
         sessions.addAll(st.getSessionsList());
         sessionIndex.addAll(st.getSessionsList());

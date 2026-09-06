@@ -287,9 +287,9 @@ public final class LockEntry implements KeyEntry {
                 writer = null;
                 clearLease();
                 notifyHeadIfPossible(now, headReplyTimeoutMs, notify);
-                return new ReleaseResult(ReleaseStatus.OK, true);
+                return new ReleaseResult(ReleaseStatus.OK, true, 1);
             }
-            return new ReleaseResult(ReleaseStatus.OK, false);
+            return new ReleaseResult(ReleaseStatus.OK, false, 1);
         }
 
         Integer count = readers.get(owner);
@@ -300,12 +300,12 @@ public final class LockEntry implements KeyEntry {
                 if (readers.isEmpty()) {
                     clearLease();
                     notifyHeadIfPossible(now, headReplyTimeoutMs, notify);
-                    return new ReleaseResult(ReleaseStatus.OK, true);
+                    return new ReleaseResult(ReleaseStatus.OK, true, 1);
                 }
-                return new ReleaseResult(ReleaseStatus.OK, false);
+                return new ReleaseResult(ReleaseStatus.OK, false, 1);
             }
             readers.put(owner, next);
-            return new ReleaseResult(ReleaseStatus.OK, false);
+            return new ReleaseResult(ReleaseStatus.OK, false, 1);
         }
 
         // token 匹配即归属匹配（防御性保留的归属校验失败）。

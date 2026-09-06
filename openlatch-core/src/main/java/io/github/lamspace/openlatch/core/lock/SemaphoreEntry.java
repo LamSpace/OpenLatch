@@ -271,7 +271,7 @@ public final class SemaphoreEntry implements KeyEntry {
             holders.put(owner, left);
         }
         notifyHeadIfPossible(now, headReplyTimeoutMs, notify);
-        return new ReleaseResult(ReleaseStatus.OK, holders.isEmpty());
+        return new ReleaseResult(ReleaseStatus.OK, holders.isEmpty(), cmd.permits());
     }
 
     /**
@@ -379,22 +379,38 @@ public final class SemaphoreEntry implements KeyEntry {
         return holders.isEmpty() && waiters.isEmpty();
     }
 
-    /** 许可总量（快照序列化侧读取）。须在持有条目锁时调用。 */
+    /**
+     * 许可总量（快照序列化侧读取）。须在持有条目锁时调用。
+     *
+     * @return 许可总量
+     */
     public synchronized int permitsTotal() {
         return permitsTotal;
     }
 
-    /** 当前可用许可数（快照序列化侧读取）。须在持有条目锁时调用。 */
+    /**
+     * 当前可用许可数（快照序列化侧读取）。须在持有条目锁时调用。
+     *
+     * @return 可用许可数
+     */
     public synchronized int permitsAvailable() {
         return permitsAvailable;
     }
 
-    /** 归属持有表快照（键值拷贝，快照序列化侧读取）。须在持有条目锁时调用。 */
+    /**
+     * 归属持有表快照（键值拷贝，快照序列化侧读取）。须在持有条目锁时调用。
+     *
+     * @return 持有表不可变拷贝
+     */
     public synchronized Map<Owner, Integer> holdersSnapshot() {
         return Map.copyOf(holders);
     }
 
-    /** 当前共享租约时长（毫秒，快照序列化侧读取）。须在持有条目锁时调用。 */
+    /**
+     * 当前共享租约时长（毫秒，快照序列化侧读取）。须在持有条目锁时调用。
+     *
+     * @return 生效租期（毫秒）
+     */
     public synchronized long leaseMs() {
         return leaseMs;
     }

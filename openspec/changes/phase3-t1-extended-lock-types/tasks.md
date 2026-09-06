@@ -25,9 +25,9 @@
 
 ## 4. P3-04 Semaphore（客户端）
 
-- [ ] 4.1 `OSemaphore` API（acquire/acquire(n)/tryAcquire/tryAcquire(timeout)/release/release(n)），QUEUED→AWAIT_NOTIFY→幂等重发闭环复用，看门狗复用
-- [ ] 4.2 `ClientSemaphoreIT`（单机 + 集群两组，仿 ClientReadWriteIT）：阻塞获授、tryAcquire 不排队、续租失败丢失通知；仿 ClientProcessKillIT 的强杀归还用例
-- [ ] 4.3 验证：端到端用例全绿
+- [x] 4.1 `OSemaphore` API（acquire/acquire(n)/tryAcquire/tryAcquire(timeout)/release/release(n)），QUEUED→AWAIT_NOTIFY→幂等重发闭环复用，看门狗复用
+- [x] 4.2 `ClientSemaphoreIT`（单机 + 集群两组，仿 ClientReadWriteIT）：阻塞获授、tryAcquire 不排队、续租失败丢失通知；仿 ClientProcessKillIT 的强杀归还用例
+- [x] 4.3 验证：端到端用例全绿
 
 ## 5. P3-05 CountDownLatch（core + 协议）
 
@@ -44,8 +44,8 @@
 
 ## 7. P3-07 集群行为（T1 退出档）
 
-- [ ] 7.1 raft 日志：`LATCH_COUNT_DOWN_ENTRY`；Semaphore 复用 ACQUIRE/RELEASE 载荷透传；`LatchAwait` 不入日志（Leader 本地裁决 + `WaitQueue` 登记）
-- [ ] 7.2 `WaitQueue.Node` 携带 permits（锁恒填 1）；Leader 队首门控推广至许可数判定（"可用 ≥ 队首请求"才通知）； latch 归零 `purgeKey` 式全体广播
+- [ ] 7.1 raft 日志：`LATCH_COUNT_DOWN_ENTRY`；Semaphore 复用 ACQUIRE/RELEASE 载荷透传；`LatchAwait` 不入日志（Leader 本地裁决 + `WaitQueue` 登记）；**回执码形接正**：`REJECT_SEMAPHORE_TOTAL`/`OVER_RELEASE` 在集群 apply 侧的 ApplyStatus 映射（当前 default→INTERNAL_ERROR，P3-04 集群档实证）
+- [ ] 7.2 `WaitQueue.Node` 携带 permits（锁恒填 1）；Leader 队首门控推广至许可数判定（"可用 ≥ 队首请求"才通知）——**P3-04 集群档实证缺口**：Semaphore 部分释放（条目未空、池已腾出）当前经 `freedKeys` 无通知通道（锁的 `fullyReleased` 语义正确、许可族需回执携带 `permits_available` 并影子表镜像许可池）； latch 归零 `purgeKey` 式全体广播
 - [ ] 7.3 影子表与快照：`SnapshotState` 条目消息新增 family/许可/latch 字段（编号只增）；`StateComparisons` 扩三类条目
 - [ ] 7.4 确定性：`StateMachineDeterminismTest` 扩 Semaphore/Latch 条目（同序列两次回放逐字段一致）
 - [ ] 7.5 演练扩展：`ClusterSnapshotTest`/`ClusterSnapshotRecoveryTest` 含新条目往返；`LeaderKillDrillIT`/`RollingRestartDrillIT` 各加 Semaphore/Latch 场景（许可不丢不泄漏、awaiter 重发收敛、failover 后计数一致）

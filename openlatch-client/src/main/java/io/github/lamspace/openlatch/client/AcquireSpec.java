@@ -34,12 +34,32 @@ import java.util.Objects;
  * @param threadId 申请线程标识，与 {@code sessionId} 共同构成锁归属
  * @param leaseMs  期望租约（毫秒），0 表示使用服务端默认值
  * @param waitMs   等待模式（毫秒），取值见上
+ * @param permits  请求许可数（仅 {@link LockType#SEMAPHORE} 消费，{@code >= 1}；
+ *                 锁类型请求携带 {@code 1} 与缺省等价）
+ * @param permitsTotal Semaphore 许可总量断言：{@code > 0} 建条目定型/既有条目
+ *                 校验匹配；{@code 0} 为纯加入不主张；锁类型请求 MUST 为 {@code 0}
  */
-public record AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs) {
+public record AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs,
+        int permits, int permitsTotal) {
+
+    /**
+     * 锁家族便捷构造（Phase 1/2 既有形态）：许可参数取缺省
+     * （{@code permits = 1}、{@code permitsTotal = 0}）。
+     *
+     * @param key      锁键
+     * @param lockType 锁类型
+     * @param threadId 申请线程标识
+     * @param leaseMs  期望租约（毫秒）
+     * @param waitMs   等待模式（毫秒）
+     */
+    public AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs) {
+        this(key, lockType, threadId, leaseMs, waitMs, 1, 0);
+    }
 
     /**
      * 紧凑构造器：校验锁键非空、锁类型非空、租约非负、等待模式不小于 -1
-     * （{@code -1} 合法，表示排队式）。
+     * （{@code -1} 合法，表示排队式）；许可数非负、总量断言非负
+     * （{@code permits == 0} 按 {@code 1} 归一）。
      */
     public AcquireSpec {
         Objects.requireNonNull(key, "key must not be null");
@@ -49,6 +69,12 @@ public record AcquireSpec(String key, LockType lockType, long threadId, long lea
         }
         if (waitMs < -1) {
             throw new IllegalArgumentException("waitMs must be >= -1");
+        }
+        if (permits < 0 || permitsTotal < 0) {
+            throw new IllegalArgumentException("permits and permitsTotal must be >= 0");
+        }
+        if (permits == 0) {
+            permits = 1;
         }
     }
 }
