@@ -69,15 +69,17 @@ public final class ShadowTable {
     public record Holder(long sessionId, long threadId) { }
 
     /**
-     * 无锁索引的投影记录：当前租约凭证、到期时刻与持有者集快照
-     * （重入预检消费；快照仅在授予/装载时刷新，摘除可短暂滞后，
-     * 判定容错语义见 {@link #isHeldBy}）。
+     * 无锁索引的投影记录：当前租约凭证、到期时刻、持有者集快照与条目的
+     * 协议锁类型数值（重入预检消费；holders 快照仅在授予/装载时刷新，
+     * 摘除可短暂滞后，判定容错语义见 {@link #isHeldBy}；{@code lockType}
+     * 随条目定型不变，T2 gauge 按家族聚合的读数来源）。
      *
      * @param leaseToken  当前租约凭证
      * @param expiresAtMs 到期时刻（毫秒时间戳）
      * @param holders     持有者集快照（授予时点的不可变拷贝）
+     * @param lockType    协议 {@code LockType} 数值（条目定型值）
      */
-    public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders) { }
+    public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders, int lockType) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -217,7 +219,7 @@ public final class ShadowTable {
             l.permitsAvailable -= holderDelta;
         }
         l.holders.merge(new Holder(sessionId, threadId), holderDelta, Integer::sum);
-        heldIndex.put(key, new HeldRef(token, expiresAt, Set.copyOf(l.holders.keySet())));
+        heldIndex.put(key, new HeldRef(token, expiresAt, Set.copyOf(l.holders.keySet()), lockType));
     }
 
     /**
@@ -297,7 +299,8 @@ public final class ShadowTable {
         }
         l.expiresAtMs = newExpiresAt;
         l.leaseMs = newLeaseMs;
-        heldIndex.computeIfPresent(key, (k, ref) -> new HeldRef(ref.leaseToken(), newExpiresAt, ref.holders()));
+        heldIndex.computeIfPresent(key,
+                (k, ref) -> new HeldRef(ref.leaseToken(), newExpiresAt, ref.holders(), ref.lockType()));
     }
 
     /**
@@ -465,8 +468,8 @@ public final class ShadowTable {
                 }
                 sl.permitsAvailable = sl.permitsTotal - held;
                 locks.put(l.getKey(), sl);
-                heldIndex.put(l.getKey(),
-                        new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
+                heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
+                        Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
                 sl.latchTotal = l.getLatchTotal();
                 sl.latchCount = l.getLatchCount();
@@ -477,8 +480,8 @@ public final class ShadowTable {
                 locks.put(l.getKey(), sl);
             } else {
                 locks.put(l.getKey(), sl);
-                heldIndex.put(l.getKey(),
-                        new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(), Set.copyOf(sl.holders.keySet())));
+                heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
+                        Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
             }
         }
         sessions.addAll(st.getSessionsList());
@@ -596,6 +599,27 @@ public final class ShadowTable {
      */
     public int lockCount() {
         return locks.size();
+    }
+
+    /**
+     * 按家族聚合的持有中条目数（Phase 3 T2 gauge 读数）：弱一致遍历无锁
+     * 投影 {@code heldIndex}（并发读取口径与本类线程模型注释一致——结果
+     * 可旧不可错），SEMAPHORE 家族按 {@code lockType} 归组、其余投影条目
+     * 归锁家族；LATCH 无持有语义、恒不入投影，天然排除。
+     *
+     * @return 长度为 2 的数组：{@code [0]} 锁家族条目数、{@code [1]} Semaphore 家族条目数
+     */
+    public int[] heldFamilyCounts() {
+        int lock = 0;
+        int semaphore = 0;
+        for (HeldRef ref : heldIndex.values()) {
+            if (ref.lockType() == LockType.LOCK_TYPE_SEMAPHORE_VALUE) {
+                semaphore++;
+            } else {
+                lock++;
+            }
+        }
+        return new int[] {lock, semaphore};
     }
 
     /**

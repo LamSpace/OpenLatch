@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.server;
 import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.SystemClock;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.server.metrics.MetricsHttpServer;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.net.ServerBootstrapFactory;
 import io.github.lamspace.openlatch.server.net.ServerChannelInitializer;
 import io.github.lamspace.openlatch.server.net.ServerSessionHandler;
@@ -65,8 +67,9 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  *
  * <p><b>生命周期</b>：构造只组装不占资源；{@link #start} 启动调度与监听
- * （集群模式先组网后开端口，失败抛出，调用方负责退出）；{@link #stop}
- * 幂等，关停顺序见该方法。
+ * （集群模式先组网后开端口，失败抛出，调用方负责退出），并按
+ * {@link MetricsConfig} 绑定管理端口（{@code /metrics} + {@code /healthz}，
+ * Phase 3 T2）；{@link #stop} 幂等，关停顺序见该方法。
  */
 public final class OpenLatchServer {
 
@@ -104,6 +107,12 @@ public final class OpenLatchServer {
     private final ServerConfig config;
     /** 集群配置（不可变；{@code enabled=false} 即 Phase 1 单机）。 */
     private final ClusterConfig clusterConfig;
+    /** 指标配置（不可变；兼容构造重载取 {@link MetricsConfig#disabled()}）。 */
+    private final MetricsConfig metricsConfig;
+    /** 指标词表门面：双路径埋点数据落点，{@code /metrics} 的 scrape 来源。 */
+    private final ServerMetrics metrics = new ServerMetrics();
+    /** 管理端口 HTTP 服务（{@code enabled} 时于 {@link #start} 绑定，此前与关停后为 {@code null}）。 */
+    private volatile MetricsHttpServer metricsHttp;
     /**
      * 锁语义核心：单机模式构造时组装，生命周期与服务器相同；集群模式为
      * {@code null}（引擎状态唯一经 {@link ClusterRuntime} 的复制路径迁移，
@@ -127,7 +136,9 @@ public final class OpenLatchServer {
     private Channel serverChannel;
 
     /**
-     * 构造服务器（单机模式）：组装锁语义核心与通知桥，不启动任何资源。
+     * 构造服务器（单机模式）：组装锁语义核心与通知桥，不启动任何资源；
+     * 管理端口取 {@link MetricsConfig#disabled()}（库内嵌不抢占固定端口，
+     * 文件加载路径的默认开启语义见 {@link MetricsConfig#load(String)}）。
      *
      * @param config 服务器配置
      */
@@ -139,16 +150,35 @@ public final class OpenLatchServer {
      * 构造服务器：{@code clusterConfig.enabled=false} 时与单机构造完全一致
      * （同一二进制回退保证，spec"单机模式回退保证"）；{@code true} 时不组装
      * 单机核心（引擎仅在复制路径内），集群组件于 {@link #start()} 装配。
+     * 管理端口取 {@link MetricsConfig#disabled()}。
      *
      * @param config        服务器配置
      * @param clusterConfig 集群配置（已校验）
      */
     public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig) {
+        this(config, clusterConfig, MetricsConfig.disabled());
+    }
+
+    /**
+     * 构造服务器（全配置形态）：指标启停与管理端口由 {@code metricsConfig}
+     * 决定（{@code enabled=true} 时 {@link #start()} 绑定，端口冲突快速失败）。
+     *
+     * @param config        服务器配置
+     * @param clusterConfig 集群配置（已校验）
+     * @param metricsConfig 指标配置（已校验）
+     */
+    public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
+                           MetricsConfig metricsConfig) {
         this.config = config;
         this.clusterConfig = clusterConfig;
+        this.metricsConfig = metricsConfig;
         this.core = clusterConfig.enabled()
                 ? null
                 : new CoreEngine(config.toCoreConfig(), new SystemClock(), new NotifyEventBridge(sessions));
+        if (this.core != null) {
+            // 单机 gauge 数据源：统计观察面与会话注册表的弱一致回调读数（T2）。
+            this.metrics.bindStandaloneGauges(this.core, this.sessions);
+        }
     }
 
     /**
@@ -160,7 +190,7 @@ public final class OpenLatchServer {
         if (clusterConfig.enabled()) {
             // spec"先完成 Raft 组网与状态机初始化，后开放客户端接入端口"。
             try {
-                cluster = ClusterRuntime.create(clusterConfig, config, sessions);
+                cluster = ClusterRuntime.create(clusterConfig, config, sessions, metrics);
             } catch (IOException e) {
                 throw new IllegalStateException("集群装配失败: " + e.getMessage(), e);
             }
@@ -171,7 +201,7 @@ public final class OpenLatchServer {
         workerGroup = new NioEventLoopGroup(config.workerThreads());
         ServerSessionHandler handler = clusterConfig.enabled()
                 ? new ServerSessionHandler(null, config, sessions, null, cluster)
-                : new ServerSessionHandler(core, config, sessions, new RequestDispatcher(core));
+                : new ServerSessionHandler(core, config, sessions, new RequestDispatcher(core, metrics));
         ServerChannelInitializer initializer = new ServerChannelInitializer(
                 config.idleTimeoutMs(), handler, channels);
         ServerBootstrap bootstrap = ServerBootstrapFactory.create(bossGroup, workerGroup, initializer);
@@ -187,12 +217,34 @@ public final class OpenLatchServer {
             throw new IllegalStateException("启动失败（端口 " + config.port() + " 可能被占用）: "
                     + e.getMessage(), e);
         }
+        if (metricsConfig.enabled()) {
+            // spec"指标配置与管理端点生命周期"：管理端口冲突与锁端口同策略——
+            // 整体启动失败退出，不进入半启动（stop 回收已绑定的锁端口与线程组）。
+            metricsHttp = new MetricsHttpServer(metrics.registry(), metricsConfig.port());
+            try {
+                metricsHttp.start();
+            } catch (RuntimeException e) {
+                stop();
+                throw e;
+            }
+        }
         log.info("OpenLatch server started: port={}, protocolVersion={}, maxKeyLength={}, "
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, defaultLeaseMs={}, "
-                        + "clusterEnabled={}, clusterNodeId={}",
+                        + "clusterEnabled={}, clusterNodeId={}, metricsPort={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
                 config.maxInflightPerConnection(), config.defaultLeaseMs(),
-                clusterConfig.enabled(), clusterConfig.nodeId());
+                clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort());
+    }
+
+    /**
+     * 管理端口实际监听端口（Phase 3 T2）。未启用或尚未 {@link #start()}
+     * 时返回 {@code -1}（可观测哨兵，供日志与测试判定）。
+     *
+     * @return 管理端口；关闭或未启动为 {@code -1}
+     */
+    public int metricsPort() {
+        MetricsHttpServer http = metricsHttp;
+        return http == null ? -1 : http.port();
     }
 
     /**
@@ -245,11 +297,16 @@ public final class OpenLatchServer {
     }
 
     /**
-     * 关停序列（设计说明书 §5.6）：先停租约扫描（不再产生新通知）→ 关闭全部
+     * 关停序列（设计说明书 §5.6）：先解除管理端口监听（Phase 3 T2，spec
+     * "关停解除绑定"）→ 停租约扫描（不再产生新通知）→ 关闭全部
      * 连接 → 回收网络资源 → 集群模式逆序关停运行时（在途以可重试错误终结、
      * 探针/扫描线程停止、Raft 服务关闭，spec"关停无悬挂请求"）。幂等，可重复调用。
      */
     public synchronized void stop() {
+        if (metricsHttp != null) {
+            metricsHttp.close();
+            metricsHttp = null;
+        }
         if (scheduler != null) {
             scheduler.shutdown();
             try {
@@ -297,12 +354,23 @@ public final class OpenLatchServer {
         long tickMs = config.leaseTickIntervalMs();
         scheduler.scheduleAtFixedRate(() -> {
             try {
-                core.expireDue();
+                // 到期计数走扫描返回值（expireDue 即"本轮实际释放数"，零 core 侵入，T2 design D3）。
+                metrics.recordLeaseExpired(core.expireDue());
                 core.sweepNotifiedHeads();
             } catch (RuntimeException e) {
                 log.error("lease sweep failed", e);
             }
         }, tickMs, tickMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 服务端指标门面（埋点词表与注册表宿主；集群装配经
+     * {@link ClusterRuntime} 复用同一实例，管理端点从其注册表 scrape）。
+     *
+     * @return 指标门面
+     */
+    public ServerMetrics metrics() {
+        return metrics;
     }
 
     /**
@@ -313,16 +381,18 @@ public final class OpenLatchServer {
     public static void main(String[] args) {
         ServerConfig config;
         ClusterConfig clusterConfig;
+        MetricsConfig metricsConfig;
         try {
             String path = System.getProperty(ServerConfig.CONFIG_PATH_PROPERTY);
             config = ServerConfig.load(path);
             clusterConfig = ClusterConfig.load(path);
+            metricsConfig = MetricsConfig.load(path);
         } catch (IllegalArgumentException e) {
             System.err.println(e.getMessage());
             System.exit(1);
             return;
         }
-        OpenLatchServer server = new OpenLatchServer(config, clusterConfig);
+        OpenLatchServer server = new OpenLatchServer(config, clusterConfig, metricsConfig);
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "openlatch-shutdown"));
         try {
             server.start();

@@ -24,8 +24,8 @@ import java.util.List;
  * key 级状态条目的生命周期契约——{@link LockTable} 中值的公共抽象。
  *
  * <p><b>职责边界</b>：本接口只收编"与命令语义无关"的生命周期与清理行为
- * （身份、家族判别、空判定、租约读数、会话摘除、到期强制回收、已通知
- * 队首清扫）。授予/释放/续租等命令语义 MUST NOT 进入本接口——各家族
+ * （身份、家族判别、空判定、租约读数、等待者读数、会话摘除、到期强制
+ * 回收、已通知队首清扫）。授予/释放/续租等命令语义 MUST NOT 进入本接口——各家族
  * 差异大（锁有读写重入、Semaphore 有许可计数、Latch 无租约），强行统一
  * 会产出满是不可达分支的抽象；命令分派由 {@code CoreEngine} 按
  * {@link #family()} 完成（Phase 3 T1 design D2）。
@@ -115,4 +115,14 @@ public interface KeyEntry {
      * @return 是否移除了超时队首
      */
     boolean sweepNotifiedHead(long now, long headReplyTimeoutMs, List<Waiter> notify);
+
+    /**
+     * 等待队列条目读数（统计观察面，Phase 3 T2）：锁/Semaphore 为等待队列
+     * 长度，Latch 为 awaiter 队列长度——三家统一为"本 key 当前排队等待项数"，
+     * 供 {@code CoreEngine.stats()} 聚合。只读，MUST NOT 改变队列状态。
+     * 须在持有条目锁时调用（{@code CoreEngine} 保证）。
+     *
+     * @return 等待者数量，无等待者返回 0
+     */
+    int waiterCount();
 }

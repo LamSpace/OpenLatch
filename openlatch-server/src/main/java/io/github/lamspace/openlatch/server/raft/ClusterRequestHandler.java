@@ -32,6 +32,7 @@ import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.netty.channel.ChannelHandlerContext;
 import org.slf4j.Logger;
@@ -76,6 +77,12 @@ import java.nio.charset.StandardCharsets;
  * <p><b>线程模型</b>：入站处理在连接 EventLoop；应答完成在状态机应用线程，
  * 经 {@code channel.eventLoop().execute} 弹回写回——单连接的请求序由
  * EventLoop 串行保证，跨连接并发经日志全序仲裁。
+ *
+ * <p><b>指标埋点</b>（Phase 3 T2，详设 §3.4 勘误后与单机路径共用
+ * {@link ServerMetrics}）：每条受理并应答的请求恰记一次，收口于
+ * {@link #writeSync}/{@link #respondAsync} 两个写回出口；耗时口径为
+ * 受理至应答生成（spec"耗时与到期计数口径"：集群档含 Raft 提交等待）。
+ * {@code metrics} 可为 {@code null}（测试夹具装配），此时零记录。
  */
 public final class ClusterRequestHandler {
 
@@ -92,9 +99,11 @@ public final class ClusterRequestHandler {
     private final LockStateMachineCore kernel;
     /** Leader 提示单源（NOT_LEADER 应答随附提示，s3 design D3）。 */
     private final LeaderTracker leaderTracker;
+    /** 指标词表门面；{@code null} 表示不埋点（测试夹具装配形态）。 */
+    private final ServerMetrics metrics;
 
     /**
-     * 构造处理器。
+     * 构造处理器（不埋点，既有测试夹具形态）。
      *
      * @param gateway       复制网关
      * @param kernel        状态机内核（会话预检）
@@ -105,11 +114,28 @@ public final class ClusterRequestHandler {
     public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
                                  WaitQueue waitQueue, ServerConfig config,
                                  LeaderTracker leaderTracker) {
+        this(gateway, kernel, waitQueue, config, leaderTracker, null);
+    }
+
+    /**
+     * 构造处理器（生产形态：写回出口经 {@code metrics} 记入服务端指标词表）。
+     *
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（会话预检）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     */
+    public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker, ServerMetrics metrics) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
         this.config = config;
         this.leaderTracker = leaderTracker;
+        this.metrics = metrics;
     }
 
     /**
@@ -124,26 +150,27 @@ public final class ClusterRequestHandler {
      * @param ctx     连接上下文
      */
     public void handleAcquire(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
         Envelope bad = validateEnvelope(msg, session, true);
         if (bad != null) {
-            writeSync(ctx, session, bad);
+            writeSync(ctx, session, startNanos, bad);
             return;
         }
         var req = msg.getAcquireRequest();
         if (req.getLockType() == io.github.lamspace.openlatch.protocol.LockType.UNRECOGNIZED) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         // v3 门控（详设 §6）：与单机分发器同规则——v3 专属类型对低版本会话
         // 消息级拒绝、不断连，先于排队预检与提案（MUST NOT 进入复制日志）。
         if (session.protocolVersion() < 3 && RequestDispatcher.isV3OnlyLockType(req.getLockType())) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         // 许可参数合法性（与单机分发器共用判定，P3-03）：非法不入日志。
         StatusCode permitBad = RequestDispatcher.validateAcquirePermits(req);
         if (permitBad != null) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, permitBad));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, permitBad));
             return;
         }
         boolean queueWanted = req.getWaitMs() != 0;
@@ -169,16 +196,16 @@ public final class ClusterRequestHandler {
                 || (!selfPromotion && waitQueue.hasWaiters(req.getKey()));
         if (busy) {
             if (!queueWanted) {
-                writeSync(ctx, session, acquireErrorResponse(msg, StatusCode.DENIED));
+                writeSync(ctx, session, startNanos, acquireErrorResponse(msg, StatusCode.DENIED));
                 return;
             }
             int pos = waitQueue.enqueue(session.sessionId(), msg.getRequestId(), req.getKey(),
                     permits, System.currentTimeMillis());
             if (pos < 0) {
-                writeSync(ctx, session, acquireErrorResponse(msg, StatusCode.OVERLOADED));
+                writeSync(ctx, session, startNanos, acquireErrorResponse(msg, StatusCode.OVERLOADED));
                 return;
             }
-            writeSync(ctx, session, Envelope.newBuilder()
+            writeSync(ctx, session, startNanos, Envelope.newBuilder()
                     .setProtocolVersion(msg.getProtocolVersion())
                     .setType(MessageType.LOCK_ACQUIRE)
                     .setRequestId(msg.getRequestId())
@@ -195,7 +222,7 @@ public final class ClusterRequestHandler {
                 .setRequest(req)
                 .build().toByteString();
         gateway.submit(RaftEntryType.LOCK_ACQUIRE_ENTRY, payload)
-                .whenComplete((r, err) -> respondAsync(ctx, session,
+                .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
                         err == null ? mapAcquire(msg, r) : commitFailure(msg, err)));
     }
 
@@ -208,14 +235,15 @@ public final class ClusterRequestHandler {
      * @param ctx     连接上下文
      */
     public void handleRelease(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
         Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
-            writeSync(ctx, session, bad);
+            writeSync(ctx, session, startNanos, bad);
             return;
         }
         // 归还数为负属参数非法（与单机分发器同规则，P3-03），不入日志。
         if (msg.getReleaseRequest().getPermits() < 0) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         ByteString payload = ReleasePayload.newBuilder()
@@ -223,7 +251,7 @@ public final class ClusterRequestHandler {
                 .setRequest(msg.getReleaseRequest())
                 .build().toByteString();
         gateway.submit(RaftEntryType.LOCK_RELEASE_ENTRY, payload)
-                .whenComplete((r, err) -> respondAsync(ctx, session,
+                .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
                         err == null ? mapRelease(msg, r) : commitFailure(msg, err)));
     }
 
@@ -236,9 +264,10 @@ public final class ClusterRequestHandler {
      * @param ctx     连接上下文
      */
     public void handleRenew(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
         Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
-            writeSync(ctx, session, bad);
+            writeSync(ctx, session, startNanos, bad);
             return;
         }
         ByteString payload = RenewPayload.newBuilder()
@@ -246,7 +275,7 @@ public final class ClusterRequestHandler {
                 .setRequest(msg.getLeaseRenewRequest())
                 .build().toByteString();
         gateway.submit(RaftEntryType.LEASE_RENEW_ENTRY, payload)
-                .whenComplete((r, err) -> respondAsync(ctx, session,
+                .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
                         err == null ? mapRenew(msg, r) : commitFailure(msg, err)));
     }
 
@@ -274,18 +303,19 @@ public final class ClusterRequestHandler {
      * @param ctx     连接上下文
      */
     public void handleLatchCountDown(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
         Envelope bad = validateEnvelope(msg, session, false);
         if (bad != null) {
-            writeSync(ctx, session, bad);
+            writeSync(ctx, session, startNanos, bad);
             return;
         }
         if (session.protocolVersion() < 3) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         var req = msg.getLatchCountDownRequest();
         if (req.getCount() < 0 || req.getTotal() < 0) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         ByteString payload = LatchCountDownPayload.newBuilder()
@@ -293,7 +323,7 @@ public final class ClusterRequestHandler {
                 .setRequest(req)
                 .build().toByteString();
         gateway.submit(RaftEntryType.LATCH_COUNT_DOWN_ENTRY, payload)
-                .whenComplete((r, err) -> respondAsync(ctx, session,
+                .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
                         err == null ? mapLatchCountDown(msg, r) : commitFailure(msg, err)));
     }
 
@@ -309,25 +339,26 @@ public final class ClusterRequestHandler {
      * @param ctx     连接上下文
      */
     public void handleLatchAwait(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
         Envelope bad = validateEnvelope(msg, session, true);
         if (bad != null) {
-            writeSync(ctx, session, bad);
+            writeSync(ctx, session, startNanos, bad);
             return;
         }
         if (session.protocolVersion() < 3) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         var req = msg.getLatchAwaitRequest();
         if (req.getTotal() < 0) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         var shadow = kernel.shadow();
         // 家族误用预检（与引擎家族判定对齐）：key 已有他家族条目时直接
         // INVALID_REQUEST，不进入定型创建也不入队。
         if (!shadow.hasLatch(req.getKey()) && shadow.isHeld(req.getKey())) {
-            writeSync(ctx, session, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
         if (!shadow.hasLatch(req.getKey()) && req.getTotal() > 0) {
@@ -340,18 +371,18 @@ public final class ClusterRequestHandler {
             gateway.submit(RaftEntryType.LATCH_COUNT_DOWN_ENTRY, payload)
                     .whenComplete((r, err) -> {
                         if (err != null) {
-                            respondAsync(ctx, session, commitFailure(msg, err));
+                            respondAsync(ctx, session, startNanos, commitFailure(msg, err));
                             return;
                         }
                         if (r.getStatus() != ApplyStatus.OK) {
-                            respondAsync(ctx, session, mapLatchAwait(msg, r));
+                            respondAsync(ctx, session, startNanos, mapLatchAwait(msg, r));
                             return;
                         }
-                        latchAwaitLocal(session, msg, ctx);
+                        latchAwaitLocal(session, msg, ctx, startNanos);
                     });
             return;
         }
-        latchAwaitLocal(session, msg, ctx);
+        latchAwaitLocal(session, msg, ctx, startNanos);
     }
 
     /**
@@ -359,30 +390,33 @@ public final class ClusterRequestHandler {
      * {@code INVALID_REQUEST}；已归零回 {@code OK}（顺带出队重发抵达的
      * 等待项）；未归零挂本地队列回 {@code QUEUED} 位次。
      *
-     * @param session 已握手会话
-     * @param msg     请求信封
-     * @param ctx     连接上下文
+     * @param session     已握手会话
+     * @param msg         请求信封
+     * @param ctx         连接上下文
+     * @param startNanos  受理起始时刻（自 {@code handleLatchAwait} 入口或
+     *                    定型创建提交回调透传，指标耗时含创建提交段）
      */
-    private void latchAwaitLocal(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+    private void latchAwaitLocal(ServerSession session, Envelope msg, ChannelHandlerContext ctx,
+                                 long startNanos) {
         var req = msg.getLatchAwaitRequest();
         var shadow = kernel.shadow();
         long count = shadow.latchCount(req.getKey());
         if (count < 0) {
-            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.INVALID_REQUEST, 0));
+            writeSync(ctx, session, startNanos, latchAwaitResponse(msg, StatusCode.INVALID_REQUEST, 0));
             return;
         }
         if (count == 0) {
             waitQueue.onGranted(session.sessionId(), msg.getRequestId());
-            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.OK, 0));
+            writeSync(ctx, session, startNanos, latchAwaitResponse(msg, StatusCode.OK, 0));
             return;
         }
         int pos = waitQueue.enqueue(session.sessionId(), msg.getRequestId(), req.getKey(),
                 System.currentTimeMillis());
         if (pos < 0) {
-            writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.OVERLOADED, 0));
+            writeSync(ctx, session, startNanos, latchAwaitResponse(msg, StatusCode.OVERLOADED, 0));
             return;
         }
-        writeSync(ctx, session, latchAwaitResponse(msg, StatusCode.QUEUED, pos));
+        writeSync(ctx, session, startNanos, latchAwaitResponse(msg, StatusCode.QUEUED, pos));
     }
 
     /**
@@ -492,27 +526,48 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 同步写回（预检/排队快速路径）：写完成终结该请求的在途记账。
+     * 同步写回（预检/排队快速路径）：写完成终结该请求的在途记账；
+     * 写回前经指标出口记录一次（T2）。
      *
-     * @param ctx     连接上下文
-     * @param session 连接簿记（endRequest 目标）
-     * @param resp    应答信封
+     * @param ctx         连接上下文
+     * @param session     连接簿记（endRequest 目标）
+     * @param startNanos  受理起始时刻（{@code System.nanoTime()} 基准）
+     * @param resp        应答信封
      */
-    private void writeSync(ChannelHandlerContext ctx, ServerSession session, Envelope resp) {
+    private void writeSync(ChannelHandlerContext ctx, ServerSession session,
+                           long startNanos, Envelope resp) {
+        recordDispatch(resp, startNanos);
         ctx.writeAndFlush(resp).addListener(f -> session.endRequest());
     }
 
     /**
      * 异步应答弹回连接 EventLoop 写回（design D4；断连后 writeAndFlush 自动丢弃，
-     * 写完成终结在途记账）。
+     * 写完成终结在途记账）；指标出口在弹回前记录——耗时样本自受理线程读
+     * 起算、含 Raft 提交等待（spec"耗时与到期计数口径"）。
      *
-     * @param ctx     连接上下文
-     * @param session 连接簿记（endRequest 目标）
-     * @param resp    应答信封
+     * @param ctx         连接上下文
+     * @param session     连接簿记（endRequest 目标）
+     * @param startNanos  受理起始时刻
+     * @param resp        应答信封
      */
-    private void respondAsync(ChannelHandlerContext ctx, ServerSession session, Envelope resp) {
+    private void respondAsync(ChannelHandlerContext ctx, ServerSession session,
+                              long startNanos, Envelope resp) {
+        recordDispatch(resp, startNanos);
         ctx.channel().eventLoop().execute(
                 () -> ctx.writeAndFlush(resp).addListener(f -> session.endRequest()));
+    }
+
+    /**
+     * 指标出口（T2）：按应答信封家族计数并记耗时样本；测试夹具装配
+     * （{@code metrics == null}）时零记录。
+     *
+     * @param resp       应答信封
+     * @param startNanos 受理起始时刻
+     */
+    private void recordDispatch(Envelope resp, long startNanos) {
+        if (metrics != null) {
+            metrics.recordDispatch(resp, System.nanoTime() - startNanos);
+        }
     }
 
     /**

@@ -124,6 +124,8 @@ public final class OpenLatchClient implements AutoCloseable {
     private static final long GAP_RETRY_BACKOFF_MS = 300;
     /** 看门狗：持锁期间的自动续租与失锁判定（详设 §6.6）。 */
     private final io.github.lamspace.openlatch.client.internal.Watchdog watchdog;
+    /** 客户端可选指标门面（详设 §3.3，T2）：未注入注册表即禁用形态、零观测路径。 */
+    private final io.github.lamspace.openlatch.client.internal.ClientMetrics clientMetrics;
     /** 全局锁丢失监听器列表。 */
     private final java.util.List<LockLostListener> globalLockLostListeners =
             new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -134,11 +136,28 @@ public final class OpenLatchClient implements AutoCloseable {
     private volatile boolean closed;
 
     /**
-     * 以构建好的配置创建客户端并启动后台资源。仅由 {@link Builder#build()} 调用。
+     * 以构建好的配置创建客户端并启动后台资源（指标禁用形态）。
+     * 仅由 {@link Builder#build()} 调用。
      *
      * @param config 已校验的客户端配置
      */
     private OpenLatchClient(ClientConfig config) {
+        this(config, null);
+    }
+
+    /**
+     * 以构建好的配置创建客户端并启动后台资源；可选注入宿主度量注册表
+     * （Phase 3 T2，详设 §3.3——旁路观测，不改变任何行为契约）。
+     * 仅由 {@link Builder#build()} 调用。
+     *
+     * @param config        已校验的客户端配置
+     * @param meterRegistry 宿主度量注册表；{@code null} 即指标关闭
+     */
+    private OpenLatchClient(ClientConfig config,
+            io.micrometer.core.instrument.MeterRegistry meterRegistry) {
+        this.clientMetrics = meterRegistry == null
+                ? io.github.lamspace.openlatch.client.internal.ClientMetrics.DISABLED
+                : new io.github.lamspace.openlatch.client.internal.ClientMetrics(meterRegistry);
         this.config = config;
         this.eventLoopGroup = new NioEventLoopGroup(config.workerThreads(), r -> {
             Thread t = new Thread(r, "openlatch-client-io");
@@ -156,8 +175,9 @@ public final class OpenLatchClient implements AutoCloseable {
             return t;
         });
         this.connectionManager = new ConnectionManager(config, eventLoopGroup, timer);
+        this.connectionManager.setMetrics(clientMetrics);
         this.multiplexer = new RequestMultiplexer(timer, connectionManager::activeChannel,
-                connectionManager::session);
+                connectionManager::session, clientMetrics);
         this.awaitTracker = new AwaitTracker(timer, multiplexer,
                 config.requestTimeout().toMillis(),
                 (spec, grant) -> registerHeld(homeSessionId, spec, grant));
@@ -212,7 +232,8 @@ public final class OpenLatchClient implements AutoCloseable {
             this.host = target.host();
             this.port = target.port();
             this.cm = new ConnectionManager(config, eventLoopGroup, timer, host, port, false);
-            this.mux = new RequestMultiplexer(timer, cm::activeChannel, cm::session);
+            this.cm.setMetrics(clientMetrics);
+            this.mux = new RequestMultiplexer(timer, cm::activeChannel, cm::session, clientMetrics);
             this.awaits = new AwaitTracker(timer, mux, config.requestTimeout().toMillis(),
                     this::onAcquiredOnLane);
             this.awaits.setNotLeaderHandler(req -> handleNotLeader(req, this));
@@ -932,6 +953,8 @@ public final class OpenLatchClient implements AutoCloseable {
         if (heldLockRegistry.remove(entry.key(), entry.threadId()) == null) {
             return;
         }
+        // 失锁裁决恰发生在簿记移除成功处 → 计数同条目至多一次（T2）。
+        clientMetrics.recordLockLost();
         watchdog.stop(entry);
         io.netty.util.Timeout lostAtTask = entry.lostAtTask();
         if (lostAtTask != null) {
@@ -1385,6 +1408,8 @@ public final class OpenLatchClient implements AutoCloseable {
         private Duration reconnectMaxBackoff = Duration.ofSeconds(10);
         /** 客户端 Netty EventLoop 线程数，默认 1。 */
         private int workerThreads = 1;
+        /** 宿主度量注册表（Phase 3 T2）；{@code null}=客户端指标默认关闭。 */
+        private io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
         /**
          * 私有构造：仅由 {@link OpenLatchClient#builder()} 创建。
@@ -1502,6 +1527,22 @@ public final class OpenLatchClient implements AutoCloseable {
         }
 
         /**
+         * 注入宿主度量注册表，启用客户端可选指标（Phase 3 T2，详设 §3.3：
+         * {@code requests{type,status}}、{@code request.duration}、
+         * {@code reconnect.total}、{@code locks.lost.total}）。不调用本方法
+         * （默认 {@code null}）即指标关闭：零计数路径、行为与不引入该特性
+         * 完全一致。需宿主 classpath 自带 {@code micrometer-core}（客户端
+         * 依赖为 optional，不传递）。
+         *
+         * @param meterRegistry 宿主注册表；{@code null} 视为不启用
+         * @return 本构建器
+         */
+        public Builder meterRegistry(io.micrometer.core.instrument.MeterRegistry meterRegistry) {
+            this.meterRegistry = meterRegistry;
+            return this;
+        }
+
+        /**
          * 校验配置并构建客户端。
          *
          * @return 新的客户端实例，后台资源已启动
@@ -1536,7 +1577,7 @@ public final class OpenLatchClient implements AutoCloseable {
             ClientConfig config = new ClientConfig(host, port, java.util.List.copyOf(seeds),
                     requestTimeout, defaultWaitTimeout,
                     connectTimeout, reconnectInitialBackoff, reconnectMaxBackoff, workerThreads);
-            return new OpenLatchClient(config);
+            return new OpenLatchClient(config, meterRegistry);
         }
 
         /**

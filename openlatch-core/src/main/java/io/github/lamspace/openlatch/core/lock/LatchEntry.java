@@ -300,4 +300,15 @@ public final class LatchEntry implements KeyEntry {
     public synchronized long count() {
         return count;
     }
+
+    /**
+     * awaiter 队列长度读数（统计观察面，Phase 3 T2；与锁家族统一为
+     * "本 key 当前排队等待项数"口径）。须在持有条目锁时调用。
+     *
+     * @return 当前等待屏障的条目数
+     */
+    @Override
+    public synchronized int waiterCount() {
+        return awaiters.size();
+    }
 }

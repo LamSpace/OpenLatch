@@ -18,6 +18,7 @@ package io.github.lamspace.openlatch.server.raft;
 
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,7 +87,7 @@ public final class ClusterRuntime {
     }
 
     /**
-     * 组装并启动集群运行时。
+     * 组装并启动集群运行时（不挂指标，测试夹具形态）。
      *
      * @param clusterConfig 集群配置（{@code enabled=true} 且已校验）
      * @param config        服务器配置（限额/租约参数）
@@ -96,6 +97,23 @@ public final class ClusterRuntime {
      */
     public static ClusterRuntime create(ClusterConfig clusterConfig, ServerConfig config,
                                         ServerSessionRegistry registry) throws IOException {
+        return create(clusterConfig, config, registry, null);
+    }
+
+    /**
+     * 组装并启动集群运行时（生产形态：写路径埋点、到期计数与复制态 gauge
+     * 全部挂接调用方共用的 {@link ServerMetrics}，T2/详设 §3.4 勘误口径）。
+     *
+     * @param clusterConfig 集群配置（{@code enabled=true} 且已校验）
+     * @param config        服务器配置（限额/租约参数）
+     * @param registry      连接注册表（AWAIT_NOTIFY 投递与断连路由）
+     * @param metrics       服务端指标门面；{@code null} 表示不埋点
+     * @return 已启动的运行时
+     * @throws IOException Raft 服务启动失败（端口占用、存储不可写）
+     */
+    public static ClusterRuntime create(ClusterConfig clusterConfig, ServerConfig config,
+                                        ServerSessionRegistry registry,
+                                        ServerMetrics metrics) throws IOException {
         RaftSubsystem subsystem = new RaftSubsystem(clusterConfig, config.toCoreConfig());
         // Leader 提示单源（s3 design D3）：监听器须在 RaftServer 启动前挂上，
         // 首个 Leadership 事件抵达前快照保持「未知」（提示以 -1 呈现）。
@@ -107,12 +125,17 @@ public final class ClusterRuntime {
                 new ReplicationGateway(subsystem, subsystem.core(), waitQueue, registry);
         SessionCoordinator sessionCoordinator = new SessionCoordinator(
                 subsystem, gateway, subsystem.core(), registry, config, leaderTracker);
-        LeaseExpiryDriver expiryDriver =
-                new LeaseExpiryDriver(subsystem, subsystem.core(), gateway, config.leaseTickIntervalMs());
+        LeaseExpiryDriver expiryDriver = new LeaseExpiryDriver(subsystem, subsystem.core(),
+                gateway, config.leaseTickIntervalMs(), metrics);
         gateway.setExpiryDriver(expiryDriver);
         expiryDriver.start();
-        ClusterRequestHandler handler =
-                new ClusterRequestHandler(gateway, subsystem.core(), waitQueue, config, leaderTracker);
+        ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
+                waitQueue, config, leaderTracker, metrics);
+        if (metrics != null) {
+            // 复制态 gauge 与角色指标绑定（T2）：抓取线程弱一致读，不触碰应用锁。
+            metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
+                    clusterConfig.nodeId(), leaderTracker);
+        }
         // 复制停摆自愈看门狗（T2）：装配末位——全部判据通道（division/gateway/
         // client 池）此时均已就绪；阈值由 election-timeout 折算钉死（D6）。
         ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);

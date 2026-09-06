@@ -529,3 +529,128 @@ csv: tMs,leaderId,term,leaderReady,commitIndex,probe
 - 命中率（STALL/有效轮，CHURN 计入分母不计入分子）：0.00 %
 - 判读：STALL>0 即复现基座建立（任务 1.1 verify）；修复路径落地后复跑，2A 期望归零、2B 期望全轮 RECOVERED 且恢复耗时 ≲ T_stall+ε。
 
+## Run 23:22:31（K=8，构造：稳态写流→脏尾停主→写载+竞速归群）
+
+- 构造：design D1 in-JVM 3 节点（真实 RaftSubsystem+gRPC，election-timeout 800ms，探针恒开）——稳态写流建立水位→在途 NOOP 脏尾→SIGKILL 语义停当值 Leader→后台写载打流 + 400–1600ms 随机延迟归群（与选举窗重叠、不设就绪门）→宽限 3000ms 后采样窗。
+- 判据：窗口内 Leader 身份（节点+任期）恒定 ∧ NOOP 探针零成功 ∧ commitIndex 首尾零推进 → STALL；身份切换/持续无主 → CHURN（不计命中）。
+- 命令：`mvn -s <settings> -pl openlatch-server verify -Pdrill -Dit.test=LeaderStallReproDrillIT -Dtest=NoSuchUnitTest -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false -Ddrill.stall.rounds=8`。
+- 环境：25.0.3 / Linux amd64 / 8 cpus
+
+### 轮 1（23:22:41）— **RECOVERED**（归群后 3008ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node2 term=2 commit@kill=45 |
+| 竞速归群 | 停主后 837ms 归群；归群瞬刻 leader=node3 term=3 commit=67 |
+| 写载 | 成功 39 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+8,3,3,true,138,OK
+```
+
+### 轮 2（23:22:49）— **RECOVERED**（归群后 3006ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node2 term=1 commit@kill=44 |
+| 竞速归群 | 停主后 1160ms 归群；归群瞬刻 leader=node1 term=2 commit=74 |
+| 写载 | 成功 42 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+6,1,2,true,143,OK
+```
+
+### 轮 3（23:22:58）— **RECOVERED**（归群后 3006ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node1 term=1 commit@kill=45 |
+| 竞速归群 | 停主后 1547ms 归群；归群瞬刻 leader=node2 term=2 commit=87 |
+| 写载 | 成功 46 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+6,2,2,true,156,OK
+```
+
+### 轮 4（23:23:08）— **RECOVERED**（归群后 3005ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node3 term=1 commit@kill=45 |
+| 竞速归群 | 停主后 1426ms 归群；归群瞬刻 leader=node1 term=2 commit=83 |
+| 写载 | 成功 45 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+5,1,2,true,151,OK
+```
+
+### 轮 5（23:23:15）— **RECOVERED**（归群后 3004ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node2 term=1 commit@kill=44 |
+| 竞速归群 | 停主后 451ms 归群；归群瞬刻 leader=node3 term=2 commit=56 |
+| 写载 | 成功 35 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+3,3,2,true,125,OK
+```
+
+### 轮 6（23:23:23）— **RECOVERED**（归群后 3002ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node2 term=1 commit@kill=43 |
+| 竞速归群 | 停主后 1132ms 归群；归群瞬刻 leader=node1 term=2 commit=73 |
+| 写载 | 成功 42 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+2,1,2,true,144,OK
+```
+
+### 轮 7（23:23:32）— **RECOVERED**（归群后 3004ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node1 term=1 commit@kill=44 |
+| 竞速归群 | 停主后 725ms 归群；归群瞬刻 leader=node3 term=2 commit=64 |
+| 写载 | 成功 38 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+4,3,2,true,132,OK
+```
+
+### 轮 8（23:23:41）— **RECOVERED**（归群后 3004ms 收敛）
+
+| 前置 | 值 |
+|---|---|
+| 杀主（SIGKILL 语义停） | node3 term=1 commit@kill=44 |
+| 竞速归群 | 停主后 1432ms 归群；归群瞬刻 leader=node2 term=2 commit=83 |
+| 写载 | 成功 45 / 失败 0 |
+| 采样 | 样本 1，探针 ok/notReady/inFlight/other = 1/0/0/0 |
+
+```
+csv: tMs,leaderId,term,leaderReady,commitIndex,probe
+4,2,2,true,150,OK
+```
+
+### 汇总
+
+- 轮数 K=8：STALL=0 / RECOVERED=8 / CHURN=0 / ABORTED=0
+- 命中率（STALL/有效轮，CHURN 计入分母不计入分子）：0.00 %
+- 判读：STALL>0 即复现基座建立（任务 1.1 verify）；修复路径落地后复跑，2A 期望归零、2B 期望全轮 RECOVERED 且恢复耗时 ≲ T_stall+ε。
+

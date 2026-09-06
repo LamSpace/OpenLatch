@@ -20,6 +20,12 @@
             <artifactId>openlatch-client</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- T2：MeterRegistry 由宿主（Actuator）提供，optional 不传递 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>

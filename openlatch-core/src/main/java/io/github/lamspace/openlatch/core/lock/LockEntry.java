@@ -532,4 +532,14 @@ public final class LockEntry implements KeyEntry {
     public boolean isEmpty() {
         return writer == null && readers.isEmpty() && waiters.isEmpty();
     }
+
+    /**
+     * 等待队列长度读数（统计观察面，Phase 3 T2）。须在持有条目锁时调用。
+     *
+     * @return 当前排队等待项数
+     */
+    @Override
+    public synchronized int waiterCount() {
+        return waiters.size();
+    }
 }

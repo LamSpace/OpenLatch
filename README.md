@@ -33,7 +33,8 @@ mvn clean install
 
 ```bash
 java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar
-# listens on 9410 by default; point -Dopenlatch.config=<path> at a Properties file to override
+# listens on 9410 and exposes the metrics admin port 9412 (/metrics + /healthz) by default;
+# point -Dopenlatch.config=<path> at a Properties file to override
 ```
 
 ### 2. Programmatic use (client SDK)
@@ -126,6 +127,8 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `openlatch.server.limit.max-key-length` | `512` | Max key bytes |
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | Per-key queue depth limit |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | Inflight limit per connection |
+| `openlatch.server.metrics.enabled` | `true` | Enable the metrics admin endpoint (Prometheus scrapes `http://<host>:<port>/metrics`) |
+| `openlatch.server.metrics.port` | `9412` | Metrics admin port (`0` = ephemeral); bind conflict fails startup |
 
 ### Client (`OpenLatchClient.builder()`)
 
@@ -137,6 +140,7 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `connectTimeout` | 3s | TCP + handshake timeout |
 | `reconnectInitialBackoff` / `reconnectMaxBackoff` | 200ms / 10s | Exponential backoff |
 | `workerThreads` | 1 | Client Netty EventLoop threads |
+| `meterRegistry` | off by default | Inject a host Micrometer `MeterRegistry` to enable client metrics (host must provide `micrometer-core`; not transitive) |
 
 ### Starter (`application.yaml`)
 

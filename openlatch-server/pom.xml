@@ -37,6 +37,20 @@
             <groupId>io.netty</groupId>
             <artifactId>netty-codec</artifactId>
         </dependency>
+        <!-- Phase 3 T2 监控指标（详设 §3.1）：Micrometer 版本由根 pom 末位的
+             Spring Boot BOM 托管；管理端点用 netty-codec-http（版本随 netty-bom） -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>

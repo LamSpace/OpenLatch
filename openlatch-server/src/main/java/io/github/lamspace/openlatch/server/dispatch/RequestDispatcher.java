@@ -42,6 +42,7 @@ import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.LatchCountDownResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 
 import java.util.Objects;
@@ -53,21 +54,39 @@ import java.util.Objects;
  * <p><b>线程模型</b>：{@link #dispatch} 由 {@code ServerSessionHandler} 在
  * 连接所属 EventLoop 线程上同步调用（含 {@code core.acquire}/{@code release}/
  * {@code renew} 的委托执行亦在该线程完成）。本类无可变状态（仅持有 final 的
- * core 引用），可被多连接线程并发进入；单 key 状态的串行性由
+ * core 与指标引用），可被多连接线程并发进入；单 key 状态的串行性由
  * {@code CoreEngine} 的条目锁保证，不属本类职责。
+ *
+ * <p><b>指标埋点</b>（Phase 3 T2，详设 §3.4 勘误后口径）：每条产出应答的
+ * 请求在 {@link #dispatch} 收口记录一次（计数按应答状态码、获取类消息附带
+ * dispatch 起止耗时）；{@code metrics} 可为 {@code null}（既有测试夹具的
+ * 直接构造），此时零记录、行为不变。
  */
 public final class RequestDispatcher {
 
     /** 锁语义核心，全部业务命令均委托其执行。 */
     private final CoreEngine core;
+    /** 指标词表门面；{@code null} 表示不埋点（测试夹具形态）。 */
+    private final ServerMetrics metrics;
 
     /**
-     * 构造分发器。
+     * 构造分发器（不埋点，既有测试夹具形态）。
      *
      * @param core 锁语义核心
      */
     public RequestDispatcher(CoreEngine core) {
+        this(core, null);
+    }
+
+    /**
+     * 构造分发器（生产形态：应答经 {@code metrics} 记入服务端指标词表）。
+     *
+     * @param core    锁语义核心
+     * @param metrics 指标门面，可为 {@code null}（不埋点）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics) {
         this.core = Objects.requireNonNull(core);
+        this.metrics = metrics;
     }
 
     /**
@@ -80,7 +99,8 @@ public final class RequestDispatcher {
      * @return 要写回的响应；{@code PING} 返回 {@code null}
      */
     public Envelope dispatch(ServerSession session, Envelope msg) {
-        return switch (msg.getType()) {
+        long startNanos = metrics != null ? System.nanoTime() : 0L;
+        Envelope resp = switch (msg.getType()) {
             case LOCK_ACQUIRE -> msg.hasAcquireRequest()
                     ? dispatchAcquire(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -99,6 +119,10 @@ public final class RequestDispatcher {
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
+        if (metrics != null) {
+            metrics.recordDispatch(resp, System.nanoTime() - startNanos);
+        }
+        return resp;
     }
 
     /**

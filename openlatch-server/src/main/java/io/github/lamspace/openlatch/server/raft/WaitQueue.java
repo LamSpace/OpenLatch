@@ -317,6 +317,37 @@ public final class WaitQueue {
     }
 
     /**
+     * 全部队列条目总数（Phase 3 T2 gauge 读数，含锁/Semaphore 等待与
+     * latch awaiter——同队列承载）。与入队/出队经同一监视器互斥，
+     * 读数对本队列内部一致、与引擎状态弱一致。
+     *
+     * @return 等待条目总数
+     */
+    public synchronized int totalWaiters() {
+        int total = 0;
+        for (ArrayDeque<Node> q : queues.values()) {
+            total += q.size();
+        }
+        return total;
+    }
+
+    /**
+     * 单 key 队列深度的当时最大值（Phase 3 T2 gauge 采样读数，
+     * 口径为"抓取时刻"，允许错过两次抓取之间的瞬时峰高）。
+     *
+     * @return 最大队深；无等待返回 0
+     */
+    public synchronized int maxQueueDepth() {
+        int max = 0;
+        for (ArrayDeque<Node> q : queues.values()) {
+            if (q.size() > max) {
+                max = q.size();
+            }
+        }
+        return max;
+    }
+
+    /**
      * 指定请求是否为该 key 队列的队首（AWAIT_NOTIFY 后重发的自推进判定：
      * 队首且锁已空出时 MUST 走复制授予路径，而非再次入队）。
      *

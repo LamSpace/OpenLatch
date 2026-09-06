@@ -33,7 +33,7 @@ mvn clean install
 
 ```bash
 java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar
-# 默认监听 9410；-Dopenlatch.config=<path> 指定 Properties 配置文件
+# 默认监听 9410，并在 9412 开放指标管理端口（/metrics + /healthz）；-Dopenlatch.config=<path> 指定 Properties 配置文件
 ```
 
 ### 2. 编程式使用（客户端 SDK）
@@ -126,6 +126,8 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `openlatch.server.limit.max-key-length` | `512` | key 最大字节数 |
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | 单 key 等待队列上限 |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | 单连接未完成请求上限 |
+| `openlatch.server.metrics.enabled` | `true` | 是否启用指标管理端点（Prometheus 抓取 `http://<host>:<port>/metrics`） |
+| `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0` 为临时端口）；冲突时启动快速失败 |
 
 ### 客户端（`OpenLatchClient.builder()`）
 
@@ -137,6 +139,7 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `connectTimeout` | 3s | TCP + 握手超时 |
 | `reconnectInitialBackoff` / `reconnectMaxBackoff` | 200ms / 10s | 指数退避 |
 | `workerThreads` | 1 | 客户端 Netty EventLoop 线程数 |
+| `meterRegistry` | 不设即关闭 | 注入宿主 Micrometer `MeterRegistry` 启用客户端指标（需自带 `micrometer-core`，客户端不传递该依赖） |
 
 ### starter（`application.yaml`）
 

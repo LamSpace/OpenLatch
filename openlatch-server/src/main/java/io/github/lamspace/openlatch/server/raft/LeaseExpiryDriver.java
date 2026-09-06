@@ -19,9 +19,11 @@ package io.github.lamspace.openlatch.server.raft;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
+import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,13 +70,15 @@ public final class LeaseExpiryDriver implements AutoCloseable {
     private final ReplicationGateway gateway;
     /** 扫描周期（毫秒）。 */
     private final long tickMs;
+    /** 指标门面（到期计数出口，T2）；{@code null} 表示不埋点。 */
+    private final ServerMetrics metrics;
     /** 在途抑制集：key → 已提交未落地的条目 token。 */
     private final Map<String, Long> inflight = new ConcurrentHashMap<>();
     /** 调度器，start 后非空。 */
     private volatile ScheduledExecutorService scheduler;
 
     /**
-     * 构造到期驱动（不启动）。
+     * 构造到期驱动（不启动，不埋点）。
      *
      * @param subsystem Raft 子系统
      * @param kernel    状态机内核
@@ -83,10 +87,25 @@ public final class LeaseExpiryDriver implements AutoCloseable {
      */
     public LeaseExpiryDriver(RaftSubsystem subsystem, LockStateMachineCore kernel,
                              ReplicationGateway gateway, long tickMs) {
+        this(subsystem, kernel, gateway, tickMs, null);
+    }
+
+    /**
+     * 构造到期驱动（不启动；生产形态经 {@code metrics} 在应用侧计到期释放）。
+     *
+     * @param subsystem Raft 子系统
+     * @param kernel    状态机内核
+     * @param gateway   复制网关
+     * @param tickMs    扫描周期（毫秒）
+     * @param metrics   指标门面，可为 {@code null}（不埋点）
+     */
+    public LeaseExpiryDriver(RaftSubsystem subsystem, LockStateMachineCore kernel,
+                             ReplicationGateway gateway, long tickMs, ServerMetrics metrics) {
         this.subsystem = subsystem;
         this.kernel = kernel;
         this.gateway = gateway;
         this.tickMs = tickMs;
+        this.metrics = metrics;
     }
 
     /**
@@ -168,7 +187,11 @@ public final class LeaseExpiryDriver implements AutoCloseable {
     }
 
     /**
-     * 条目应用通知：到期条目落地（无论守卫是否释放）即解除该 key 的在途抑制。
+     * 条目应用通知：到期条目落地（无论守卫是否释放）即解除该 key 的在途抑制；
+     * 并按回执实际释放量为 {@code lease.expired.total} 计数（T2，
+     * spec"耗时与到期计数口径"——本回调每副本各执行一次，计数为本地观察值；
+     * 守卫空操作的回执 {@code freed_keys} 为空即零计，在途重复提交因
+     * token 失配走守卫同样零计）。
      *
      * @param entry  已应用条目
      * @param result 回执
@@ -176,6 +199,9 @@ public final class LeaseExpiryDriver implements AutoCloseable {
     public void onEntryApplied(RaftLogEntry entry, ApplyResult result) {
         if (entry.getType() != RaftEntryType.LEASE_EXPIRE_ENTRY) {
             return;
+        }
+        if (metrics != null && result.getStatus() == ApplyStatus.OK) {
+            metrics.recordLeaseExpired(result.getFreedKeysCount());
         }
         try {
             ExpirePayload p = ExpirePayload.parseFrom(entry.getCommandPayload());

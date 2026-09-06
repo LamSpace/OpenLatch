@@ -5,6 +5,7 @@ import io.github.lamspace.openlatch.protocol.HelloRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import io.netty.channel.ChannelHandlerContext;
@@ -53,6 +54,8 @@ final class ClusterHarness implements AutoCloseable {
         final int logSegmentBytes;
         /** 当前运行时（{@code null}=已停机）。 */
         volatile ClusterRuntime runtime;
+        /** 本节点当前装配的指标门面（每次 boot 新建，随 runtime 同寿命）。 */
+        volatile ServerMetrics metrics;
 
         private Node(int id, ClusterRuntime runtime, ServerSessionRegistry registry,
                      Path dataDir, int raftPort, long electionTimeoutMs, long snapshotThreshold,
@@ -93,6 +96,11 @@ final class ClusterHarness implements AutoCloseable {
         boolean isLeader() {
             ClusterRuntime rt = runtime;
             return rt != null && rt.subsystem().isLeader();
+        }
+
+        /** 本节点指标门面（写路径计数与复制态 gauge 的断言入口）。 */
+        ServerMetrics metrics() {
+            return metrics;
         }
 
         /** 状态机已应用位点（未应用过为 0）。 */
@@ -229,7 +237,8 @@ final class ClusterHarness implements AutoCloseable {
                 node.raftPort, node.dataDir.toString(), node.snapshotThreshold,
                 node.electionTimeoutMs, node.logSegmentBytes);
         cc.validate();
-        return ClusterRuntime.create(cc, testServerConfig(), node.registry);
+        node.metrics = new ServerMetrics();
+        return ClusterRuntime.create(cc, testServerConfig(), node.registry, node.metrics);
     }
 
     /** 把 peers（{@code id@host:raftPort}）折算为合成接入地址表。 */

@@ -420,6 +420,16 @@ public final class SemaphoreEntry implements KeyEntry {
     }
 
     /**
+     * 等待队列长度读数（统计观察面，Phase 3 T2）。须在持有条目锁时调用。
+     *
+     * @return 当前排队等待项数
+     */
+    @Override
+    public synchronized int waiterCount() {
+        return waiters.size();
+    }
+
+    /**
      * 队首推进检查：等待队列非空、队首未被通知过、且可用许可满足队首
      * 请求数时，标记队首"已通知、待重发"并收集通知。队首不满足时不检查
      * 后续条目（严格 FIFO，防大请求饥饿的机制本体）。

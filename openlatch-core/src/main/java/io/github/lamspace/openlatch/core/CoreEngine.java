@@ -644,6 +644,51 @@ public final class CoreEngine {
     }
 
     /**
+     * 只读统计观察面（Phase 3 T2，spec"只读统计观察面"）：弱一致遍历
+     * {@link LockTable} 全部条目聚合 held/等待者/队深与登记会话数。
+     *
+     * <p><b>held 判据</b>：条目锁内读 {@link KeyEntry#leaseToken()}，非零
+     * 即"当前持有中"——锁与 Semaphore 无持有者时凭证归零（{@code clearLease}），
+     * Latch 恒零（契约读数占位），LATCH 家族因此天然排除。条目不携带单一
+     * 协议类型（REENTRANT/SIMPLE/FAIR 同族互通、READ/WRITE 是请求维度），
+     * 聚合维度取家族。
+     *
+     * <p><b>并发语义</b>：每条目一次条目锁内读数（与写路径的互斥粒度一致、
+     * 持锁时长为常数），条目间无原子性——返回值是采样时刻的弱一致快照；
+     * MUST NOT 据此做授予判定，仅供观测。本方法 MUST NOT 改变引擎任何状态。
+     *
+     * @return 统计快照（不可变值对象）
+     */
+    public CoreStats stats() {
+        int heldLocks = 0;
+        int heldSemaphores = 0;
+        int totalWaiters = 0;
+        int maxQueueDepth = 0;
+        for (KeyEntry e : lockTable.values()) {
+            int waiters;
+            boolean held;
+            synchronized (e) {
+                waiters = e.waiterCount();
+                held = e.leaseToken() != 0;
+            }
+            if (held) {
+                switch (e.family()) {
+                    case LOCK -> heldLocks++;
+                    case SEMAPHORE -> heldSemaphores++;
+                    default -> {
+                        // LATCH 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
+                    }
+                }
+            }
+            totalWaiters += waiters;
+            if (waiters > maxQueueDepth) {
+                maxQueueDepth = waiters;
+            }
+        }
+        return new CoreStats(heldLocks, heldSemaphores, totalWaiters, maxQueueDepth, sessions.size());
+    }
+
+    /**
      * 队首响应超时清扫：移除"已通知但在 {@code headReplyTimeoutMs} 内
      * 未重发获取请求"的队首等待者，并对新队首补发通知。
      *

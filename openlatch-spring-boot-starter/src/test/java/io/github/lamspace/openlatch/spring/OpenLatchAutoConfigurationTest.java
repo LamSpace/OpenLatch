@@ -17,6 +17,10 @@
 package io.github.lamspace.openlatch.spring;
 
 import io.github.lamspace.openlatch.client.OpenLatchClient;
+import io.github.lamspace.openlatch.server.OpenLatchServer;
+import io.github.lamspace.openlatch.server.ServerConfig;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -130,5 +134,68 @@ class OpenLatchAutoConfigurationTest {
                     assertThat(context).doesNotHaveBean(OpenLatchAspect.class);
                     assertThat(context).hasSingleBean(OpenLatchClient.class);
                 });
+    }
+
+    /** 临时端口服务器（T2 starter 注入用例的真流量来源）。 */
+    private static OpenLatchServer startServer() {
+        ServerConfig d = ServerConfig.defaults();
+        OpenLatchServer server = new OpenLatchServer(new ServerConfig(0, d.workerThreads(),
+                d.idleTimeoutMs(), d.defaultLeaseMs(), d.minLeaseMs(), d.maxLeaseMs(),
+                d.leaseTickIntervalMs(), d.headReplyTimeoutMs(), d.maxKeyLength(),
+                d.maxQueueDepthPerKey(), d.maxInflightPerConnection()));
+        server.start();
+        return server;
+    }
+
+    /**
+     * T2 spec"度量注册表自动注入"存在侧：上下文含 MeterRegistry Bean 时
+     * 客户端指标注册进该注册表（真流量断言，无显式配置）。
+     */
+    @Test
+    void meterRegistryBeanIsInjectedIntoClient() throws Exception {
+        OpenLatchServer server = startServer();
+        try {
+            SimpleMeterRegistry registry = new SimpleMeterRegistry();
+            runner.withBean(MeterRegistry.class, () -> registry)
+                    .withPropertyValues("openlatch.server-host=127.0.0.1",
+                            "openlatch.server-port=" + server.port())
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        OpenLatchClient client = context.getBean(OpenLatchClient.class);
+                        client.connectAsync().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                        assertThat(client.newReentrantLock("starter-metrics").tryLock()).isTrue();
+                        client.newReentrantLock("starter-metrics").unlock();
+                        assertThat(registry.find("openlatch.client.requests.total")
+                                .tag("type", "LOCK_ACQUIRE").tag("status", "OK").counter())
+                                .as("锁获取请求计数已落入宿主注册表")
+                                .isNotNull();
+                        assertThat(registry.find("openlatch.client.requests.total")
+                                .tag("type", "LOCK_RELEASE").tag("status", "OK").counter())
+                                .isNotNull();
+                    });
+        } finally {
+            server.stop();
+        }
+    }
+
+    /**
+     * T2 spec"无注册表不受扰"：上下文不含任何度量注册表时客户端照常
+     * 装配与工作（默认关闭，不报错、无指标副作用）。
+     */
+    @Test
+    void contextWorksWithoutMeterRegistry() throws Exception {
+        OpenLatchServer server = startServer();
+        try {
+            runner.withPropertyValues("openlatch.server-host=127.0.0.1",
+                            "openlatch.server-port=" + server.port())
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        OpenLatchClient client = context.getBean(OpenLatchClient.class);
+                        client.connectAsync().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                        assertThat(client.newReentrantLock("no-registry").tryLock()).isTrue();
+                    });
+        } finally {
+            server.stop();
+        }
     }
 }

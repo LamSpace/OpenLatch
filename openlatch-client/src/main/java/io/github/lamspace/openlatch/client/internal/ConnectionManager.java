@@ -145,6 +145,8 @@ public final class ConnectionManager {
     private long currentBackoffMs;
     /** 待执行的重连任务句柄，关停时取消。 */
     private Timeout reconnectTask;
+    /** 客户端指标门面（T2 重连计数；默认禁用，装配阶段经 {@link #setMetrics} 注入）。 */
+    private volatile ClientMetrics metrics = ClientMetrics.DISABLED;
     /** 本次连接尝试的握手截止时刻（epoch 毫秒），用于约束握手剩余超时。 */
     private long connectDeadlineMs;
     /** {@code AWAIT_NOTIFY} 下沉点；未装配时静默丢弃。 */
@@ -267,6 +269,16 @@ public final class ConnectionManager {
      */
     public void bind(RequestMultiplexer multiplexer) {
         this.multiplexer = multiplexer;
+    }
+
+    /**
+     * 注入指标门面（T2；仅由客户端装配阶段调用）。断连重连与连接失败重试
+     * 两个发起点计数，首次建连不计。
+     *
+     * @param metrics 指标门面；{@code null} 回落禁用形态
+     */
+    public void setMetrics(ClientMetrics metrics) {
+        this.metrics = metrics == null ? ClientMetrics.DISABLED : metrics;
     }
 
     /**
@@ -422,6 +434,7 @@ public final class ConnectionManager {
                 disconnectHandler.accept(null);
             }
             // 主动断连：先试原地址（不推进种子），退避推进见 nextReconnectDelayLocked
+            metrics.recordReconnect();
             scheduleConnect(nextReconnectDelayLocked());
         }
     }
@@ -534,6 +547,7 @@ public final class ConnectionManager {
             }
             state = State.RECONNECTING;
             advanceSeedLocked();
+            metrics.recordReconnect();
             scheduleConnect(nextReconnectDelayLocked());
         }
     }

@@ -37,6 +37,14 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
+        <!-- Phase 3 T2 客户端可选指标（详设 §3.3）：optional 阻断传递——
+             宿主不启用指标则 classpath 无 Micrometer；启用需自带该依赖
+             （版本由 Spring Boot BOM / 宿主托管，spec"不成为强制传递依赖"） -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <optional>true</optional>
+        </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>

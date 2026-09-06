@@ -78,4 +78,13 @@ public final class SessionRegistry {
     public Set<String> remove(long sessionId) {
         return touchedKeys.remove(sessionId);
     }
+
+    /**
+     * 已登记会话数（统计观察面，Phase 3 T2；弱一致读数）。
+     *
+     * @return 当前登记在册的会话数量
+     */
+    public int size() {
+        return touchedKeys.size();
+    }
 }

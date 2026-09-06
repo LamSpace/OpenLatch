@@ -66,6 +66,8 @@ public final class RequestMultiplexer {
     private final Supplier<Channel> channelSupplier;
     /** 当前会话供应者；无活动会话时返回 {@code null}。 */
     private final Supplier<SessionContext> sessionSupplier;
+    /** 客户端指标门面（T2）；禁用形态下观测回调整体不注册（零额外路径）。 */
+    private final ClientMetrics metrics;
     /** 孤儿响应下沉点；未设置时静默丢弃。 */
     private volatile Consumer<Envelope> orphanSink = envelope -> {
         // 默认丢弃：等待跟踪组件装配前的窗口期不应有孤儿响应
@@ -86,7 +88,8 @@ public final class RequestMultiplexer {
     }
 
     /**
-     * 创建多路复用器。通道与会话经供应者延迟获取，避免与连接管理的构造循环。
+     * 创建多路复用器（不埋点，既有测试夹具形态）。通道与会话经供应者延迟
+     * 获取，避免与连接管理的构造循环。
      *
      * @param timer           共享定时器
      * @param channelSupplier 活动通道供应者
@@ -94,9 +97,24 @@ public final class RequestMultiplexer {
      */
     public RequestMultiplexer(HashedWheelTimer timer, Supplier<Channel> channelSupplier,
             Supplier<SessionContext> sessionSupplier) {
+        this(timer, channelSupplier, sessionSupplier, null);
+    }
+
+    /**
+     * 创建多路复用器（生产形态：请求终局经 {@code metrics} 旁路观测，
+     * 不影响任何完成语义与返回值，T2）。
+     *
+     * @param timer           共享定时器
+     * @param channelSupplier 活动通道供应者
+     * @param sessionSupplier 活动会话供应者
+     * @param metrics         指标门面，{@code null} 或不启用即零回调
+     */
+    public RequestMultiplexer(HashedWheelTimer timer, Supplier<Channel> channelSupplier,
+            Supplier<SessionContext> sessionSupplier, ClientMetrics metrics) {
         this.timer = timer;
         this.channelSupplier = channelSupplier;
         this.sessionSupplier = sessionSupplier;
+        this.metrics = metrics;
     }
 
     /**
@@ -108,12 +126,16 @@ public final class RequestMultiplexer {
      * @return 响应 future；通道或会话不可用时以 {@link ServerUnavailableException} 失败
      */
     public CompletableFuture<Envelope> send(Envelope.Builder builder, long timeoutMs) {
+        long startNanos = System.nanoTime();
         SessionContext session = sessionSupplier.get();
         if (session == null) {
-            return failedFuture(new ServerUnavailableException("no active session"));
+            return instrumented(failedFuture(new ServerUnavailableException("no active session")),
+                    builder.getType(), startNanos);
         }
         long requestId = session.nextRequestId();
         Envelope envelope = builder.setProtocolVersion(PROTOCOL_VERSION).setRequestId(requestId).build();
+        // 观测收口在 sendWithId（避免双注册双计数）；本方法的 startNanos 仅
+        // 服务"无会话即失败"快速路径。
         return sendWithId(envelope, timeoutMs);
     }
 
@@ -129,9 +151,11 @@ public final class RequestMultiplexer {
      * @return 响应 future；通道不可用时以 {@link ServerUnavailableException} 失败
      */
     public CompletableFuture<Envelope> sendWithId(Envelope envelope, long timeoutMs) {
+        long startNanos = System.nanoTime();
         Channel channel = channelSupplier.get();
         if (channel == null || !channel.isActive()) {
-            return failedFuture(new ServerUnavailableException("connection is not active"));
+            return instrumented(failedFuture(new ServerUnavailableException("connection is not active")),
+                    envelope.getType(), startNanos);
         }
         CompletableFuture<Envelope> future = new CompletableFuture<>();
         long requestId = envelope.getRequestId();
@@ -153,6 +177,28 @@ public final class RequestMultiplexer {
         if (outboundGate.test(envelope)) {
             channel.writeAndFlush(envelope);
         }
+        return instrumented(future, envelope.getType(), startNanos);
+    }
+
+    /**
+     * 观测挂载（T2）：在返回的 future 上注册旁路完成回调记录请求终局。
+     * 禁用形态（{@code metrics == null} 或未启用）原样返回——不注册回调、
+     * 零额外对象分配；启用时回调仅做记录，MUST NOT 改变 future 的完成值、
+     * 完成时序或异常传播（返回值即入参，链在观测回调之后）。
+     *
+     * @param future     请求 future
+     * @param type       请求消息类型
+     * @param startNanos 发出起始时刻
+     * @return 同一 future
+     */
+    private CompletableFuture<Envelope> instrumented(CompletableFuture<Envelope> future,
+            io.github.lamspace.openlatch.protocol.MessageType type, long startNanos) {
+        ClientMetrics m = metrics;
+        if (m == null || !m.enabled()) {
+            return future;
+        }
+        future.whenComplete((resp, err) ->
+                m.recordRequest(type, err == null ? resp : null, err, System.nanoTime() - startNanos));
         return future;
     }
 

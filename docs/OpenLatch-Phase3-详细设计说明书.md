@@ -151,6 +151,24 @@ Micrometer（`micrometer-core`）+ `micrometer-registry-prometheus`；服务端�
 
 全部在 `RequestDispatcher`（服务端）与 `RequestMultiplexer`（客户端）的既有路径上插桩，不侵入 `openlatch-core`（core 保持零依赖）。
 
+> **P3-08/09/10 实施勘误（2026-09-06，change phase3-t2-metrics design D1/D3）**：
+> ①本节服务端埋点假设不成立——Phase 2 起集群模式不经 `RequestDispatcher`
+> （装配为 `null`，流量走 `ClusterRequestHandler`）。实施改为双路径共用埋点
+> 组件 `ServerMetrics`（`RequestDispatcher` 与 `ClusterRequestHandler` 两收口，
+> 指标名/标签唯一命名点），集群档获取耗时含 Raft 提交等待、到期计数落
+> 条目应用侧（各副本本地观察值）。
+> ②"不侵入 core"保持其神（core 零第三方依赖、不感知 Micrometer），但 gauge
+> 需要数据源：`CoreEngine` 增只读 `stats()` 统计观察面（按家族 held 数/等待者
+> 总数/单 key 最大队深/会话数，弱一致，纯读零行为变化）。
+> ③`locks.held` 的 `type` 标签取条目家族名 `lock`/`semaphore`——条目不携带
+> 单一协议类型（REENTRANT/SIMPLE/FAIR 同族互通、READ/WRITE 是请求维度），
+> 协议六值不可导出；LATCH 无持有语义不计入。
+> ④§3.2 清单的判定口径钉为"逻辑名 ↔ Prometheus 线路名"映射（点转下划线、
+> counter `_total` 尾、Timer `_seconds_bucket/_count/_sum`，须开直方图桶），
+> 以词表测试为唯一权威断言点；管理端口配置走独立 `MetricsConfig`
+> （`openlatch.server.metrics.enabled/port`，仿 `ClusterConfig` 同文件加载，
+> 不动 `ServerConfig` 构造面）。
+
 ## 4. 管理控制台（T3）
 
 ### 4.1 模块与架构
