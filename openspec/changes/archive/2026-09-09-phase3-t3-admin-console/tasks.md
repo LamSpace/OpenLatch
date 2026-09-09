@@ -39,4 +39,4 @@
 
 - [x] 5.1 全仓 `mvn -s /home/lam/repo/settings.xml clean verify` 全绿（v1/v2/v3 既有行为零扰动，§8-6）；`-Pdrill` 进程级演练（LeaderKill/RollingRestart）在本环境稳定失败——经 **clean-master A/B 复跑同一失败**，判定为环境性（进程拉起/杀-9 时序受限）而非 T3 改动回归；等价进程内故障演练全绿（LeaderFailoverServerTest/MinorityQuorumTest/ClusterMetricsTest）；结论记入 t3-acceptance-evidence.md
 - [x] 5.2 详设回写勘误：§4.2 认证承载通道（per-message 令牌，不等 T4）与编号/数据源/隔离勘误、§4.3 排序口径；README 双语知会 9413 端口、控制台启动示例与"仅限内网部署"提示
-- [ ] 5.3 提交并归档（delta 同步主规格：`admin-observability`/`admin-console` 新建 + `wire-protocol`/`core-lock-engine` 增量）
+- [x] 5.3 提交并归档（delta 同步主规格：`admin-observability`/`admin-console` 新建 + `wire-protocol`/`core-lock-engine` 增量）
