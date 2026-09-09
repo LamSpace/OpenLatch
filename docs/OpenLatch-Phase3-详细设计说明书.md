@@ -321,3 +321,20 @@ Phase 3 控制台 **只读**：不提供强制解锁/踢会话等写操作（规
 | P3-15 | 客户端 TLS         | `tls.enabled`/trust-store、mTLS 客户端证书                         | P3-14          | 客户端侧用例全绿（含 mTLS 无证书被拒）  |
 | P3-16 | Token 认证         | HELLO 令牌校验、多令牌列表与轮换流程、常量时间比较、管理令牌分离   | P3-14          | 认证用例全绿（空/错令牌断连、双活轮换） |
 | P3-17 | 安全套件与验收闭环 | 拒绝用例聚合（明文/错误凭证/未认证管理请求）；§8 六项验收证据收集  | P3-15、P3-16   | §8 验收清单逐项闭环；**Phase 3 发布**   |
+
+> **T4 实施勘误（2026-09-09，change phase3-t4-security design D1–D9）**：
+> ①**子任务口径微调**：console 的 TLS/业务令牌透传并入 P3-15/16（T3 design Non-Goal
+> "控制台与节点的 TLS 属后续"在本期兑现——console 与节点同走业务端口、过同一
+> HELLO 门闩，服务端开业务认证后 console 缺 `auth-token` 连 HELLO 都过不去，故
+> console 是唯一需同时携带"业务令牌（HELLO）+ 管理令牌（逐 ADMIN 消息）"的实体，
+> 两令牌互不借道）；admin 令牌分离（P3-16 原列项）实为 T3 已交付 + 共享常量时间
+> 原语迁移，归为 P3-16 内校验项。②**认证默认分支语义钉死**：`auth.enabled=false`
+> （默认）保留 Phase 1"非空即拒"兼容守卫（§8-6 行为不变），开启后多令牌命中放行、
+> 失败同形拒并不泄露。③**集群档未认证 HELLO 零副作用**由门闩分叉置于
+> `SESSION_OPEN` 复制之前结构保证（`ClusterHarness` 直驱 `ClusterRuntime` 不经该
+> 门闩，不开集群夹具；单机档零会话副作用测试锁定）。④**加密范围边界显式**：仅
+> 客户端接入端口（业务 + ADMIN）受 TLS/认证保护；Raft 节点间通道（Ratis）、9412
+> 指标 HTTP、9413 控制台 Web 保持明文，属部署面网络隔离责任，README 双语知会。
+> ⑤配置键形态落地：服务端 `openlatch.server.tls.*`/`openlatch.server.auth.tokens`
+> （逗号分隔）；客户端/控制台/starter 以 `tls-enabled`/`tls-trust-store`/
+> `tls-client-cert`/`tls-client-key`/`auth-token` 同套暴露。

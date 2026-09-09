@@ -40,14 +40,13 @@ import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.server.raft.ClusterRuntime;
 import io.github.lamspace.openlatch.server.raft.LeaderTracker;
 import io.github.lamspace.openlatch.server.raft.ShadowTable;
+import io.github.lamspace.openlatch.server.security.ConstantTime;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import io.netty.channel.ChannelHandlerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -71,7 +70,7 @@ import java.util.function.LongSupplier;
  *       不断连——与 v3 新类型门控同纪律）；</li>
  *   <li>请求载荷形状合法（类型与 payload 匹配），否则
  *       {@code INVALID_REQUEST}；</li>
- *   <li>管理令牌常量时间比对（{@link MessageDigest#isEqual}，防时序
+ *   <li>管理令牌常量时间比对（{@link ConstantTime}，防时序
  *       侧信道）：失败或未配置令牌 → {@code INVALID_REQUEST} + 断连
  *       （不泄露原因，spec"管理令牌认证"）。</li>
  * </ol>
@@ -192,9 +191,9 @@ public final class AdminRequestHandler {
     }
 
     /**
-     * 令牌校验：未配置一律拒；载荷形状不符拒；比对用
-     * {@link MessageDigest#isEqual}（常量时间，防时序侧信道，§5.2 原则
-     * 的管理通道应用）。
+     * 令牌校验：未配置一律拒；载荷形状不符拒；比对用共享的
+     * {@link ConstantTime}（等长补齐常量时间，防时序/长度侧信道，§5.2
+     * 原则的管理通道应用）。
      *
      * @param msg ADMIN 请求信封
      * @return 校验通过返回 true
@@ -214,9 +213,9 @@ public final class AdminRequestHandler {
         if (!config.isConfigured() || presented == null) {
             return false;
         }
-        return MessageDigest.isEqual(
-                config.token().getBytes(StandardCharsets.UTF_8),
-                presented.getBytes(StandardCharsets.UTF_8));
+        // 常量时间原语（Phase 3 T4，spec"常量时间比较"）：与业务令牌共用单一
+        // 实现（等长补齐，长度不等不早退）；评审面收敛单处。
+        return ConstantTime.matches(presented, config.token());
     }
 
     // ===================== ADMIN_SUMMARY =====================

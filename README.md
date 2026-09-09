@@ -118,8 +118,9 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 It queries each configured node over the v3 `ADMIN_*` protocol on the node's business port,
 authenticated against the server's `openlatch.server.admin.token`; the overview page also
 scrapes each node's `/metrics` port for sparklines. It offers no write operations
-(no force-unlock / session eviction). Treat it as intranet-only until TLS (Phase 3 T4) lands
-— the admin channel is plaintext today.
+(no force-unlock / session eviction). When a node enables TLS/business auth (T4 below), the
+console connects with its own TLS + business-token settings; a node that rejects the
+handshake shows as an auth/degraded node (never silently probed in plaintext).
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
@@ -132,10 +133,55 @@ Config keys (a template lives at `openlatch-console/console.properties.example`)
 |---|---|---|
 | `openlatch.console.server-addresses` | *(required)* | comma-separated `host:port` node **business** ports |
 | `openlatch.console.admin-token` | *(required)* | must equal the server's `openlatch.server.admin.token`; mismatch ⇒ pages degrade to an auth banner |
+| `openlatch.console.auth-token` | — | business token sent in HELLO (required when a node enables business auth) |
+| `openlatch.console.tls-enabled` | `false` | enable TLS toward nodes |
+| `openlatch.console.tls-trust-store` | — | PEM CA(s) trust anchor for nodes |
+| `openlatch.console.tls-client-cert` / `tls-client-key` | — | mTLS client cert/key (paired) |
 | `openlatch.console.port` | `9413` | console HTTP port |
 | `openlatch.console.refresh-interval-seconds` | `5` | page polling interval |
 | `openlatch.console.metrics-port` | `9412` | per-node metrics port used for the overview sparklines |
 | `openlatch.console.request-timeout-ms` | `5000` | per admin-request timeout |
+
+## Security (TLS & Token Auth)
+
+Phase 3 T4 secures the **client-facing business port** (business and `ADMIN_*` traffic share it).
+Both capabilities default OFF — with defaults the server behaves exactly as before.
+
+**Server TLS** (`-Dopenlatch.config=<path>`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `openlatch.server.tls.enabled` | `false` | enable TLS on the business port; plaintext connections are rejected, handshake timeout 5s |
+| `openlatch.server.tls.cert` / `tls.key` | — | server PEM certificate / private key (both required when enabled) |
+| `openlatch.server.tls.trust-store` | — | PEM CA(s) for client certificates (mTLS) |
+| `openlatch.server.tls.require-client-cert` | `false` | require & verify a client certificate (mTLS) |
+
+Certificate updates take effect on restart (no hot reload).
+
+**Business token auth** (HELLO `auth_token`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `openlatch.server.auth.enabled` | `false` | when OFF (default) the Phase 1 guard stays: a non-empty `auth_token` is rejected; when ON the token must match one of `tokens` |
+| `openlatch.server.auth.tokens` | — | comma-separated token list (≥1 when enabled; no commas inside a token); multiple tokens keep old + new active during rotation |
+
+Rejections are indistinguishable (`INVALID_REQUEST` + disconnect, constant-time compare, no
+reason leak); auth is decided once at handshake, before any session/session-open replication
+(single-node and cluster share the same gate). The admin `admin-token` stays independent and
+per-message. Client / starter / console surface the same settings via `tls-enabled`,
+`tls-trust-store`, `tls-client-cert`/`tls-client-key`, `auth-token`.
+
+**Rotation procedure** — server first, then clients, then remove the old token:
+1. add the new token to `openlatch.server.auth.tokens` and restart the server (old + new both accepted);
+2. switch clients / console to the new `auth-token` and restart them;
+3. remove the old token from the server config and restart.
+
+> Note: enabling business auth rejects clients that do not carry a valid token (including older
+> clients) — roll the clients together with the server change.
+
+**Scope boundary** — only the business port is covered. The Raft inter-node channel (Ratis),
+the metrics HTTP port `9412`, and the console's own web UI `9413` stay plaintext; keep them on
+the intranet / behind network isolation. Full end-to-end TLS is intentionally not claimed.
 
 ## Configuration Reference
 

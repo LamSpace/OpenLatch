@@ -42,6 +42,7 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
+import io.netty.handler.ssl.SslContext;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -90,6 +91,10 @@ public final class AdminClient implements AutoCloseable {
     private final long timeoutMs;
     /** 共享 IO 线程组（由池创建，本实例不拥有）。 */
     private final EventLoopGroup group;
+    /** 节点 TLS 上下文（Phase 3 T4）；{@code null} 即明文（明文形态与 T3 一致）。 */
+    private final SslContext sslContext;
+    /** 业务令牌（HELLO 携带）；{@code null} 表示服务端业务认证关闭或未配置。 */
+    private final String businessToken;
 
     /** 当前连接（未连接/已断开为 {@code null}）。 */
     private volatile Channel channel;
@@ -101,7 +106,7 @@ public final class AdminClient implements AutoCloseable {
     private volatile long authBackoffUntilMs;
 
     /**
-     * 构造单节点客户端（不连接）。
+     * 构造单节点客户端（不连接；明文、无业务令牌——T4 前的既有形态）。
      *
      * @param address   目标节点地址
      * @param token     管理令牌
@@ -110,10 +115,27 @@ public final class AdminClient implements AutoCloseable {
      */
     public AdminClient(ConsoleConfig.Address address, String token, long timeoutMs,
                        EventLoopGroup group) {
+        this(address, token, timeoutMs, group, null, null);
+    }
+
+    /**
+     * 构造单节点客户端（Phase 3 T4 全形态：可选节点 TLS 与业务令牌）。
+     *
+     * @param address       目标节点地址
+     * @param token         管理令牌
+     * @param timeoutMs     单请求超时（毫秒）
+     * @param group         共享 EventLoop 组
+     * @param sslContext    节点 TLS 上下文；{@code null} 即明文
+     * @param businessToken 业务令牌（HELLO 携带）；{@code null} 表示未配置
+     */
+    public AdminClient(ConsoleConfig.Address address, String token, long timeoutMs,
+                       EventLoopGroup group, SslContext sslContext, String businessToken) {
         this.address = address;
         this.token = token;
         this.timeoutMs = timeoutMs;
         this.group = group;
+        this.sslContext = sslContext;
+        this.businessToken = businessToken;
     }
 
     /**
@@ -266,6 +288,11 @@ public final class AdminClient implements AutoCloseable {
                     .handler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel c) {
+                            // TLS 必居 pipeline 首位（Phase 3 T4）：握手/加解密先于
+                            // 分帧编解码；与服务端/客户端同构。
+                            if (sslContext != null) {
+                                c.pipeline().addLast("ssl", sslContext.newHandler(c.alloc()));
+                            }
                             c.pipeline()
                                     .addLast("frame", new LengthFieldBasedFrameDecoder(
                                             ServerChannelInitializer.MAX_FRAME_LENGTH, 0, 4, 0, 4))
@@ -287,16 +314,22 @@ public final class AdminClient implements AutoCloseable {
                     address + " 连接失败: " + e.getMessage(), e);
         }
         channel = ch;
-        // HELLO v3：auth_token 留空（T4 业务令牌通道），client_name 自证身份。
+        // HELLO v3：配置了业务令牌即随 HELLO 携带（服务端业务认证开启时必需——
+        // 认证开启下逐消息 admin-token 不构成 HELLO 放行依据，spec"不可借道"）；
+        // 未配置（认证关闭）维持既有"auth_token 留空"形态。client_name 自证身份。
         long rid = requestSeq.incrementAndGet();
         CompletableFuture<Envelope> future = new CompletableFuture<>();
         pending.put(rid, future);
+        HelloRequest.Builder helloReq = HelloRequest.newBuilder()
+                .setClientProtocolVersion(CLIENT_VERSION)
+                .setClientName("openlatch-console");
+        if (businessToken != null && !businessToken.isBlank()) {
+            helloReq.setAuthToken(businessToken);
+        }
         ch.writeAndFlush(Envelope.newBuilder()
                 .setType(MessageType.HELLO).setRequestId(rid)
                 .setProtocolVersion(CLIENT_VERSION)
-                .setHelloRequest(HelloRequest.newBuilder()
-                        .setClientProtocolVersion(CLIENT_VERSION)
-                        .setClientName("openlatch-console"))
+                .setHelloRequest(helloReq)
                 .build());
         Envelope hello;
         try {

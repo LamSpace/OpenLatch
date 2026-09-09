@@ -43,6 +43,12 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param defaultWaitTimeout      {@code lock()} 总等待兜底超时，默认 30s
  * @param reconnectInitialBackoff 重连指数退避初始值，默认 200ms
  * @param reconnectMaxBackoff     重连指数退避上限，默认 10s
+ * @param tlsEnabled              是否启用 TLS，默认 {@code false}（明文）；开启后由
+ *                                {@link OpenLatchAutoConfiguration} 透传客户端 Builder
+ * @param tlsTrustStore           可信任 CA 的 PEM 证书集路径；未配置取系统默认信任
+ * @param tlsClientCert           mTLS 客户端 PEM 证书路径；与 {@code tls-client-key} 成对
+ * @param tlsClientKey            mTLS 客户端 PEM 私钥路径；与 {@code tls-client-cert} 成对
+ * @param authToken               业务令牌（HELLO 携带，服务端业务认证开启时必需）
  */
 @ConfigurationProperties(prefix = "openlatch")
 public record OpenLatchProperties(
@@ -52,5 +58,10 @@ public record OpenLatchProperties(
         @DefaultValue("5s") Duration requestTimeout,
         @DefaultValue("30s") Duration defaultWaitTimeout,
         @DefaultValue("200ms") Duration reconnectInitialBackoff,
-        @DefaultValue("10s") Duration reconnectMaxBackoff) {
+        @DefaultValue("10s") Duration reconnectMaxBackoff,
+        @DefaultValue("false") boolean tlsEnabled,
+        String tlsTrustStore,
+        String tlsClientCert,
+        String tlsClientKey,
+        String authToken) {
 }

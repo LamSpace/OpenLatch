@@ -40,6 +40,8 @@ import java.util.Properties;
  * @param refreshSeconds   页面轮询刷新间隔（秒）
  * @param metricsPort      节点指标端口（概览页 {@code /metrics} 拉取目标）
  * @param requestTimeoutMs 管理请求超时（毫秒）
+ * @param security         节点连接安全配置（Phase 3 T4，spec admin-console"部署形态与
+ *                         配置"：可选业务令牌与 TLS；缺省 {@link Security#NONE} 明文无令牌）
  */
 public record ConsoleConfig(
         List<Address> addresses,
@@ -47,10 +49,85 @@ public record ConsoleConfig(
         int port,
         int refreshSeconds,
         int metricsPort,
-        long requestTimeoutMs) {
+        long requestTimeoutMs,
+        Security security) {
 
     /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.console.";
+
+    /**
+     * 节点连接安全配置（Phase 3 详设 §5.1/§5.2，spec admin-console 增量）：
+     * 控制台与节点间亦过服务端同一 TLS/认证门闩——{@code tlsEnabled} 开启时
+     * AdminClient 以 PEM 执行 TLS 握手，{@code authToken} 配置时 HELLO 携带
+     * 该业务令牌（与逐消息 {@code admin-token} 独立、不互替借道）。
+     *
+     * @param tlsEnabled     是否启用节点 TLS（默认 false）
+     * @param tlsTrustStore  可信任 CA 的 PEM 证书集路径；未配置取系统默认信任
+     * @param tlsClientCert  mTLS 客户端 PEM 证书路径；与 {@code tlsClientKey} 成对
+     * @param tlsClientKey   mTLS 客户端 PEM 私钥路径
+     * @param authToken      业务令牌（HELLO 携带；服务端业务认证开启时必需）
+     */
+    public record Security(boolean tlsEnabled, String tlsTrustStore,
+                           String tlsClientCert, String tlsClientKey, String authToken) {
+
+        /** 缺省：明文、无令牌（TLS/认证关闭的服务端默认匹配）。 */
+        public static final Security NONE = new Security(false, null, null, null, null);
+
+        /**
+         * 紧凑构造：空白串归一为 null；mTLS cert/key 须成对（结构性校验）。
+         *
+         * @throws IllegalArgumentException cert/key 仅配置其一
+         */
+        public Security {
+            tlsTrustStore = norm(tlsTrustStore);
+            tlsClientCert = norm(tlsClientCert);
+            tlsClientKey = norm(tlsClientKey);
+            authToken = norm(authToken);
+            if ((tlsClientCert == null) != (tlsClientKey == null)) {
+                throw new IllegalArgumentException(
+                        "配置项 " + KEY_PREFIX + "tls-client-cert/tls-client-key 必须成对配置（mTLS）");
+            }
+        }
+
+        /**
+         * 从键查找解析（Properties 与 Spring Environment 双通道共用口径）。
+         *
+         * @param lookup 键查找（返回 {@code null} 表缺省）
+         * @return 安全配置（缺省 {@link #NONE} 语义）
+         */
+        public static Security from(java.util.function.Function<String, String> lookup) {
+            return new Security(
+                    boolOf(lookup, KEY_PREFIX + "tls-enabled", false),
+                    lookup.apply(KEY_PREFIX + "tls-trust-store"),
+                    lookup.apply(KEY_PREFIX + "tls-client-cert"),
+                    lookup.apply(KEY_PREFIX + "tls-client-key"),
+                    lookup.apply(KEY_PREFIX + "auth-token"));
+        }
+
+        /**
+         * 归一空白串。
+         *
+         * @param value 原值
+         * @return 归一值
+         */
+        private static String norm(String value) {
+            return value == null || value.isBlank() ? null : value;
+        }
+
+        /**
+         * 解析布尔（仅 {@code true} 当真）。
+         *
+         * @param lookup   键查找
+         * @param key      键
+         * @param fallback 缺省值
+         * @return 取值
+         */
+        private static boolean boolOf(java.util.function.Function<String, String> lookup,
+                                      String key, boolean fallback) {
+            String v = lookup.apply(key);
+            return v == null || v.isBlank() ? fallback : Boolean.parseBoolean(v.trim());
+        }
+    }
 
     /** 默认 HTTP 监听端口（详设 §4.4）。 */
     public static final int DEFAULT_PORT = 9413;
@@ -103,6 +180,7 @@ public record ConsoleConfig(
      * @throws IllegalArgumentException 任一字段非法
      */
     public ConsoleConfig {
+        security = security == null ? Security.NONE : security;
         if (addresses == null || addresses.isEmpty()) {
             throw new IllegalArgumentException(
                     "配置项 " + KEY_PREFIX + "server-addresses 不能为空（至少一个 host:port）");
@@ -175,7 +253,8 @@ public record ConsoleConfig(
                 intOf(lookup, KEY_PREFIX + "port", DEFAULT_PORT),
                 intOf(lookup, KEY_PREFIX + "refresh-interval-seconds", DEFAULT_REFRESH_SECONDS),
                 intOf(lookup, KEY_PREFIX + "metrics-port", DEFAULT_METRICS_PORT),
-                longOf(lookup, KEY_PREFIX + "request-timeout-ms", DEFAULT_REQUEST_TIMEOUT_MS));
+                longOf(lookup, KEY_PREFIX + "request-timeout-ms", DEFAULT_REQUEST_TIMEOUT_MS),
+                Security.from(lookup));
     }
 
     /**

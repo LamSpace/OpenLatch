@@ -34,6 +34,7 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
+import io.netty.handler.ssl.SslContext;
 import io.netty.util.HashedWheelTimer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -130,6 +131,16 @@ public final class SeedDiscovery {
             ClientConfig.SeedAddress seed, ClientConfig config, EventLoopGroup group,
             HashedWheelTimer timer, long probeMs) {
         CompletableFuture<ClientConfig.SeedAddress> result = new CompletableFuture<>();
+        // 探针与主连接同安全配置（Phase 3 T4，spec"种子发现探针附令牌"）：TLS
+        // 开启即加密握手、配置业务令牌即随 HELLO 携带——否则认证开启的服务端会
+        // 把无令牌探针当未认证连接断开。PEM 不可用即本次探针失败（不外抛）。
+        final SslContext ssl;
+        try {
+            ssl = ClientSecurity.clientSslContext(config);
+        } catch (RuntimeException e) {
+            result.completeExceptionally(e);
+            return result;
+        }
         Bootstrap bootstrap = new Bootstrap()
                 .group(group)
                 .channel(NioSocketChannel.class)
@@ -138,6 +149,10 @@ public final class SeedDiscovery {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        // TLS 必居 pipeline 首位（与连接状态机同构）。
+                        if (ssl != null) {
+                            ch.pipeline().addLast("ssl", ssl.newHandler(ch.alloc()));
+                        }
                         ch.pipeline()
                                 .addLast(new LengthFieldBasedFrameDecoder(MAX_FRAME_LENGTH, 0, 4, 0, 4))
                                 .addLast(new ProtobufDecoder(Envelope.getDefaultInstance()))
@@ -157,12 +172,17 @@ public final class SeedDiscovery {
             ch.pipeline().addLast(new ClientChannelHandler(mux::onResponse, () -> {
                 // 探针连接失效：在途请求由多路复用器超时收敛，无需额外联动
             }));
+            HelloRequest.Builder helloReq = HelloRequest.newBuilder()
+                    .setClientProtocolVersion(2).setClientName("openlatch-discovery");
+            // 业务令牌（Phase 3 T4）：与主连接一致，配置即随探针 HELLO 携带。
+            if (config.authToken() != null && !config.authToken().isBlank()) {
+                helloReq.setAuthToken(config.authToken());
+            }
             Envelope hello = Envelope.newBuilder()
                     .setProtocolVersion(3)
                     .setType(MessageType.HELLO)
                     .setRequestId(sc.nextRequestId())
-                    .setHelloRequest(HelloRequest.newBuilder()
-                            .setClientProtocolVersion(2).setClientName("openlatch-discovery"))
+                    .setHelloRequest(helloReq)
                     .build();
             mux.sendWithId(hello, probeMs).whenComplete((resp, err) -> {
                 if (err != null || resp == null || !resp.hasHelloResponse()) {

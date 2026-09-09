@@ -23,6 +23,7 @@ import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.server.AdminConfig;
+import io.github.lamspace.openlatch.server.AuthConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.admin.AdminRequestHandler;
@@ -54,7 +55,8 @@ import org.slf4j.LoggerFactory;
  * 未握手 ──合法 HELLO──▶ 已握手（业务阶段）──断连/空闲──▶ 清理
  *   │  畸形/提前业务请求：回 INVALID_REQUEST，不断连，
  *   │  连接仍可补发合法 HELLO（门闩语义）
- *   └─ 版本不在支持区间 [1,2] 或携带认证令牌：回 INVALID_REQUEST 并断连
+ *   └─ 版本不在支持区间 [1,3] 或认证未通过（Phase 3 T4：开启命中失败 /
+ *      关闭 Phase 1 守卫"auth_token 非空"）：回 INVALID_REQUEST 并断连
  * </pre>
  *
  * <p><b>业务阶段处理矩阵</b>：
@@ -99,6 +101,8 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     private final ClusterRuntime cluster;
     /** 管理观察处理器（Phase 3 T3；恒非空——兼容构造回落"未配置令牌"形态）。 */
     private final AdminRequestHandler adminHandler;
+    /** 业务令牌认证配置（Phase 3 T4 P3-16；兼容构造回落 {@link AuthConfig#unconfigured()}）。 */
+    private final AuthConfig authConfig;
 
     /**
      * 构造会话处理器（共享实例，无连接级可变状态；单机模式，ADMIN 一律
@@ -132,8 +136,8 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     }
 
     /**
-     * 构造会话处理器（全装配形态，Phase 3 T3）：注入管理观察处理器后
-     * {@code ADMIN_*} 消息在业务分发之前独立早退。
+     * 构造会话处理器（全装配形态，不含业务认证）：业务认证取
+     * {@link AuthConfig#unconfigured()}（Phase 1 兼容守卫）。
      *
      * @param core          锁语义核心（集群模式传 {@code null}）
      * @param config        服务器配置（限额）
@@ -146,6 +150,28 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     public ServerSessionHandler(CoreEngine core, ServerConfig config,
                                 ServerSessionRegistry registry, RequestDispatcher dispatcher,
                                 ClusterRuntime cluster, AdminRequestHandler adminHandler) {
+        this(core, config, registry, dispatcher, cluster, adminHandler, AuthConfig.unconfigured());
+    }
+
+    /**
+     * 构造会话处理器（全装配形态，Phase 3 T4 P3-16）：注入管理观察处理器与
+     * 业务令牌认证配置——{@code ADMIN_*} 在业务分发之前独立早退；HELLO 认证
+     * 由 {@code authConfig} 门控（spec"业务令牌认证与默认兼容守卫"：开启校验
+     * 命中任一令牌，关闭维持 Phase 1"非空即拒"守卫）。
+     *
+     * @param core          锁语义核心（集群模式传 {@code null}）
+     * @param config        服务器配置（限额）
+     * @param registry      会话注册表
+     * @param dispatcher    请求分发器（集群模式传 {@code null}）
+     * @param cluster       集群运行时，{@code null} 表示单机模式
+     * @param adminHandler  管理观察处理器；{@code null} 回落"未配置令牌"
+     *                      形态（一律拒绝 ADMIN，与库内嵌不启用管理面一致）
+     * @param authConfig    业务令牌认证配置（已结构性校验）
+     */
+    public ServerSessionHandler(CoreEngine core, ServerConfig config,
+                                ServerSessionRegistry registry, RequestDispatcher dispatcher,
+                                ClusterRuntime cluster, AdminRequestHandler adminHandler,
+                                AuthConfig authConfig) {
         this.core = core;
         this.config = config;
         this.registry = registry;
@@ -155,6 +181,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                 ? adminHandler
                 : new AdminRequestHandler(AdminConfig.unconfigured(), core, cluster,
                         registry, () -> 0L);
+        this.authConfig = authConfig;
     }
 
     /**
@@ -304,8 +331,10 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     /**
      * 握手门闩：未握手连接上的首条消息在此裁决。非 {@code HELLO} 或
      * 畸形 {@code HELLO}（无 payload）回 {@code INVALID_REQUEST} 但不断连；
-     * 客户端协议版本不在支持区间（v2 起为 [1,2]）或携带认证令牌（Phase 1
-     * 必须为空）回 {@code INVALID_REQUEST} 并断连；合法 {@code HELLO} 则经
+     * 客户端协议版本不在支持区间 [1,3] 或认证未通过（Phase 3 T4：认证开启
+     * 命中失败 / 关闭维持 Phase 1"非空即拒"守卫）回 {@code INVALID_REQUEST}
+     * 并断连；认证判定发生在 cluster / {@code CoreEngine.sessionOpened} 分叉
+     * 之前（单机与集群同一门闩，未认证 HELLO 零状态副作用）。合法 HELLO 则经
      * {@code CoreEngine.sessionOpened} 分配会话、激活连接簿记（记录协商
      * 版本）、登记注册表，并回 {@code OK} 与 sessionId。
      *
@@ -320,9 +349,16 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             return;
         }
         HelloRequest hello = msg.getHelloRequest();
+        // 业务令牌认证门控（Phase 3 T4 P3-16，spec"业务令牌认证与默认兼容守卫"）：
+        // 开启 = 校验命中任一配置令牌（失败统一拒、不泄露原因）；关闭（默认）=
+        // Phase 1 兼容守卫（非空 auth_token 即拒）。判定在 cluster/sessionOpened
+        // 分叉之前——单机与集群同一门闩，未认证 HELLO 零状态副作用。
+        boolean authRejected = authConfig.isEnabled()
+                ? !authConfig.accepts(hello.getAuthToken())
+                : !hello.getAuthToken().isEmpty();
         if (!OpenLatchServer.isClientVersionSupported(hello.getClientProtocolVersion())
-                || !hello.getAuthToken().isEmpty()) {
-            // 版本越界或携带认证令牌：拒绝并断连（不做隐式兼容，设计说明书 §3.2.1）。
+                || authRejected) {
+            // 版本越界或认证未通过：拒绝并断连（不做隐式兼容，设计说明书 §3.2.1）。
             ctx.writeAndFlush(helloResponse(msg, StatusCode.INVALID_REQUEST, 0));
             ctx.close();
             return;

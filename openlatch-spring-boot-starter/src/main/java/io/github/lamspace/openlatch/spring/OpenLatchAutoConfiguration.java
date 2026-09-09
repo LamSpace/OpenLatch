@@ -81,9 +81,34 @@ public class OpenLatchAutoConfiguration {
                 .requestTimeout(properties.requestTimeout())
                 .defaultWaitTimeout(properties.defaultWaitTimeout())
                 .reconnectInitialBackoff(properties.reconnectInitialBackoff())
-                .reconnectMaxBackoff(properties.reconnectMaxBackoff());
+                .reconnectMaxBackoff(properties.reconnectMaxBackoff())
+                .tlsEnabled(properties.tlsEnabled());
+        // TLS/认证属性（Phase 3 T4，spec spring-boot-starter"配置属性绑定与默认值"）：
+        // 仅在显式配置时透传，未配置（null）保持客户端默认（TLS 关 / 无令牌）。
+        if (isNotBlank(properties.tlsTrustStore())) {
+            builder.tlsTrustStore(properties.tlsTrustStore());
+        }
+        if (isNotBlank(properties.tlsClientCert())) {
+            builder.tlsClientCert(properties.tlsClientCert());
+        }
+        if (isNotBlank(properties.tlsClientKey())) {
+            builder.tlsClientKey(properties.tlsClientKey());
+        }
+        if (isNotBlank(properties.authToken())) {
+            builder.authToken(properties.authToken());
+        }
         customizers.orderedStream().forEach(c -> c.customize(builder));
         return builder.build();
+    }
+
+    /**
+     * 字符串是否非空白（透传判据）。
+     *
+     * @param value 值
+     * @return 非空白返回 true
+     */
+    private static boolean isNotBlank(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**

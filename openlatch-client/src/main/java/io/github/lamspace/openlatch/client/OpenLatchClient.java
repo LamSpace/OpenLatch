@@ -1410,6 +1410,16 @@ public final class OpenLatchClient implements AutoCloseable {
         private int workerThreads = 1;
         /** 宿主度量注册表（Phase 3 T2）；{@code null}=客户端指标默认关闭。 */
         private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+        /** 是否启用 TLS（Phase 3 T4，spec"客户端 TLS 与认证消费"）；默认 false=明文。 */
+        private boolean tlsEnabled;
+        /** 可信任 CA 的 PEM 证书集路径；{@code null} 取系统默认信任。 */
+        private String tlsTrustStore;
+        /** mTLS 客户端 PEM 证书路径；与 {@link #tlsClientKey} 成对。 */
+        private String tlsClientCert;
+        /** mTLS 客户端 PEM 私钥路径；与 {@link #tlsClientCert} 成对。 */
+        private String tlsClientKey;
+        /** 业务令牌（HELLO 携带）；{@code null} 表示不鉴权。 */
+        private String authToken;
 
         /**
          * 私有构造：仅由 {@link OpenLatchClient#builder()} 创建。
@@ -1543,11 +1553,72 @@ public final class OpenLatchClient implements AutoCloseable {
         }
 
         /**
+         * 启用/关闭 TLS（Phase 3 T4，spec"客户端 TLS 与认证消费"）。开启后客户端
+         * 对每一次连接尝试（主连接、种子发现探针、断连重连）执行 TLS 握手；
+         * 默认关闭 = 明文无令牌形态，行为与现状逐字节一致。
+         *
+         * @param tlsEnabled 是否启用 TLS
+         * @return 本构建器
+         */
+        public Builder tlsEnabled(boolean tlsEnabled) {
+            this.tlsEnabled = tlsEnabled;
+            return this;
+        }
+
+        /**
+         * 设置可信任 CA 的 PEM 证书集路径（TLS 信任锚；服务端/自签 CA 场景
+         * 必需，公网 CA 场景可省略取系统默认信任）。
+         *
+         * @param tlsTrustStore PEM 证书集路径
+         * @return 本构建器
+         */
+        public Builder tlsTrustStore(String tlsTrustStore) {
+            this.tlsTrustStore = tlsTrustStore;
+            return this;
+        }
+
+        /**
+         * 设置 mTLS 客户端 PEM 证书路径（须与 {@link #tlsClientKey(String)}
+         * 成对；服务端 {@code require-client-cert=true} 时必需）。
+         *
+         * @param tlsClientCert PEM 证书（链）路径
+         * @return 本构建器
+         */
+        public Builder tlsClientCert(String tlsClientCert) {
+            this.tlsClientCert = tlsClientCert;
+            return this;
+        }
+
+        /**
+         * 设置 mTLS 客户端 PEM 私钥路径（与 {@link #tlsClientCert(String)} 成对）。
+         *
+         * @param tlsClientKey PEM 私钥路径
+         * @return 本构建器
+         */
+        public Builder tlsClientKey(String tlsClientKey) {
+            this.tlsClientKey = tlsClientKey;
+            return this;
+        }
+
+        /**
+         * 设置业务令牌（服务端业务认证开启时 HELLO 校验；spec"客户端 TLS 与
+         * 认证消费"）。令牌仅在握手报文中携带、MUST NOT 打印或记录明文值。
+         *
+         * @param authToken 业务令牌
+         * @return 本构建器
+         */
+        public Builder authToken(String authToken) {
+            this.authToken = authToken;
+            return this;
+        }
+
+        /**
          * 校验配置并构建客户端。
          *
          * @return 新的客户端实例，后台资源已启动
          * @throws IllegalStateException    未设置服务地址
-         * @throws IllegalArgumentException 地址格式非法、时长非正、退避上限小于初始值或线程数小于 1
+         * @throws IllegalArgumentException 地址格式非法、时长非正、退避上限小于初始值、
+         *                                  线程数小于 1、或 mTLS cert/key 未成对
          */
         public OpenLatchClient build() {
             java.util.List<String> effective = seedAddresses.isEmpty()
@@ -1574,10 +1645,28 @@ public final class OpenLatchClient implements AutoCloseable {
             if (workerThreads < 1) {
                 throw new IllegalArgumentException("workerThreads must be >= 1");
             }
+            // mTLS cert/key 成对约束（Phase 3 T4）：单独配置其一即误配，快速失败。
+            String cert = nullIfBlank(tlsClientCert);
+            String key = nullIfBlank(tlsClientKey);
+            if ((cert == null) != (key == null)) {
+                throw new IllegalArgumentException(
+                        "tlsClientCert and tlsClientKey must be configured together (mTLS)");
+            }
             ClientConfig config = new ClientConfig(host, port, java.util.List.copyOf(seeds),
                     requestTimeout, defaultWaitTimeout,
-                    connectTimeout, reconnectInitialBackoff, reconnectMaxBackoff, workerThreads);
+                    connectTimeout, reconnectInitialBackoff, reconnectMaxBackoff, workerThreads,
+                    tlsEnabled, nullIfBlank(tlsTrustStore), cert, key, nullIfBlank(authToken));
             return new OpenLatchClient(config, meterRegistry);
+        }
+
+        /**
+         * 空白串归一为 {@code null}（可选路径/令牌的"未配置"形态）。
+         *
+         * @param value 原值
+         * @return 归一后的值
+         */
+        private static String nullIfBlank(String value) {
+            return value == null || value.isBlank() ? null : value;
         }
 
         /**

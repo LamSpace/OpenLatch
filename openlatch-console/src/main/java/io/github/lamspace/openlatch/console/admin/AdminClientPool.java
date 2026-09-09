@@ -19,9 +19,13 @@ package io.github.lamspace.openlatch.console.admin;
 import io.github.lamspace.openlatch.console.ConsoleConfig;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,12 +61,45 @@ public final class AdminClientPool implements DisposableBean {
             t.setDaemon(true);
             return t;
         });
+        // 节点连接安全（Phase 3 T4，spec admin-console"部署形态与配置"）：TLS 开启
+        // 即构造一次共享 SslContext；PEM 不可用即池构造失败（启动快速失败，不进入
+        // 半启动）。业务令牌逐客户端透传（HELLO 携带），与逐消息 admin-token 分离。
+        ConsoleConfig.Security sec = config.security();
+        SslContext ssl = buildClientSsl(sec);
         Map<String, AdminClient> map = new LinkedHashMap<>();
         for (ConsoleConfig.Address a : config.addresses()) {
             map.put(display(a), new AdminClient(a, config.adminToken(),
-                    config.requestTimeoutMs(), group));
+                    config.requestTimeoutMs(), group, ssl, sec.authToken()));
         }
         this.clients = Map.copyOf(map);
+    }
+
+    /**
+     * 由控制台安全配置构造客户端 {@link SslContext}（PEM 直供，与服务端/测试
+     * 同一条加载路径）；TLS 未启用返回 {@code null}（明文）。PEM 不可读/不可解析
+     * 抛 {@link IllegalStateException}（启动快速失败）。
+     *
+     * @param sec 节点连接安全配置
+     * @return TLS 上下文；未启用返回 {@code null}
+     */
+    private static SslContext buildClientSsl(ConsoleConfig.Security sec) {
+        if (!sec.tlsEnabled()) {
+            return null;
+        }
+        try {
+            SslContextBuilder builder = SslContextBuilder.forClient();
+            if (sec.tlsTrustStore() != null) {
+                builder.trustManager(Path.of(sec.tlsTrustStore()).toFile());
+            }
+            if (sec.tlsClientCert() != null) {
+                builder.keyManager(Path.of(sec.tlsClientCert()).toFile(),
+                        Path.of(sec.tlsClientKey()).toFile());
+            }
+            return builder.build();
+        } catch (IOException | RuntimeException e) {
+            throw new IllegalStateException(
+                    "控制台节点 TLS 配置加载失败（PEM 文件不可读或不可解析）: " + e.getMessage(), e);
+        }
     }
 
     /**

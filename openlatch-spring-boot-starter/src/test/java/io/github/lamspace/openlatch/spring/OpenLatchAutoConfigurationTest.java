@@ -198,4 +198,42 @@ class OpenLatchAutoConfigurationTest {
             server.stop();
         }
     }
+
+    /**
+     * Phase 3 T4 spec spring-boot-starter"配置属性绑定与默认值"：TLS/认证属性
+     * 透传至所建客户端（PEM 路径仅为配置值，客户端首次连接时才读取文件——
+     * 此处断言绑定面，不真连）。
+     */
+    @Test
+    void tlsAndAuthPropertiesReachClientConfig() {
+        runner.withPropertyValues(
+                "openlatch.tls-enabled=true",
+                "openlatch.tls-trust-store=/etc/latch/ca.pem",
+                "openlatch.tls-client-cert=/etc/latch/client-cert.pem",
+                "openlatch.tls-client-key=/etc/latch/client-key.pem",
+                "openlatch.auth-token=the-business-token")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var config = context.getBean(OpenLatchClient.class).config();
+                    assertThat(config.tlsEnabled()).isTrue();
+                    assertThat(config.tlsTrustStore()).isEqualTo("/etc/latch/ca.pem");
+                    assertThat(config.tlsClientCert()).isEqualTo("/etc/latch/client-cert.pem");
+                    assertThat(config.tlsClientKey()).isEqualTo("/etc/latch/client-key.pem");
+                    assertThat(config.authToken()).isEqualTo("the-business-token");
+                });
+    }
+
+    /**
+     * Phase 3 T4 默认形态：零配置安全项关闭（TLS 关、无业务令牌）——既有明文
+     * 装配行为不变（spec"零配置明文装配不变"）。
+     */
+    @Test
+    void securityDefaultsOffWithoutProperties() {
+        runner.run(context -> {
+            var config = context.getBean(OpenLatchClient.class).config();
+            assertThat(config.tlsEnabled()).isFalse();
+            assertThat(config.tlsTrustStore()).isNull();
+            assertThat(config.authToken()).isNull();
+        });
+    }
 }

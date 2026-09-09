@@ -33,12 +33,16 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -136,6 +140,10 @@ public final class OpenLatchServer {
     private final MetricsConfig metricsConfig;
     /** 管理观察配置（不可变；兼容构造重载取 {@link AdminConfig#unconfigured()}）。 */
     private final AdminConfig adminConfig;
+    /** 业务令牌认证配置（不可变；兼容构造重载取 {@link AuthConfig#unconfigured()} 兼容守卫）。 */
+    private final AuthConfig authConfig;
+    /** 传输层 TLS 配置（不可变；兼容构造重载取 {@link TlsConfig#disabled()} 明文栈）。 */
+    private final TlsConfig tlsConfig;
     /** 指标词表门面：双路径埋点数据落点，{@code /metrics} 的 scrape 来源。 */
     private final ServerMetrics metrics = new ServerMetrics();
     /** 管理端口 HTTP 服务（{@code enabled} 时于 {@link #start} 绑定，此前与关停后为 {@code null}）。 */
@@ -223,10 +231,52 @@ public final class OpenLatchServer {
      */
     public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
                            MetricsConfig metricsConfig, AdminConfig adminConfig) {
+        this(config, clusterConfig, metricsConfig, adminConfig, TlsConfig.disabled());
+    }
+
+    /**
+     * 构造服务器（全配置形态，不含业务认证）：认证取 {@link AuthConfig#unconfigured()}
+     * （Phase 1 兼容守卫）。
+     *
+     * @param config        服务器配置
+     * @param clusterConfig 集群配置（已校验）
+     * @param metricsConfig 指标配置（已校验）
+     * @param adminConfig   管理观察配置（已归一）
+     * @param tlsConfig     TLS 传输配置（已结构性校验；文件可读性于
+     *                      {@link #start()} 校验）
+     */
+    public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
+                           MetricsConfig metricsConfig, AdminConfig adminConfig,
+                           TlsConfig tlsConfig) {
+        this(config, clusterConfig, metricsConfig, adminConfig, AuthConfig.unconfigured(), tlsConfig);
+    }
+
+    /**
+     * 构造服务器（全配置形态，Phase 3 T4）：业务认证由 {@code authConfig} 决定
+     * （{@code enabled=true} 时 HELLO 令牌命中校验，失败统一拒并断连；关闭默认
+     * 维持 Phase 1"非空即拒"兼容守卫）；TLS 由 {@code tlsConfig} 决定——
+     * {@code enabled=true} 时 {@link #start()} 构造 {@link SslContext}（PEM
+     * cert/key，mTLS 时 trust-store + 要求客户端证书）并在监听 pipeline 首位
+     * 装配 {@code SslHandler}（明文连接拒绝、握手超时 5s 断开，spec"服务端
+     * TLS 传输层"）；两者默认关闭即明文无认证，行为与现状逐字节一致。
+     *
+     * @param config        服务器配置
+     * @param clusterConfig 集群配置（已校验）
+     * @param metricsConfig 指标配置（已校验）
+     * @param adminConfig   管理观察配置（已归一）
+     * @param authConfig    业务令牌认证配置（已结构性校验）
+     * @param tlsConfig     TLS 传输配置（已结构性校验；文件可读性于
+     *                      {@link #start()} 校验）
+     */
+    public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
+                           MetricsConfig metricsConfig, AdminConfig adminConfig,
+                           AuthConfig authConfig, TlsConfig tlsConfig) {
         this.config = config;
         this.clusterConfig = clusterConfig;
         this.metricsConfig = metricsConfig;
         this.adminConfig = adminConfig;
+        this.authConfig = authConfig;
+        this.tlsConfig = tlsConfig;
         this.core = clusterConfig.enabled()
                 ? null
                 : new CoreEngine(config.toCoreConfig(), new SystemClock(), new NotifyEventBridge(sessions));
@@ -254,16 +304,28 @@ public final class OpenLatchServer {
         }
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup(config.workerThreads());
+        // 传输层 TLS（Phase 3 T4）：enabled 时构造 SslContext——PEM 文件不可读
+        // 或不可解析即启动快速失败（stop 回收已启动的集群/调度器与线程组，
+        // 不进入半启动，对齐"端口占用启动失败"语义，design D1）。
+        SslContext sslContext = null;
+        if (tlsConfig.enabled()) {
+            try {
+                sslContext = serverSslContext();
+            } catch (IllegalStateException e) {
+                stop();
+                throw e;
+            }
+        }
         // 管理观察处理器（Phase 3 T3）：数据源按装配形态二选一，未配置
         // 令牌时同样注入——由处理器自身执行"一律拒绝"的安全默认。
         AdminRequestHandler adminHandler =
                 new AdminRequestHandler(adminConfig, core, cluster, sessions, this::uptimeMs);
         ServerSessionHandler handler = clusterConfig.enabled()
-                ? new ServerSessionHandler(null, config, sessions, null, cluster, adminHandler)
+                ? new ServerSessionHandler(null, config, sessions, null, cluster, adminHandler, authConfig)
                 : new ServerSessionHandler(core, config, sessions,
-                        new RequestDispatcher(core, metrics), null, adminHandler);
+                        new RequestDispatcher(core, metrics), null, adminHandler, authConfig);
         ServerChannelInitializer initializer = new ServerChannelInitializer(
-                config.idleTimeoutMs(), handler, channels);
+                config.idleTimeoutMs(), handler, channels, sslContext);
         ServerBootstrap bootstrap = ServerBootstrapFactory.create(bossGroup, workerGroup, initializer);
         try {
             serverChannel = bootstrap.bind(config.port()).sync().channel();
@@ -291,11 +353,42 @@ public final class OpenLatchServer {
         startedAtMs = System.currentTimeMillis();
         log.info("OpenLatch server started: port={}, protocolVersion={}, maxKeyLength={}, "
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, defaultLeaseMs={}, "
-                        + "clusterEnabled={}, clusterNodeId={}, metricsPort={}, adminEnabled={}",
+                        + "clusterEnabled={}, clusterNodeId={}, metricsPort={}, adminEnabled={}, "
+                        + "authEnabled={}, tlsEnabled={}, mTls={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
                 config.maxInflightPerConnection(), config.defaultLeaseMs(),
                 clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort(),
-                adminConfig.isConfigured());
+                adminConfig.isConfigured(), authConfig.isEnabled(), tlsConfig.enabled(),
+                tlsConfig.requireClientCert());
+    }
+
+    /**
+     * 由 TLS 配置构造服务端 {@link SslContext}（Phase 3 T4，design D1）：
+     * PEM cert/key 经 {@code SslContextBuilder.forServer} 直供；mTLS
+     * （{@code require-client-cert=true}）时以 trust-store 为可信任 CA 并
+     * 要求客户端证书。文件不可读/不可解析抛 {@link IllegalStateException}
+     * （启动快速失败，由调用方回收资源）。
+     *
+     * @return 已构建的 SslContext
+     * @throws IllegalStateException cert/key/trust-store 文件不可读或不可解析
+     */
+    private SslContext serverSslContext() {
+        try {
+            SslContextBuilder builder = SslContextBuilder.forServer(
+                    Path.of(tlsConfig.cert()).toFile(), Path.of(tlsConfig.key()).toFile());
+            if (tlsConfig.requireClientCert()) {
+                builder.trustManager(Path.of(tlsConfig.trustStore()).toFile())
+                        .clientAuth(ClientAuth.REQUIRE);
+            }
+            return builder.build();
+        } catch (IOException | RuntimeException e) {
+            // SslContextBuilder 对不可读/不可解析的 PEM 文件抛 SSLException（IOException）
+            // 或 IllegalArgumentException（keyManager/trustManager 解析失败）——统一
+            // 包装为启动失败的 IllegalStateException（design D1 快速失败）。
+            throw new IllegalStateException(
+                    "TLS 配置加载失败（cert/key/trust-store 文件不可读或不可解析）: "
+                            + e.getMessage(), e);
+        }
     }
 
     /**
@@ -457,19 +550,24 @@ public final class OpenLatchServer {
         ClusterConfig clusterConfig;
         MetricsConfig metricsConfig;
         AdminConfig adminConfig;
+        AuthConfig authConfig;
+        TlsConfig tlsConfig;
         try {
             String path = System.getProperty(ServerConfig.CONFIG_PATH_PROPERTY);
             config = ServerConfig.load(path);
             clusterConfig = ClusterConfig.load(path);
             metricsConfig = MetricsConfig.load(path);
             adminConfig = AdminConfig.load(path);
+            authConfig = AuthConfig.load(path);
+            tlsConfig = TlsConfig.load(path);
         } catch (IllegalArgumentException e) {
             System.err.println(e.getMessage());
             System.exit(1);
             return;
         }
         OpenLatchServer server =
-                new OpenLatchServer(config, clusterConfig, metricsConfig, adminConfig);
+                new OpenLatchServer(config, clusterConfig, metricsConfig, adminConfig,
+                        authConfig, tlsConfig);
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "openlatch-shutdown"));
         try {
             server.start();

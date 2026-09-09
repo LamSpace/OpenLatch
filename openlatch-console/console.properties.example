@@ -1,7 +1,7 @@
 # OpenLatch 管理控制台配置样例（详设 §4.4）
 # 启动：java -Dopenlatch.console.config=/path/to/console.properties \
 #       -jar openlatch-console-<ver>-executable.jar
-# 仅建议内网部署：T4（TLS）落地前管理通道为明文。
+# 控制台 HTTP 建议仅内网部署（9413 为明文）；节点连接安全见下方 tls/auth 键。
 
 # 目标节点业务端口列表（逗号分隔 host:port，≥1 项）
 openlatch.console.server-addresses=127.0.0.1:9410
@@ -15,3 +15,15 @@ openlatch.console.admin-token=change-me
 #openlatch.console.metrics-port=9412
 # 管理请求超时（毫秒，默认 5000）
 #openlatch.console.request-timeout-ms=5000
+
+# ==== 节点连接安全（Phase 3 T4，可选） ====
+# 业务令牌：服务端 openlatch.server.auth.enabled=true 时，HELLO 需携带
+#（与逐消息 admin-token 独立，不可互替）
+#openlatch.console.auth-token=change-me
+# 对节点启用 TLS（服务端 openlatch.server.tls.enabled=true 时必需）
+#openlatch.console.tls-enabled=true
+# 节点可信任 CA 的 PEM 证书集（自签/内网 CA 必填）
+#openlatch.console.tls-trust-store=/etc/openlatch/ca.pem
+# mTLS 客户端证书/私钥（服务端 require-client-cert=true 时成对配置）
+#openlatch.console.tls-client-cert=/etc/openlatch/client-cert.pem
+#openlatch.console.tls-client-key=/etc/openlatch/client-key.pem

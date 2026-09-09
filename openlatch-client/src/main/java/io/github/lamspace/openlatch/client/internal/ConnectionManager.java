@@ -34,6 +34,7 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
+import io.netty.handler.ssl.SslContext;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.Timeout;
 import org.slf4j.Logger;
@@ -113,6 +114,11 @@ public final class ConnectionManager {
 
     /** 客户端配置。 */
     private final ClientConfig config;
+    /**
+     * 已构造的客户端 TLS 上下文（{@code tlsEnabled=true} 时首次连接惰性构造并
+     * 缓存，跨重连复用；关闭态恒为 {@code null}）。
+     */
+    private volatile SslContext sslContext;
     /** 网络线程组：连接与读写均在此执行。 */
     private final EventLoopGroup group;
     /** 共享定时器：重连退避定时挂于此。 */
@@ -493,6 +499,20 @@ public final class ConnectionManager {
             state = State.CONNECTING;
             connectDeadlineMs = System.currentTimeMillis() + config.connectTimeout().toMillis();
         }
+        // 客户端 TLS（Phase 3 T4）：启用时惰性构造 SslContext 并缓存（跨重连复用，
+        // 主连接与各车道同一装配源）。PEM 配置不可用按连接失败处理（有界退避重连
+        // + WARN 日志，不崩溃 EventLoop），与 spec"错误 trust-store 清晰失败"一致。
+        SslContext ssl = sslContext;
+        if (ssl == null && config.tlsEnabled()) {
+            try {
+                sslContext = ssl = ClientSecurity.clientSslContext(config);
+            } catch (RuntimeException e) {
+                log.warn("TLS 配置加载失败，按本次连接失败处理: {}", e.toString());
+                onAttemptFailed();
+                return;
+            }
+        }
+        final SslContext fssl = ssl;
         Bootstrap bootstrap = new Bootstrap()
                 .group(group)
                 .channel(NioSocketChannel.class)
@@ -501,6 +521,11 @@ public final class ConnectionManager {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        // TLS 必居 pipeline 首位（Phase 3 T4）：握手/加解密先于
+                        // 分帧编解码；SslHandler 于 channelActive 自动开始握手。
+                        if (fssl != null) {
+                            ch.pipeline().addLast("ssl", fssl.newHandler(ch.alloc()));
+                        }
                         // 出站遍历序：先编码器再分帧器，故 prepender 更靠近 head。
                         ch.pipeline()
                                 .addLast(new LengthFieldBasedFrameDecoder(MAX_FRAME_LENGTH, 0, 4, 0, 4))
@@ -564,13 +589,19 @@ public final class ConnectionManager {
         // 保证其后的业务请求从 2 起，避免与握手的 requestId 冲突。
         SessionContext context = new SessionContext(0);
         this.pendingSession = context;
+        HelloRequest.Builder helloReq = HelloRequest.newBuilder()
+                .setClientProtocolVersion(PROTOCOL_VERSION)
+                .setClientName("openlatch-client");
+        // 业务令牌（Phase 3 T4）：配置非空即随 HELLO 携带（认证开启的服务端校验；
+        // 默认关闭服务端维持"非空即拒"，故未配置时不得携带）。令牌不落日志。
+        if (config.authToken() != null && !config.authToken().isBlank()) {
+            helloReq.setAuthToken(config.authToken());
+        }
         Envelope hello = Envelope.newBuilder()
                 .setProtocolVersion(PROTOCOL_VERSION)
                 .setType(MessageType.HELLO)
                 .setRequestId(context.nextRequestId())
-                .setHelloRequest(HelloRequest.newBuilder()
-                        .setClientProtocolVersion(PROTOCOL_VERSION)
-                        .setClientName("openlatch-client"))
+                .setHelloRequest(helloReq)
                 .build();
         multiplexer.sendWithId(hello, remainingMs)
                 .whenComplete((resp, err) -> onHelloResult(ch, resp, err));

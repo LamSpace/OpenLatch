@@ -116,7 +116,9 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 `openlatch-console` 是**独立部署的只读** Web 控制台（默认 HTTP **9413**）：经 v3
 `ADMIN_*` 管理协议查询各节点业务端口，以服务端 `openlatch.server.admin.token`
 认证；概览页另拉各节点 `/metrics`（9412）渲染 sparkline。无任何写操作入口
-（无强制解锁/踢会话）。T4（TLS）落地前管理通道为明文，**仅限内网部署**。
+（无强制解锁/踢会话）。节点开启 TLS/业务认证（T4）后，控制台以自身的 TLS +
+业务令牌配置接入；握手被拒的节点如实显示为认证失败/不可达降级，**不以明文
+探测**。
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
@@ -129,10 +131,54 @@ java -Dopenlatch.console.config=/path/to/console.properties \
 |---|---|---|
 | `openlatch.console.server-addresses` | 必填 | 逗号分隔 `host:port` 节点**业务**端口 |
 | `openlatch.console.admin-token` | 必填 | 须与服务端 `openlatch.server.admin.token` 一致；不符时页面降级为认证横幅 |
+| `openlatch.console.auth-token` | — | HELLO 携带的业务令牌（服务端开启业务认证时必需） |
+| `openlatch.console.tls-enabled` | `false` | 对节点启用 TLS |
+| `openlatch.console.tls-trust-store` | — | 节点可信任 CA 的 PEM 证书集 |
+| `openlatch.console.tls-client-cert` / `tls-client-key` | — | mTLS 客户端证书/私钥（成对） |
 | `openlatch.console.port` | `9413` | 控制台 HTTP 端口 |
 | `openlatch.console.refresh-interval-seconds` | `5` | 页面轮询刷新间隔 |
 | `openlatch.console.metrics-port` | `9412` | 概览曲线所用的各节点指标端口 |
 | `openlatch.console.request-timeout-ms` | `5000` | 单条管理请求超时 |
+
+## 安全（TLS 与 Token 认证）
+
+Phase 3 T4 保护**客户端接入端口**（业务与 `ADMIN_*` 消息共用该端口）。两项能力默认
+关闭——默认形态下服务端行为与现状逐字节一致。
+
+**服务端 TLS**（`-Dopenlatch.config=<path>`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `openlatch.server.tls.enabled` | `false` | 业务端口启用 TLS；明文连接被拒，握手超时 5s |
+| `openlatch.server.tls.cert` / `tls.key` | — | 服务端 PEM 证书/私钥（启用时必填） |
+| `openlatch.server.tls.trust-store` | — | 校验客户端证书的 CA PEM 集（mTLS） |
+| `openlatch.server.tls.require-client-cert` | `false` | 要求并校验客户端证书（mTLS） |
+
+证书更新以重启生效（不做热加载）。
+
+**业务令牌认证**（HELLO 的 `auth_token`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `openlatch.server.auth.enabled` | `false` | 关闭（默认）维持 Phase 1 守卫：非空 `auth_token` 即拒；开启后令牌须命中 `tokens` 之一 |
+| `openlatch.server.auth.tokens` | — | 逗号分隔令牌列表（开启时 ≥1；令牌不得含逗号）；多令牌使轮换期旧+新双活 |
+
+拒绝一律同形（`INVALID_REQUEST` + 断连、常量时间比较、不泄露原因）；认证在握手一次
+完成，发生在任何会话分配/`SESSION_OPEN` 复制之前（单机与集群同一门闩）。管理令牌
+（`admin-token`）独立、逐消息携带，与业务令牌不互替借道。客户端 / starter / 控制台
+以 `tls-enabled`/`tls-trust-store`/`tls-client-cert`/`tls-client-key`/`auth-token`
+暴露同套设置。
+
+**令牌轮换流程**（先服务端、再客户端、后摘旧）：
+1. 新令牌加入 `openlatch.server.auth.tokens` 并重启服务端（旧+新双活）；
+2. 客户端/控制台切换为新的 `auth-token` 并重启；
+3. 从服务端配置摘除旧令牌并重启。
+
+> 注意：开启业务认证会拒绝不带有效令牌的客户端（含旧版客户端）——客户端须与服务端
+> 变更同批滚动。
+
+**范围边界**——仅客户端接入端口受保护。Raft 节点间通道（Ratis）、9412 指标 HTTP 与
+9413 控制台 Web 保持明文，请置于内网/网络隔离；本文档不主张全链路加密。
 
 ## 配置参考
 

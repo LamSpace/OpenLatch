@@ -33,6 +33,7 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
+import io.netty.handler.ssl.SslContext;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -69,13 +70,27 @@ public final class TestProtocolClient implements AutoCloseable {
     private volatile long sessionId;
 
     /**
-     * 建立连接并装配协议 pipeline。
+     * 建立连接并装配协议 pipeline（明文）。
      *
      * @param host 服务器地址
      * @param port 服务器端口
      * @throws InterruptedException 连接等待被中断
      */
     public void connect(String host, int port) throws InterruptedException {
+        connect(host, port, null);
+    }
+
+    /**
+     * 建立连接并装配协议 pipeline（Phase 3 T4：{@code sslContext} 非空时开启
+     * TLS——pipeline 首位装配 {@link SslContext} 的 {@code SslHandler}，与明文
+     * 形态的其余装配一致）。
+     *
+     * @param host       服务器地址
+     * @param port       服务器端口
+     * @param sslContext 客户端 TLS 上下文，{@code null} 即明文
+     * @throws InterruptedException 连接等待被中断
+     */
+    public void connect(String host, int port, SslContext sslContext) throws InterruptedException {
         Bootstrap bootstrap = new Bootstrap()
                 .group(group)
                 .channel(NioSocketChannel.class)
@@ -83,6 +98,9 @@ public final class TestProtocolClient implements AutoCloseable {
                     @Override
                     protected void initChannel(SocketChannel ch) {
                         // 出站遍历序：先编码器再分帧器，故 prepender 更靠近 head。
+                        if (sslContext != null) {
+                            ch.pipeline().addLast("ssl", sslContext.newHandler(ch.alloc()));
+                        }
                         ch.pipeline()
                                 .addLast(new LengthFieldBasedFrameDecoder(
                                         io.github.lamspace.openlatch.server.net.ServerChannelInitializer.MAX_FRAME_LENGTH,
