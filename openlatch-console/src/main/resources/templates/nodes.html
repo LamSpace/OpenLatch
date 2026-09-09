@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="zh">
+<head th:replace="~{fragments :: head('节点视图', ${refreshSeconds})}"></head>
+<body>
+<nav th:replace="~{fragments :: nav('nodes')}"></nav>
+<div th:replace="~{fragments :: authBanner(${authBanner})}"></div>
+
+<main class="page">
+    <div th:each="row : ${summaries}" class="card">
+        <div th:replace="~{fragments :: nodeError(${row})}"></div>
+        <th:block th:if="${row.ok}">
+            <h2>
+                <span th:text="${row.display}">节点</span>
+                <span class="tag leader" th:if="${row.value.nodeRole == 'LEADER'}">Leader</span>
+                <span class="tag" th:text="${row.value.nodeRole}">SINGLE</span>
+            </h2>
+            <p class="meta">
+                版本 <span th:text="${row.value.version}">v</span> ·
+                运行 <span th:text="${row.value.uptimeMs div 1000} + 's'">0s</span> ·
+                会话 <span th:text="${row.value.sessionCount}">0</span>
+            </p>
+            <th:block th:with="view=${views.get(row.display)}">
+                <div th:if="${view != null and !view.ok}">
+                    <div th:replace="~{fragments :: nodeError(${view})}"></div>
+                </div>
+                <div th:if="${view != null and view.ok and view.value == null}" class="meta">单机部署（无集群成员表）。</div>
+                <table class="grid" th:if="${view != null and view.ok and view.value != null}">
+                    <tr><th>节点</th><th>接入地址</th><th>角色</th></tr>
+                    <tr th:each="n : ${view.value.nodesList}">
+                        <td th:text="${n.nodeId}">1</td>
+                        <td th:text="${n.address}">—</td>
+                        <td><span class="tag leader" th:if="${n.isLeader}">Leader</span></td>
+                    </tr>
+                </table>
+            </th:block>
+        </th:block>
+    </div>
+</main>
+</body>
+</html>

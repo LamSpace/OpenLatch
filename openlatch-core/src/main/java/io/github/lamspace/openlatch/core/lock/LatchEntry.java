@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.core.lock;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
+import io.github.lamspace.openlatch.core.CoreInspection;
 import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
@@ -310,5 +311,27 @@ public final class LatchEntry implements KeyEntry {
     @Override
     public synchronized int waiterCount() {
         return awaiters.size();
+    }
+
+    /**
+     * 明细只读快照（Phase 3 T3，spec"明细只读观察面"）：条目锁内拷贝
+     * 定型总量与剩余计数、awaiter 队列（按 FIFO 序，等待项 threadId 恒 0、
+     * permits 恒 1——与入队形态一致）与参与会话集。屏障无租约与持有者，
+     * 租约三元组与持有表恒零值/空表。纯读，MUST NOT 改变任何状态。
+     *
+     * @param now 采样时刻（毫秒，引擎时钟）
+     * @return 本条目自洽的不可变快照
+     */
+    public synchronized CoreInspection.KeySnapshot snapshot(long now) {
+        List<CoreInspection.WaiterSnapshot> waiterSnaps = new ArrayList<>(awaiters.size());
+        for (Waiter w : awaiters) {
+            waiterSnaps.add(new CoreInspection.WaiterSnapshot(
+                    w.sessionId(), w.requestId(), w.threadId(), w.permits(),
+                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified()));
+        }
+        return new CoreInspection.KeySnapshot(key, KeyFamily.LATCH, false,
+                0, 0, 0, 0,
+                List.of(), List.copyOf(waiterSnaps),
+                0, 0, total, count, List.copyOf(participants));
     }
 }

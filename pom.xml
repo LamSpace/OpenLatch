@@ -18,6 +18,7 @@
         <module>openlatch-server</module>
         <module>openlatch-client</module>
         <module>openlatch-spring-boot-starter</module>
+        <module>openlatch-console</module>
         <module>openlatch-examples</module>
     </modules>
 

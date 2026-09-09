@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="zh">
+<head th:replace="~{fragments :: head('锁详情', ${refreshSeconds})}"></head>
+<body>
+<nav th:replace="~{fragments :: nav('keys')}"></nav>
+<div th:replace="~{fragments :: authBanner(${authBanner})}"></div>
+
+<main class="page">
+    <div class="card" th:with="r=${result}">
+        <div th:replace="~{fragments :: nodeError(${r})}"></div>
+        <th:block th:if="${r.ok and r.value.status.name() == 'OK'}">
+            <h2>
+                <a th:href="@{/keys(node=${node})}">← 锁列表</a>
+                <span th:text="${key}">key</span>
+                <span class="tag" th:text="${r.value.family}">lock</span>
+            </h2>
+            <div class="lease">
+                剩余租约 <strong th:text="${r.value.remainingLeaseMs} + 'ms'">0ms</strong>
+                <span th:if="${r.value.family == 'semaphore'}"
+                      th:text="|（可用许可 ${r.value.permitsAvailable}/${r.value.permitsTotal}）|"></span>
+                <span th:if="${r.value.family == 'latch'}"
+                      th:text="|（屏障计数 ${r.value.latchRemaining}/${r.value.latchTotal}）|"></span>
+            </div>
+
+            <h3>持有者</h3>
+            <table class="grid">
+                <tr><th>会话</th><th>线程</th><th>计数/许可</th><th>角色</th></tr>
+                <tr th:each="h : ${r.value.holdersList}">
+                    <td th:text="${h.sessionId}">0</td>
+                    <td th:text="${h.threadId}">0</td>
+                    <td th:text="${h.count}">0</td>
+                    <td th:text="${h.role}">writer</td>
+                </tr>
+                <tr th:if="${r.value.holdersList.isEmpty()}"><td colspan="4" class="empty">无持有者</td></tr>
+            </table>
+
+            <h3>等待队列</h3>
+            <div th:if="${r.value.waitQueueLeaderOnly}" class="banner">
+                等待队列仅 Leader 可见——当前来源节点为 Follower/未知角色。
+            </div>
+            <th:block th:unless="${r.value.waitQueueLeaderOnly}">
+                <table class="grid">
+                    <tr><th>位次</th><th>会话</th><th>请求</th><th>许可</th><th>已等待</th><th>已通知</th></tr>
+                    <tr th:each="w : ${r.value.waitersList}">
+                        <td th:text="${w.position}">1</td>
+                        <td th:text="${w.sessionId}">0</td>
+                        <td th:text="${w.requestId}">0</td>
+                        <td th:text="${w.permits}">1</td>
+                        <td th:text="${w.waitedMs} + 'ms'">0ms</td>
+                        <td th:text="${w.notified} ? '是' : '否'">否</td>
+                    </tr>
+                    <tr th:if="${r.value.waitersList.isEmpty()}"><td colspan="6" class="empty">无人等待</td></tr>
+                </table>
+            </th:block>
+        </th:block>
+        <div th:if="${r.ok and r.value.status.name() != 'OK'}" class="banner">
+            该节点上 key <strong th:text="${key}">key</strong> 无条目状态（应答码
+            <span th:text="${r.value.status}">NOT_HELD</span>）。
+        </div>
+    </div>
+</main>
+</body>
+</html>

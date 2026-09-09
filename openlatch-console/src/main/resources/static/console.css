@@ -1,0 +1,33 @@
+/* OpenLatch 控制台：无构建链的极简单页样式（Phase 3 T3 design D6）。 */
+:root { --fg: #1f2937; --mut: #6b7280; --bd: #e5e7eb; --bg: #f9fafb; --acc: #2563eb; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+.nav { display: flex; gap: 16px; align-items: center; padding: 10px 20px; background: #111827; color: #fff; }
+.nav .brand { font-weight: 700; margin-right: 8px; }
+.nav a { color: #d1d5db; text-decoration: none; padding: 4px 8px; border-radius: 6px; }
+.nav a.on { background: var(--acc); color: #fff; }
+.nav .readonly-tag { margin-left: auto; font-size: 12px; color: #9ca3af; border: 1px solid #374151; border-radius: 999px; padding: 2px 10px; }
+.page { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.card { background: #fff; border: 1px solid var(--bd); border-radius: 10px; padding: 14px 18px; }
+.card h2 { margin: 0 0 8px; font-size: 16px; }
+.card h3 { margin: 14px 0 6px; font-size: 14px; color: var(--mut); }
+table.grid { border-collapse: collapse; width: 100%; }
+table.grid th, table.grid td { border: 1px solid var(--bd); padding: 5px 9px; text-align: left; font-variant-numeric: tabular-nums; }
+table.grid th { background: #f3f4f6; font-weight: 600; }
+td.empty, .empty { color: var(--mut); text-align: center; }
+.banner { border-radius: 8px; padding: 8px 12px; margin: 8px 0; background: #fef3c7; border: 1px solid #f59e0b; }
+.banner.auth { background: #fee2e2; border-color: #ef4444; }
+.node-error { color: #b91c1c; margin: 6px 0; }
+.tag { display: inline-block; font-size: 12px; border: 1px solid var(--bd); border-radius: 999px; padding: 1px 9px; color: var(--mut); }
+.tag.leader { border-color: var(--acc); color: var(--acc); }
+.meta { color: var(--mut); margin: 4px 0; }
+.lease { margin: 6px 0 10px; }
+.filter { display: flex; gap: 12px; align-items: end; background: #fff; border: 1px solid var(--bd); border-radius: 10px; padding: 10px 14px; }
+.filter label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--mut); }
+.filter input, .filter select { padding: 4px 8px; border: 1px solid var(--bd); border-radius: 6px; }
+.filter button { padding: 5px 16px; border: 0; border-radius: 6px; background: var(--acc); color: #fff; cursor: pointer; }
+.pager { margin-top: 8px; color: var(--mut); }
+.pager a { color: var(--acc); text-decoration: none; margin-left: 6px; }
+.spark-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.spark-label { width: 92px; color: var(--mut); font-variant-numeric: tabular-nums; }
+svg.spark { background: #fff; }

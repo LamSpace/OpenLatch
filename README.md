@@ -17,6 +17,7 @@ OpenLatch is a lightweight distributed lock service (Phase 1 / MVP): a single-no
 | `openlatch-server` | Netty single-node server (executable jar) |
 | `openlatch-client` | Client SDK (async core + JUC-style sync wrapper + watchdog + reconnect) |
 | `openlatch-spring-boot-starter` | Spring Boot 4 auto-configuration, `@OpenLatch` annotation and aspect |
+| `openlatch-console` | Read-only admin console (Web, ADMIN protocol; see "Admin Console" below) |
 | `openlatch-examples` | Examples and benchmark harness (not published) |
 
 ## Build
@@ -111,6 +112,31 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 # SpringAnnotationExample / BenchmarkMain (~60s, writes the baseline report)
 ```
 
+## Admin Console
+
+`openlatch-console` is a separately deployed **read-only** web console (default HTTP `9413`).
+It queries each configured node over the v3 `ADMIN_*` protocol on the node's business port,
+authenticated against the server's `openlatch.server.admin.token`; the overview page also
+scrapes each node's `/metrics` port for sparklines. It offers no write operations
+(no force-unlock / session eviction). Treat it as intranet-only until TLS (Phase 3 T4) lands
+— the admin channel is plaintext today.
+
+```bash
+java -Dopenlatch.console.config=/path/to/console.properties \
+     -jar openlatch-console/target/openlatch-console-1.0-SNAPSHOT-executable.jar
+```
+
+Config keys (a template lives at `openlatch-console/console.properties.example`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `openlatch.console.server-addresses` | *(required)* | comma-separated `host:port` node **business** ports |
+| `openlatch.console.admin-token` | *(required)* | must equal the server's `openlatch.server.admin.token`; mismatch ⇒ pages degrade to an auth banner |
+| `openlatch.console.port` | `9413` | console HTTP port |
+| `openlatch.console.refresh-interval-seconds` | `5` | page polling interval |
+| `openlatch.console.metrics-port` | `9412` | per-node metrics port used for the overview sparklines |
+| `openlatch.console.request-timeout-ms` | `5000` | per admin-request timeout |
+
 ## Configuration Reference
 
 ### Server (Properties via `-Dopenlatch.config=<path>`)
@@ -129,6 +155,7 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | Inflight limit per connection |
 | `openlatch.server.metrics.enabled` | `true` | Enable the metrics admin endpoint (Prometheus scrapes `http://<host>:<port>/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | Metrics admin port (`0` = ephemeral); bind conflict fails startup |
+| `openlatch.server.admin.token` | *(unset)* | Management token for the read-only `ADMIN_*` protocol (console). Unset ⇒ all admin requests rejected |
 
 ### Client (`OpenLatchClient.builder()`)
 

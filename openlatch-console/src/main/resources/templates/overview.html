@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="zh">
+<head th:replace="~{fragments :: head('概览', ${refreshSeconds})}"></head>
+<body>
+<nav th:replace="~{fragments :: nav('overview')}"></nav>
+<div th:replace="~{fragments :: authBanner(${authBanner})}"></div>
+<div th:if="${metricsBanner}" class="banner">指标端点不可用（管理端口未开启或不可达），曲线区已降级。</div>
+
+<main class="page">
+    <div th:each="row : ${rows}" class="card">
+        <div th:replace="~{fragments :: nodeError(${row})}"></div>
+        <th:block th:if="${row.ok}">
+            <h2 th:text="${row.display}">节点</h2>
+            <table class="grid">
+                <tr>
+                    <th>锁持有</th><th>Semaphore</th><th>Latch 条目</th>
+                    <th>等待者</th><th>会话</th><th>角色</th><th>运行时长</th><th>版本</th>
+                </tr>
+                <tr>
+                    <td th:text="${row.value.heldLocks}">0</td>
+                    <td th:text="${row.value.heldSemaphores}">0</td>
+                    <td th:text="${row.value.latchEntries}">0</td>
+                    <td th:text="${row.value.totalWaiters}">0</td>
+                    <td th:text="${row.value.sessionCount}">0</td>
+                    <td th:text="${row.value.nodeRole}">SINGLE</td>
+                    <td th:text="${row.value.uptimeMs div 1000} + 's'">0s</td>
+                    <td th:text="${row.value.version}">v</td>
+                </tr>
+            </table>
+            <!-- 三线 sparkline（held/waiters/sessions，160×36）；指标区独立降级 -->
+            <div th:with="spark=${sparks.get(row.display)}">
+                <div th:if="${spark != null and spark.ok}">
+                    <div class="spark-row"><span class="spark-label">持有 <span th:text="${spark.latestHeld}">0</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#2563eb" stroke-width="1.5"
+                                      th:attr="points=${spark.heldPoints}"/></svg></div>
+                    <div class="spark-row"><span class="spark-label">等待 <span th:text="${spark.latestWaiters}">0</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#d97706" stroke-width="1.5"
+                                      th:attr="points=${spark.waitersPoints}"/></svg></div>
+                    <div class="spark-row"><span class="spark-label">会话 <span th:text="${spark.latestSessions}">0</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#059669" stroke-width="1.5"
+                                      th:attr="points=${spark.sessionsPoints}"/></svg></div>
+                </div>
+                <div th:unless="${spark != null and spark.ok}" class="node-error">
+                    该节点指标不可用（管理端口未开启或不可达）</div>
+            </div>
+        </th:block>
+    </div>
+</main>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# openlatch.proto 全量契约（v2）：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
+# openlatch.proto 全量契约（v3-T3）：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
 # 新增字段/枚举值/消息必须显式追加本文件（评审可见）；既有编号任何变更即构建失败
 enum MessageType
   MESSAGE_TYPE_UNKNOWN 0
@@ -11,6 +11,10 @@ enum MessageType
   CLUSTER_VIEW 7
   LATCH_COUNT_DOWN 8
   LATCH_AWAIT 9
+  ADMIN_SUMMARY 10
+  ADMIN_LIST_KEYS 11
+  ADMIN_KEY_DETAIL 12
+  ADMIN_LIST_SESSIONS 13
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -50,6 +54,14 @@ message Envelope
   latch_count_down_response 21
   latch_await_request 22
   latch_await_response 23
+  admin_summary_request 24
+  admin_summary_response 25
+  admin_list_keys_request 26
+  admin_list_keys_response 27
+  admin_key_detail_request 28
+  admin_key_detail_response 29
+  admin_list_sessions_request 30
+  admin_list_sessions_response 31
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -119,3 +131,70 @@ message NodeInfo
   node_id 1
   address 2
   is_leader 3
+message AdminSummaryRequest
+  token 1
+message AdminSummaryResponse
+  status 1
+  held_locks 2
+  held_semaphores 3
+  latch_entries 4
+  total_waiters 5
+  session_count 6
+  node_role 7
+  uptime_ms 8
+  version 9
+message AdminListKeysRequest
+  token 1
+  page 2
+  page_size 3
+  prefix 4
+message AdminKeyInfo
+  key 1
+  family 2
+  holders 3
+  remaining_lease_ms 4
+  waiter_count 5
+message AdminListKeysResponse
+  status 1
+  total_matched 2
+  page 3
+  page_size 4
+  items 5
+message AdminKeyDetailRequest
+  token 1
+  key 2
+message AdminKeyHolderInfo
+  session_id 1
+  thread_id 2
+  count 3
+  role 4
+message AdminKeyWaiterInfo
+  position 1
+  session_id 2
+  request_id 3
+  waited_ms 4
+  permits 5
+  notified 6
+message AdminKeyDetailResponse
+  status 1
+  family 2
+  holders 3
+  waiters 4
+  lease_expires_at_ms 5
+  remaining_lease_ms 6
+  permits_total 7
+  permits_available 8
+  latch_total 9
+  latch_remaining 10
+  wait_queue_leader_only 11
+message AdminSessionInfo
+  session_id 1
+  node_id 2
+  connected_at_ms 3
+  held_keys 4
+  waiting_keys 5
+message AdminListSessionsRequest
+  token 1
+message AdminListSessionsResponse
+  status 1
+  sessions 2

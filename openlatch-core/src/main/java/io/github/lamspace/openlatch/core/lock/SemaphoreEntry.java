@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.core.lock;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
+import io.github.lamspace.openlatch.core.CoreInspection;
 import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
@@ -29,6 +30,7 @@ import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -427,6 +429,36 @@ public final class SemaphoreEntry implements KeyEntry {
     @Override
     public synchronized int waiterCount() {
         return waiters.size();
+    }
+
+    /**
+     * 明细只读快照（Phase 3 T3，spec"明细只读观察面"）：条目锁内拷贝
+     * 许可池（总量/可用）、持有表（角色恒 {@code HOLDER}，计数即持有
+     * 许可数）、等待队列（按 FIFO 序）与共享租约三元组，并以 {@code now}
+     * 折算已等待时长与剩余租约。纯读，MUST NOT 改变任何状态；锁家族
+     * 专属字段（{@code reentrant}）与屏障字段取零值。
+     *
+     * @param now 采样时刻（毫秒，引擎时钟）
+     * @return 本条目自洽的不可变快照
+     */
+    public synchronized CoreInspection.KeySnapshot snapshot(long now) {
+        List<CoreInspection.HolderSnapshot> holderSnaps = new ArrayList<>(holders.size());
+        for (Map.Entry<Owner, Integer> en : holders.entrySet()) {
+            holderSnaps.add(new CoreInspection.HolderSnapshot(
+                    en.getKey().sessionId(), en.getKey().threadId(), en.getValue(),
+                    CoreInspection.HolderRole.HOLDER));
+        }
+        List<CoreInspection.WaiterSnapshot> waiterSnaps = new ArrayList<>(waiters.size());
+        for (Waiter w : waiters) {
+            waiterSnaps.add(new CoreInspection.WaiterSnapshot(
+                    w.sessionId(), w.requestId(), w.threadId(), w.permits(),
+                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified()));
+        }
+        long remaining = leaseToken != 0 ? Math.max(0, leaseExpiresAtMs - now) : 0;
+        return new CoreInspection.KeySnapshot(key, KeyFamily.SEMAPHORE, false,
+                leaseToken, leaseMs, leaseExpiresAtMs, remaining,
+                List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
+                permitsTotal, permitsAvailable, 0, 0, List.of());
     }
 
     /**

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="zh">
+<head th:replace="~{fragments :: head('会话列表', ${refreshSeconds})}"></head>
+<body>
+<nav th:replace="~{fragments :: nav('sessions')}"></nav>
+<div th:replace="~{fragments :: authBanner(${authBanner})}"></div>
+
+<main class="page">
+    <div th:each="row : ${rows}" class="card">
+        <div th:replace="~{fragments :: nodeError(${row})}"></div>
+        <th:block th:if="${row.ok}">
+            <h2 th:text="${row.display} + ' 接入会话'">节点接入会话</h2>
+            <table class="grid">
+                <tr><th>会话</th><th>接入节点</th><th>建连时间</th><th>持锁数</th><th>等待数</th></tr>
+                <tr th:each="s : ${row.value.sessionsList}">
+                    <td th:text="${s.sessionId}">0</td>
+                    <td th:text="${s.nodeId}">0</td>
+                    <td th:text="${#dates.format(new java.util.Date(s.connectedAtMs), 'yyyy-MM-dd HH:mm:ss')}">—</td>
+                    <td th:text="${s.heldKeys}">0</td>
+                    <td th:text="${s.waitingKeys}">0</td>
+                </tr>
+                <tr th:if="${row.value.sessionsList.isEmpty()}"><td colspan="5" class="empty">无接入会话</td></tr>
+            </table>
+        </th:block>
+    </div>
+</main>
+</body>
+</html>

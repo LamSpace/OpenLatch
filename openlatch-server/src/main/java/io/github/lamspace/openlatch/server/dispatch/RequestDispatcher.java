@@ -32,6 +32,10 @@ import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
+import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
+import io.github.lamspace.openlatch.protocol.AdminListKeysResponse;
+import io.github.lamspace.openlatch.protocol.AdminListSessionsResponse;
+import io.github.lamspace.openlatch.protocol.AdminSummaryResponse;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
@@ -465,6 +469,16 @@ public final class RequestDispatcher {
                     LatchCountDownResponse.newBuilder().setStatus(status));
             case LATCH_AWAIT -> b.setLatchAwaitResponse(
                     LatchAwaitResponse.newBuilder().setStatus(status));
+            // v3-T3：ADMIN 消息同规则——认证/门控/限额拒绝的状态码在线路可见
+            // （控制台裁决依赖；被拒应答仅带状态码，观察字段留零值）。
+            case ADMIN_SUMMARY -> b.setAdminSummaryResponse(
+                    AdminSummaryResponse.newBuilder().setStatus(status));
+            case ADMIN_LIST_KEYS -> b.setAdminListKeysResponse(
+                    AdminListKeysResponse.newBuilder().setStatus(status));
+            case ADMIN_KEY_DETAIL -> b.setAdminKeyDetailResponse(
+                    AdminKeyDetailResponse.newBuilder().setStatus(status));
+            case ADMIN_LIST_SESSIONS -> b.setAdminListSessionsResponse(
+                    AdminListSessionsResponse.newBuilder().setStatus(status));
             default -> {
             }
         }

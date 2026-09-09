@@ -76,21 +76,40 @@ public final class WaitQueue {
         }
     }
 
-    /** 队列节点：等待项 + 已通知标记（0=未通知，否则为通知时刻）。 */
+    /** 队列节点：等待项 + 已通知标记（0=未通知，否则为通知时刻）+ 入队时刻。 */
     private static final class Node {
         /** 该节点的等待项。 */
         private final Waiter waiter;
         /** 已通知时刻（毫秒）；0 表示尚未通知。 */
         private long notifiedAtMs;
+        /** 入队时刻（epoch 毫秒，管理观察 waited_ms 折算基准，Phase 3 T3）。 */
+        private final long enqueuedAtMs;
 
         /**
          * 构造队列节点（未通知态）。
          *
          * @param waiter 等待项
+         * @param enqueuedAtMs 入队时刻（epoch 毫秒）
          */
-        private Node(Waiter waiter) {
+        private Node(Waiter waiter, long enqueuedAtMs) {
             this.waiter = waiter;
+            this.enqueuedAtMs = enqueuedAtMs;
         }
+    }
+
+    /**
+     * 管理观察的等待项视图（Phase 3 T3）：位次、归属与已等待时长的不可变
+     * 快照——{@code waitedMs} 以调用方提供的 {@code now} 折算。
+     *
+     * @param position   1 起位次
+     * @param sessionId  逻辑会话 id
+     * @param requestId  挂起的原请求 id
+     * @param permits    请求许可数（锁/屏障恒 1）
+     * @param waitedMs   已等待时长（毫秒，下限 0）
+     * @param notified   是否处于"已通知、待重发"窗口
+     */
+    public record WaiterView(int position, long sessionId, long requestId, int permits,
+                             long waitedMs, boolean notified) {
     }
 
     /** key → FIFO 队列（插入序=登记序）。 */
@@ -150,7 +169,7 @@ public final class WaitQueue {
         if (q.size() >= maxDepthPerKey) {
             return -1;
         }
-        q.addLast(new Node(new Waiter(sessionId, requestId, key, permits)));
+        q.addLast(new Node(new Waiter(sessionId, requestId, key, permits), now));
         return q.size();
     }
 
@@ -345,6 +364,47 @@ public final class WaitQueue {
             }
         }
         return max;
+    }
+
+    /**
+     * 指定 key 的等待队列明细快照（Phase 3 T3，ADMIN_KEY_DETAIL Leader 侧
+     * 数据源）：实例锁内按 FIFO 序拷贝位次、归属与以 {@code now} 折算的
+     * 已等待时长。与 {@link #totalWaiters()} 同监视器互斥，对本队列内部
+     * 一致、与引擎状态弱一致。
+     *
+     * @param key 锁键
+     * @param now 折算时刻（epoch 毫秒）
+     * @return 位次自 1 起的不可变列表（无等待返回空表）
+     */
+    public synchronized List<WaiterView> keyWaiters(String key, long now) {
+        ArrayDeque<Node> q = queues.get(key);
+        if (q == null || q.isEmpty()) {
+            return List.of();
+        }
+        List<WaiterView> out = new ArrayList<>(q.size());
+        int position = 0;
+        for (Node n : q) {
+            position++;
+            out.add(new WaiterView(position, n.waiter.sessionId(), n.waiter.requestId(),
+                    n.waiter.permits(), Math.max(0, now - n.enqueuedAtMs), n.notifiedAtMs != 0));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * 按逻辑会话聚合的在队等待数（Phase 3 T3，ADMIN_LIST_SESSIONS 的
+     * {@code waiting_keys} 来源；仅 Leader 队列有真实值）。
+     *
+     * @return sessionId → 等待项数（弱一致快照）
+     */
+    public synchronized java.util.Map<Long, Integer> waitCountsBySession() {
+        java.util.Map<Long, Integer> counts = new java.util.HashMap<>();
+        for (ArrayDeque<Node> q : queues.values()) {
+            for (Node n : q) {
+                counts.merge(n.waiter.sessionId(), 1, Integer::sum);
+            }
+        }
+        return java.util.Map.copyOf(counts);
     }
 
     /**

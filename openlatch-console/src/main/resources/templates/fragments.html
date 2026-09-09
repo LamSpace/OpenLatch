@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<!--
+  公共片段：head（含整页轮询刷新 meta 与样式）、导航、认证/降级横幅、
+  节点错误标注单元格。刷新间隔来自 ConsoleConfig.refreshSeconds
+  （spec：轮询刷新、默认秒级、可配置）。
+-->
+<head th:fragment="head(title, refreshSeconds)">
+    <meta charset="UTF-8"/>
+    <meta http-equiv="refresh" th:attr="content=${refreshSeconds}"/>
+    <title th:text="'OpenLatch 控制台 · ' + ${title}">OpenLatch 控制台</title>
+    <link rel="stylesheet" th:href="@{/console.css}"/>
+</head>
+<body>
+<nav th:fragment="nav(active)" class="nav">
+    <span class="brand">OpenLatch 控制台</span>
+    <a th:href="@{/}" th:classappend="${active == 'overview'} ? ' on'">概览</a>
+    <a th:href="@{/keys}" th:classappend="${active == 'keys'} ? ' on'">锁列表</a>
+    <a th:href="@{/sessions}" th:classappend="${active == 'sessions'} ? ' on'">会话列表</a>
+    <a th:href="@{/nodes}" th:classappend="${active == 'nodes'} ? ' on'">节点视图</a>
+    <span class="readonly-tag">只读观察</span>
+</nav>
+
+<div th:fragment="authBanner(shown)" th:if="${shown}" class="banner auth">
+    管理认证失败：请核对控制台与服务端的 admin-token 配置（服务端不披露比对细节，已退避重试）。
+</div>
+
+<!-- 失败节点的降级标注单元格（spec：任一节点故障 MUST NOT 阻断对其余节点的呈现）。 -->
+<div th:fragment="nodeError(result)" th:unless="${result.ok}" class="node-error"
+     th:text="|${result.display} 不可用：${result.error}|">节点不可用
+</div>
+</body>
+</html>

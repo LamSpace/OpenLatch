@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8"/>
+    <meta http-equiv="refresh" content="2"/>
+    <title>OpenLatch 控制台 · 概览</title>
+    <link rel="stylesheet" href="/console.css"/>
+</head>
+<body>
+<nav class="nav">
+    <span class="brand">OpenLatch 控制台</span>
+    <a href="/" class=" on">概览</a>
+    <a href="/keys">锁列表</a>
+    <a href="/sessions">会话列表</a>
+    <a href="/nodes">节点视图</a>
+    <span class="readonly-tag">只读观察</span>
+</nav>
+
+
+
+<main class="page">
+    <div class="card">
+        
+        
+            <h2>127.0.0.1:9410</h2>
+            <table class="grid">
+                <tr>
+                    <th>锁持有</th><th>Semaphore</th><th>Latch 条目</th>
+                    <th>等待者</th><th>会话</th><th>角色</th><th>运行时长</th><th>版本</th>
+                </tr>
+                <tr>
+                    <td>1</td>
+                    <td>1</td>
+                    <td>1</td>
+                    <td>3</td>
+                    <td>2</td>
+                    <td>SINGLE</td>
+                    <td>5s</td>
+                    <td>1.0.0-dev</td>
+                </tr>
+            </table>
+            <!-- 三线 sparkline（held/waiters/sessions，160×36）；指标区独立降级 -->
+            <div>
+                <div>
+                    <div class="spark-row"><span class="spark-label">持有 <span>2</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#2563eb" stroke-width="1.5" points="80,1"/></svg></div>
+                    <div class="spark-row"><span class="spark-label">等待 <span>3</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#d97706" stroke-width="1.5" points="80,1"/></svg></div>
+                    <div class="spark-row"><span class="spark-label">会话 <span>2</span></span>
+                        <svg viewBox="0 0 160 36" width="160" height="36" class="spark">
+                            <polyline fill="none" stroke="#059669" stroke-width="1.5" points="80,1"/></svg></div>
+                </div>
+                
+            </div>
+        
+    </div>
+</main>
+</body>
+</html>

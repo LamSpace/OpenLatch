@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8"/>
+    <meta http-equiv="refresh" content="2"/>
+    <title>OpenLatch 控制台 · 锁列表</title>
+    <link rel="stylesheet" href="/console.css"/>
+</head>
+<body>
+<nav class="nav">
+    <span class="brand">OpenLatch 控制台</span>
+    <a href="/">概览</a>
+    <a href="/keys" class=" on">锁列表</a>
+    <a href="/sessions">会话列表</a>
+    <a href="/nodes">节点视图</a>
+    <span class="readonly-tag">只读观察</span>
+</nav>
+
+
+<main class="page">
+    <form method="get" action="/keys" class="filter">
+        <label>前缀过滤 <input type="text" name="prefix" value=""/></label>
+        <label>节点
+            <select name="node">
+                <option value="" selected="selected">全部节点</option>
+                <option value="127.0.0.1:9410">127.0.0.1:9410</option>
+            </select>
+        </label>
+        <button type="submit">查询</button>
+    </form>
+
+    <div class="card">
+        
+        
+            <h2>127.0.0.1:9410</h2>
+            <table class="grid">
+                <tr>
+                    <th>Key</th><th>家族</th><th>持有者</th><th>剩余租约</th><th>等待者</th>
+                </tr>
+                <tr>
+                    <td><a href="/key?node=127.0.0.1:9410&amp;key=gate:boot">gate:boot</a></td>
+                    <td>latch</td>
+                    <td>0</td>
+                    <td>0ms</td>
+                    <td>1</td>
+                </tr>
+                <tr>
+                    <td><a href="/key?node=127.0.0.1:9410&amp;key=order:1">order:1</a></td>
+                    <td>lock</td>
+                    <td>1</td>
+                    <td>24991ms</td>
+                    <td>1</td>
+                </tr>
+                <tr>
+                    <td><a href="/key?node=127.0.0.1:9410&amp;key=pool:db">pool:db</a></td>
+                    <td>semaphore</td>
+                    <td>1</td>
+                    <td>25031ms</td>
+                    <td>1</td>
+                </tr>
+                
+            </table>
+            <div class="pager">
+                第 <span>1</span> 页 ·
+                共 <span>3</span> 条 ·
+                
+                
+            </div>
+        
+    </div>
+</main>
+</body>
+</html>

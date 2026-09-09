@@ -40,7 +40,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * S4 快照比对共用）；②快照序列化结构（{@link #toProto()}/{@link #load}，
  * §7.1 内容 = 锁条目 + 会话注册表，<b>不含</b>等待队列与本地配置，design D9）；
  * ③Leader 侧预检查与到期扫描的无锁读索引（{@link #isHeld}/{@link #isHeldBy}/{@link #heldEntries()}，
- * 供 {@code ReplicationGateway} 与到期驱动消费）。
+ * 供 {@code ReplicationGateway} 与到期驱动消费）；④管理观察的明细投影
+ * （{@link #adminEntry}/{@link #adminEntries()}，Phase 3 T3——逐应用点整体
+ * 重发布、逻辑会话口径、LATCH 亦在列，供 {@code ADMIN_*} 消息跨线程弱一致读）。
  *
  * <p><b>与引擎的双写核算</b>：每次条目应用同时驱动
  * {@link io.github.lamspace.openlatch.core.CoreEngine} 与本表，
@@ -80,6 +82,29 @@ public final class ShadowTable {
      * @param lockType    协议 {@code LockType} 数值（条目定型值）
      */
     public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders, int lockType) { }
+
+    /**
+     * 管理观察的条目全量投影（Phase 3 T3，spec"双形态数据源与集群视角口径"）：
+     * 应用线程在每次结构变更后自 {@link SLock} 同步发布的不可变明细视图，
+     * 以逻辑会话 id 为归属标识（跨节点可对齐；引擎内部 sid 不外露）。
+     * 与 {@link HeldRef} 的"授予时点 holders 快照"不同，本视图逐应用点整体
+     * 重发布，跨线程读取允许落后一至数个应用（弱一致镜像口径）。
+     * LATCH 条目同样入本投影（{@link #heldIndex} 因其无持有语义而排除）。
+     *
+     * @param lockType         协议 {@code LockType} 数值（条目定型值）
+     * @param leaseToken       当前租约凭证（Latch 恒 0）
+     * @param expiresAtMs      到期时刻（Latch/无持有为 0）
+     * @param leaseMs          实际生效租期（Latch 为 0）
+     * @param holders          归属 → 持有计数（重入层数/持有许可数；Latch 恒空）
+     * @param permitsTotal     Semaphore 许可总量（其余家族 0）
+     * @param permitsAvailable Semaphore 当前可用许可（其余家族 0）
+     * @param latchTotal       Latch 定型初始计数（其余家族 0）
+     * @param latchCount       Latch 当前剩余计数（其余家族 0）
+     * @param latchParticipants Latch 参与逻辑会话集（其余家族空）
+     */
+    public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
+                                 Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
+                                 long latchTotal, long latchCount, Set<Long> latchParticipants) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -134,6 +159,12 @@ public final class ShadowTable {
     private final ConcurrentHashMap<String, HeldRef> heldIndex = new ConcurrentHashMap<>();
     /** 会话无锁投影（预检查/失联批量清理的跨线程读）。 */
     private final java.util.Set<Long> sessionIndex = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /**
+     * 管理观察明细投影（Phase 3 T3）：key → 不可变全字段视图，应用线程在
+     * 每个结构变更点后整体重发布（发布点与本表 {@link #locks} 的变更同一
+     * 应用时刻，读侧弱一致"可旧不可错"）；仅 ADMIN 消费，不参与 digest。
+     */
+    private final ConcurrentHashMap<String, AdminEntryView> adminView = new ConcurrentHashMap<>();
 
     /**
      * 登记逻辑会话（SESSION_OPEN 应用点）。幂等：重复登记为无操作，
@@ -220,6 +251,20 @@ public final class ShadowTable {
         }
         l.holders.merge(new Holder(sessionId, threadId), holderDelta, Integer::sum);
         heldIndex.put(key, new HeldRef(token, expiresAt, Set.copyOf(l.holders.keySet()), lockType));
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 自应用线程独占的 {@link SLock} 整体拷贝出不可变管理视图
+     * （仅在 {@link #locks} 变更点后调用，读侧经 {@code adminView} 并发容器）。
+     *
+     * @param l 变更后的条目
+     * @return 管理观察视图
+     */
+    private static AdminEntryView viewOf(SLock l) {
+        return new AdminEntryView(l.lockType, l.leaseToken, l.expiresAtMs, l.leaseMs,
+                Map.copyOf(l.holders), l.permitsTotal, l.permitsAvailable,
+                l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants));
     }
 
     /**
@@ -247,6 +292,9 @@ public final class ShadowTable {
         if (l.holders.isEmpty()) {
             locks.remove(key);
             heldIndex.remove(key);
+            adminView.remove(key);
+        } else {
+            adminView.put(key, viewOf(l));
         }
     }
 
@@ -282,6 +330,9 @@ public final class ShadowTable {
         if (l.holders.isEmpty()) {
             locks.remove(key);
             heldIndex.remove(key);
+            adminView.remove(key);
+        } else {
+            adminView.put(key, viewOf(l));
         }
     }
 
@@ -301,6 +352,7 @@ public final class ShadowTable {
         l.leaseMs = newLeaseMs;
         heldIndex.computeIfPresent(key,
                 (k, ref) -> new HeldRef(ref.leaseToken(), newExpiresAt, ref.holders(), ref.lockType()));
+        adminView.put(key, viewOf(l));
     }
 
     /**
@@ -321,6 +373,7 @@ public final class ShadowTable {
         for (String key : freed) {
             locks.remove(key);
             heldIndex.remove(key);
+            adminView.remove(key);
         }
         return freed;
     }
@@ -340,7 +393,9 @@ public final class ShadowTable {
             if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
                 // 屏障条目存续不随参与者散尽而回收（一次性护栏，design D5
                 // 修订）：仅摘除参与身份，条目留在表内。
-                l.latchParticipants.remove(sessionId);
+                if (l.latchParticipants.remove(sessionId)) {
+                    adminView.put(en.getKey(), viewOf(l));
+                }
                 continue;
             }
             for (Map.Entry<Holder, Integer> hh : l.holders.entrySet()) {
@@ -349,14 +404,17 @@ public final class ShadowTable {
                     l.permitsAvailable += hh.getValue();
                 }
             }
-            l.holders.keySet().removeIf(h -> h.sessionId() == sessionId);
+            boolean dropped = l.holders.keySet().removeIf(h -> h.sessionId() == sessionId);
             if (l.holders.isEmpty()) {
                 removedKeys.add(en.getKey());
+            } else if (dropped) {
+                adminView.put(en.getKey(), viewOf(l));
             }
         }
         for (String key : removedKeys) {
             locks.remove(key);
             heldIndex.remove(key);
+            adminView.remove(key);
         }
         return removedKeys;
     }
@@ -454,6 +512,7 @@ public final class ShadowTable {
         sessions.clear();
         sessionIndex.clear();
         heldIndex.clear();
+        adminView.clear();
         for (SnapshotLock l : st.getLocksList()) {
             SLock sl = new SLock(l.getLockTypeValue(), l.getLeaseToken(),
                     l.getExpiresAtMs(), l.getLeaseMs());
@@ -483,6 +542,7 @@ public final class ShadowTable {
                 heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
                         Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
             }
+            adminView.put(l.getKey(), viewOf(sl));
         }
         sessions.addAll(st.getSessionsList());
         sessionIndex.addAll(st.getSessionsList());
@@ -531,6 +591,7 @@ public final class ShadowTable {
         }
         l.latchCount = remaining;
         l.latchParticipants.add(sessionId);
+        adminView.put(key, viewOf(l));
     }
 
     /**
@@ -599,6 +660,27 @@ public final class ShadowTable {
      */
     public int lockCount() {
         return locks.size();
+    }
+
+    /**
+     * 指定 key 的管理观察视图（Phase 3 T3，ADMIN_KEY_DETAIL 集群数据源）。
+     * 跨线程弱一致读：结果可落后于 apply 一至数个变更点，MUST NOT 用于
+     * 授予判定。
+     *
+     * @param key 锁键
+     * @return 不可变视图；条目不存在（含已被回收）为 {@code null}
+     */
+    public AdminEntryView adminEntry(String key) {
+        return adminView.get(key);
+    }
+
+    /**
+     * 全部条目的管理观察视图（Phase 3 T3，ADMIN_LIST_KEYS 集群数据源）。
+     *
+     * @return key → 视图 的弱一致并发视图（不复制，只读用途）
+     */
+    public Map<String, AdminEntryView> adminEntries() {
+        return adminView;
     }
 
     /**

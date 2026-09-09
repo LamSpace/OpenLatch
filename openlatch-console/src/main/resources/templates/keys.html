@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="zh">
+<head th:replace="~{fragments :: head('锁列表', ${refreshSeconds})}"></head>
+<body>
+<nav th:replace="~{fragments :: nav('keys')}"></nav>
+<div th:replace="~{fragments :: authBanner(${authBanner})}"></div>
+
+<main class="page">
+    <form method="get" th:action="@{/keys}" class="filter">
+        <label>前缀过滤 <input type="text" name="prefix" th:value="${prefix}"/></label>
+        <label>节点
+            <select name="node">
+                <option value="" th:selected="${node == ''}">全部节点</option>
+                <option th:each="n : ${nodeNames}" th:value="${n}" th:text="${n}"
+                        th:selected="${n == node}">node</option>
+            </select>
+        </label>
+        <button type="submit">查询</button>
+    </form>
+
+    <div th:each="row : ${rows}" class="card">
+        <div th:replace="~{fragments :: nodeError(${row})}"></div>
+        <th:block th:if="${row.ok}">
+            <h2 th:text="${row.display}">节点</h2>
+            <table class="grid">
+                <tr>
+                    <th>Key</th><th>家族</th><th>持有者</th><th>剩余租约</th><th>等待者</th>
+                </tr>
+                <tr th:each="item : ${row.value.itemsList}">
+                    <td><a th:href="@{/key(node=${row.display},key=${item.key})}"
+                           th:text="${item.key}">key</a></td>
+                    <td th:text="${item.family}">lock</td>
+                    <td th:text="${item.holders}">0</td>
+                    <td th:text="${item.remainingLeaseMs} + 'ms'">0ms</td>
+                    <td th:text="${item.waiterCount}">0</td>
+                </tr>
+                <tr th:if="${row.value.itemsList.isEmpty()}">
+                    <td colspan="5" class="empty">无条目</td>
+                </tr>
+            </table>
+            <div class="pager">
+                第 <span th:text="${row.value.page} + 1">1</span> 页 ·
+                共 <span th:text="${row.value.totalMatched}">0</span> 条 ·
+                <a th:if="${row.value.page > 0}"
+                   th:href="@{/keys(node=${node},page=${row.value.page - 1},prefix=${prefix})}">上一页</a>
+                <a th:if="${(row.value.page + 1) * pageSize < row.value.totalMatched}"
+                   th:href="@{/keys(node=${node},page=${row.value.page + 1},prefix=${prefix})}">下一页</a>
+            </div>
+        </th:block>
+    </div>
+</main>
+</body>
+</html>

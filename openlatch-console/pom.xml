@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.lamspace</groupId>
+        <artifactId>openlatch</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>openlatch-console</artifactId>
+    <name>openlatch-console</name>
+    <description>OpenLatch 管理控制台（Phase 3 详设 §4 T3：只读观察 Web 应用，概要设计 §5.2）</description>
+
+    <dependencies>
+        <!-- 概要设计 §5.2：控制台依赖 server——复用 EnvelopeCodecHandler 所在
+             协议栈（分帧/protobuf 编解码类）与测试内嵌真服务器（L2 冒烟） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Boot BOM 托管零版本（design D6）：Web + Thymeleaf 服务端渲染，无前端构建链 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-thymeleaf</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 仅测试用：L2 端到端冒烟以真实客户端 SDK 预置锁状态（§7 T3） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-client</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 可执行 fat jar（详设 §4.4：openlatch-console-&lt;ver&gt;.jar）；
+                 主工件保留瘦库 jar 形态，Boot 可执行工件挂 exec 分类器
+                 （与 server shade 的 executable 分类器先例同纪律，design D6 兜底案） -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <configuration>
+                    <classifier>executable</classifier>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

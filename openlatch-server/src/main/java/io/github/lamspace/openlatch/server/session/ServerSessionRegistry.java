@@ -16,12 +16,15 @@
 
 package io.github.lamspace.openlatch.server.session;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
  * sessionId → 会话的反向索引（design.md D2）：core 的队首通知事件只携带
  * {@code sessionId}，通知桥经此查得 Channel 写回 {@code AWAIT_NOTIFY}。
+ * 另作管理观察 {@code ADMIN_LIST_SESSIONS} 的"本节点接入会话"数据源
+ * （Phase 3 T3，经 {@link #snapshot()} 弱一致取用）。
  *
  * <p><b>线程模型</b>：跨线程共享索引——{@link #register}/{@link #remove} 由
  * 会话所属连接的 EventLoop 线程调用（握手登记、断连摘除），{@link #get} 由
@@ -75,5 +78,16 @@ public final class ServerSessionRegistry {
      */
     public int size() {
         return sessions.size();
+    }
+
+    /**
+     * 当前登记会话的不可变快照（Phase 3 T3，ADMIN_LIST_SESSIONS 数据源；
+     * 弱一致——快照建立瞬间并发登记/摘除的会话按摘除前形态呈现，管理观察
+     * 语义容许）。
+     *
+     * @return 会话快照列表（无登记返回空表）
+     */
+    public List<ServerSession> snapshot() {
+        return List.copyOf(sessions.values());
     }
 }

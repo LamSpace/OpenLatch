@@ -689,6 +689,73 @@ public final class CoreEngine {
     }
 
     /**
+     * 明细只读观察面（Phase 3 T3，spec"明细只读观察面"）：弱一致遍历
+     * {@link LockTable} 全部条目，逐条目在条目锁内产出不可变明细快照
+     * （持有者/等待队列/租约/许可/屏障计数），聚合为 {@link CoreInspection}。
+     *
+     * <p><b>并发语义</b>：与 {@link #stats()} 同一纪律——每条目一次条目锁内
+     * 拷贝（持锁时长为字段复制级别，与写路径互斥粒度一致）、条目间无原子性；
+     * 返回值是采样时刻的弱一致快照，单条目内部自洽（位次连续、持有列表
+     * 与租约读数同锁内取得）。MUST NOT 据此做授予判定，仅供上层管理协议
+     * 装配观察应答；本方法 MUST NOT 改变引擎任何状态。
+     *
+     * <p><b>时钟口径</b>：一次性读取 {@code clock.nowMs()} 作为采样基准，
+     * 各条目的已等待时长与剩余租约均以该时刻折算。
+     *
+     * @return 明细快照（不可变值对象，条目遍历序）
+     */
+    public CoreInspection inspect() {
+        long now = clock.nowMs();
+        List<CoreInspection.KeySnapshot> snapshots = new ArrayList<>();
+        for (KeyEntry e : lockTable.values()) {
+            synchronized (e) {
+                // 家族分派与命令路径同构：各条目类的 snapshot 在条目锁内拷贝
+                // 自身状态；default 为家族新增但观察面未接入时的防御收口。
+                switch (e) {
+                    case LockEntry le -> snapshots.add(le.snapshot(now));
+                    case SemaphoreEntry se -> snapshots.add(se.snapshot(now));
+                    case LatchEntry la -> snapshots.add(la.snapshot(now));
+                    default -> {
+                        // 未知实现不入快照（理论不可达：三家族已穷尽）。
+                    }
+                }
+            }
+        }
+        return new CoreInspection(List.copyOf(snapshots), sessions.size(), now);
+    }
+
+    /**
+     * 单 key 的明细只读快照（{@link #inspect()} 的定点形态，供管理协议
+     * {@code ADMIN_KEY_DETAIL} 装配）：条目锁内拷贝，弱一致、纯读、零扰动。
+     *
+     * @param key 锁键（{@code null} 视为不存在）
+     * @return 该条目的自洽快照；条目不存在（含已被回收）返回 {@code null}
+     */
+    public CoreInspection.KeySnapshot inspectKey(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        long now = clock.nowMs();
+        synchronized (e) {
+            // 条目可能在取锁瞬间被回收（isEmpty 移除路径）：回查成员身份，
+            // 与命令路径同一 D4 纪律——非当前值即视作不存在。
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return switch (e) {
+                case LockEntry le -> le.snapshot(now);
+                case SemaphoreEntry se -> se.snapshot(now);
+                case LatchEntry la -> la.snapshot(now);
+                default -> null;
+            };
+        }
+    }
+
+    /**
      * 队首响应超时清扫：移除"已通知但在 {@code headReplyTimeoutMs} 内
      * 未重发获取请求"的队首等待者，并对新队首补发通知。
      *

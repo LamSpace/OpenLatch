@@ -17,6 +17,10 @@ enum MessageType {
   CLUSTER_VIEW   = 7;   // v2：集群视图查询，请求无 payload，任意节点作答
   LATCH_COUNT_DOWN = 8; // v3：屏障倒计数（独立通道，不走 ACQUIRE）
   LATCH_AWAIT      = 9; // v3：屏障等待（QUEUED/AWAIT_NOTIFY 复用）
+  ADMIN_SUMMARY       = 10; // v3：管理摘要（只读观察，需管理令牌）
+  ADMIN_LIST_KEYS     = 11; // v3：key 列表（分页/前缀过滤，只读）
+  ADMIN_KEY_DETAIL    = 12; // v3：单 key 明细（持有者/等待队列/租约）
+  ADMIN_LIST_SESSIONS = 13; // v3：本节点接入会话列表
 }
 
 // 锁类型。
@@ -66,6 +70,14 @@ message Envelope {
     LatchCountDownResponse latch_count_down_response = 21;  // v3
     LatchAwaitRequest      latch_await_request       = 22;  // v3
     LatchAwaitResponse     latch_await_response      = 23;  // v3
+    AdminSummaryRequest       admin_summary_request       = 24;  // v3：ADMIN 四组（详设 §4.2，只读观察）
+    AdminSummaryResponse      admin_summary_response      = 25;
+    AdminListKeysRequest      admin_list_keys_request     = 26;
+    AdminListKeysResponse     admin_list_keys_response    = 27;
+    AdminKeyDetailRequest     admin_key_detail_request    = 28;
+    AdminKeyDetailResponse    admin_key_detail_response   = 29;
+    AdminListSessionsRequest  admin_list_sessions_request  = 30;
+    AdminListSessionsResponse admin_list_sessions_response = 31;
   }
 }
 
@@ -182,4 +194,107 @@ message NodeInfo {
   int64  node_id   = 1;
   string address   = 2;
   bool   is_leader = 3;
+}
+
+// ===== v3：管理观察消息（Phase 3 详设 §4.2 / T3 P3-11） =====
+// 只读观察面：服务端以受理节点本地状态作答，MUST NOT 产生复制日志条目；
+// 每条请求携带管理令牌（admin-token），校验失败统一 INVALID_REQUEST 并断连
+// （实施勘误：令牌逐消息承载，不经 HELLO auth_token——见 change phase3-t3 design D1）。
+// family 取条目家族名（lock/semaphore/latch，与指标 type 标签同一词表）；
+// node_role 取 SINGLE/LEADER/FOLLOWER/UNKNOWN（选举空窗如实未知）。
+
+message AdminSummaryRequest {
+  string token = 1;   // 管理令牌
+}
+
+message AdminSummaryResponse {
+  StatusCode status           = 1;
+  int32      held_locks       = 2;  // 锁家族持有中条目数
+  int32      held_semaphores  = 3;  // Semaphore 家族持有中条目数
+  int32      latch_entries    = 4;  // Latch 条目数（无持有语义，单列）
+  int32      total_waiters    = 5;  // 等待者总数（本节点视角；非 Leader 恒 0）
+  int32      session_count    = 6;  // 本节点活跃会话数
+  string     node_role        = 7;  // SINGLE/LEADER/FOLLOWER/UNKNOWN
+  int64      uptime_ms        = 8;  // 自启动运行时长（应答时刻）
+  string     version          = 9;  // 服务端版本
+}
+
+message AdminListKeysRequest {
+  string token     = 1;   // 管理令牌
+  int32  page      = 2;   // 页号（0 起）
+  int32  page_size = 3;   // 页大小（1..服务端上限，越界 INVALID_REQUEST）
+  string prefix    = 4;   // key 前缀过滤；空串不过滤
+}
+
+// ADMIN_LIST_KEYS 列表行。holders 为持有者计数（明细见 ADMIN_KEY_DETAIL）。
+message AdminKeyInfo {
+  string key                 = 1;
+  string family              = 2;  // lock/semaphore/latch
+  int32  holders             = 3;  // 持有者数（Latch 恒 0）
+  int64  remaining_lease_ms  = 4;  // 剩余租约（受理节点时钟；未持有为 0）
+  int32  waiter_count        = 5;  // 等待者数（非 Leader 视角恒 0）
+}
+
+message AdminListKeysResponse {
+  StatusCode status        = 1;
+  int32      total_matched = 2;  // 过滤后总条数（弱一致快照）
+  int32      page          = 3;
+  int32      page_size     = 4;
+  repeated   AdminKeyInfo  items = 5;
+}
+
+message AdminKeyDetailRequest {
+  string token = 1;   // 管理令牌
+  string key   = 2;
+}
+
+// 持有明细项。role 取 writer/reader/holder（Semaphore 归属统一 holder）。
+message AdminKeyHolderInfo {
+  int64  session_id = 1;
+  int64  thread_id  = 2;
+  int32  count      = 3;  // 重入层数或持有许可数
+  string role       = 4;
+}
+
+// 等待队列项（仅 Leader 应答非空）。notified=已通知待重发；latch 等待者
+// thread_id 恒 0（await 无归属线程概念，身份=(会话,请求)）。
+message AdminKeyWaiterInfo {
+  int32  position    = 1;  // 1 起位次
+  int64  session_id  = 2;
+  int64  request_id  = 3;
+  int64  waited_ms   = 4;
+  int32  permits     = 5;  // 请求许可数（锁/屏障恒 1）
+  bool   notified    = 6;
+}
+
+message AdminKeyDetailResponse {
+  StatusCode status = 1;  // OK=命中；NOT_HELD=key 无条目（明确未命中，非错误）
+  string family     = 2;
+  repeated AdminKeyHolderInfo holders = 3;
+  repeated AdminKeyWaiterInfo waiters = 4;
+  int64  lease_expires_at_ms  = 5;   // 0=无租约（Latch 或无持有）
+  int64  remaining_lease_ms   = 6;   // 受理节点时钟口径；无租约为 0
+  int32  permits_total        = 7;   // SEMAPHORE 专属，其余 0
+  int32  permits_available    = 8;   // SEMAPHORE 专属，其余 0
+  int64  latch_total          = 9;   // LATCH 专属，其余 0
+  int64  latch_remaining      = 10;  // LATCH 专属，其余 0（-1 恒不出现：未命中走 status）
+  bool   wait_queue_leader_only = 11; // true=本节点非 Leader，等待队列区无数据
+}
+
+// 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
+message AdminSessionInfo {
+  int64 session_id      = 1;
+  int64 node_id         = 2;
+  int64 connected_at_ms = 3;  // 建连时刻（受理节点时钟）
+  int32 held_keys       = 4;  // 持有中的 key 数
+  int32 waiting_keys    = 5;  // 在队等待数（本节点队列视角）
+}
+
+message AdminListSessionsRequest {
+  string token = 1;   // 管理令牌
+}
+
+message AdminListSessionsResponse {
+  StatusCode status = 1;
+  repeated AdminSessionInfo sessions = 2;
 }

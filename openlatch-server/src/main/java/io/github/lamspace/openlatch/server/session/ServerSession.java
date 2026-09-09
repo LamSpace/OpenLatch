@@ -42,6 +42,12 @@ public final class ServerSession {
 
     /** 绑定的连接，随连接生命周期。 */
     private final Channel channel;
+    /**
+     * 建连时刻（epoch 毫秒，accept 挂载簿记时取样）——管理观察
+     * {@code ADMIN_LIST_SESSIONS} 的"建连时间"来源（Phase 3 T3）。
+     * final 随构造定型，跨线程观察经对象安全发布（构造先于事件回调）。
+     */
+    private final long connectedAtMs;
     /** 在途请求计数。 */
     private final AtomicInteger inflight = new AtomicInteger();
     /** 会话 id，握手成功后有效。 */
@@ -58,12 +64,22 @@ public final class ServerSession {
     private volatile boolean closed;
 
     /**
-     * 构造会话簿记，初始为未握手状态。
+     * 构造会话簿记，初始为未握手状态；建连时刻取构造当下的 epoch 毫秒。
      *
      * @param channel 绑定的连接
      */
     public ServerSession(Channel channel) {
         this.channel = channel;
+        this.connectedAtMs = System.currentTimeMillis();
+    }
+
+    /**
+     * 建连时刻（epoch 毫秒，构造时定型）。
+     *
+     * @return 建连时刻
+     */
+    public long connectedAtMs() {
+        return connectedAtMs;
     }
 
     /**

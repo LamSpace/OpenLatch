@@ -1,0 +1,17 @@
+# OpenLatch 管理控制台配置样例（详设 §4.4）
+# 启动：java -Dopenlatch.console.config=/path/to/console.properties \
+#       -jar openlatch-console-<ver>-executable.jar
+# 仅建议内网部署：T4（TLS）落地前管理通道为明文。
+
+# 目标节点业务端口列表（逗号分隔 host:port，≥1 项）
+openlatch.console.server-addresses=127.0.0.1:9410
+# 管理令牌：与服务端 openlatch.server.admin.token 一致
+openlatch.console.admin-token=change-me
+# 控制台 HTTP 监听端口（默认 9413）
+#openlatch.console.port=9413
+# 页面轮询刷新间隔（秒，默认 5）
+#openlatch.console.refresh-interval-seconds=5
+# 节点指标端口（服务端管理端口，默认 9412）
+#openlatch.console.metrics-port=9412
+# 管理请求超时（毫秒，默认 5000）
+#openlatch.console.request-timeout-ms=5000

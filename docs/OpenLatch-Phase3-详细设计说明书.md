@@ -195,6 +195,13 @@ Micrometer（`micrometer-core`）+ `micrometer-registry-prometheus`；服务端�
 | `ADMIN_KEY_DETAIL`    | 单 key：持有明细（会话、线程、重入计数）、等待队列（位次、会话、等待时长） |
 | `ADMIN_LIST_SESSIONS` | 会话列表：id、接入节点、建连时间、持锁数、等待数                           |
 
+> **P3-11/12/13 实施勘误（2026-09-09，change phase3-t3-admin-console design D1/D3/D4）**：
+> ①**管理令牌承载通道改定**：每条 `ADMIN_*` 请求自带 `token` 字段，服务端以常量时间比较（`MessageDigest.isEqual`）校验；失败统一 `INVALID_REQUEST` 并断连（不泄露原因）；`openlatch.server.admin.token` 未配置即一律拒绝（安全默认）。HELLO 的 `auth_token`（§5，T4）保持 Phase 1"非空即断连"规则不动——管理认证在本阶段自足落地，与 T4 业务令牌零纠缠。
+> ②`MessageType` 编号以冻结的 wire-protocol 契约为准：`ADMIN_SUMMARY = 10`、`ADMIN_LIST_KEYS = 11`、`ADMIN_KEY_DETAIL = 12`、`ADMIN_LIST_SESSIONS = 13`（本节开头列举的序号并非编号，勿据此理解线路值）。
+> ③数据源按装配形态双轨：单机读 `CoreEngine` 明细只读观察面（新增 `inspect()`/`inspectKey()`，T2 `stats()` 的明细版）；集群读 `ShadowTable` 新增的管理明细投影（逐应用点发布、逻辑会话 id 口径——集群引擎 internal sid 不可对外）+ `WaitQueue` 明细只读口（Leader 权威；follower 等待区恒空并置 `wait_queue_leader_only` 标注）；`ADMIN_LIST_SESSIONS` 仅覆盖受理节点自身接入的会话（跨节点全景由控制台聚合）。
+> ④管理流量隔离：接入层以独立早退分支受理，MUST NOT 进入 `RequestDispatcher`/`ClusterRequestHandler` 与 `ServerMetrics` 埋点词表（零污染已钉为消息级断言）；`page_size` 上限 200 防观察面放大。
+> ⑤四消息应答的拒绝路径状态码随类型化载荷在线路可见（`errorResponse` 对 ADMIN 补类型化分支，控制台据此裁决）。
+
 Phase 3 控制台 **只读**：不提供强制解锁/踢会话等写操作（规避误操作风险；确有需要时另立阶段设计并配二次确认与审计）。
 
 ### 4.3 页面清单
@@ -206,6 +213,8 @@ Phase 3 控制台 **只读**：不提供强制解锁/踢会话等写操作（规
 | 锁详情   | 持有者、等待队列、剩余租约倒计时                          |
 | 会话列表 | 会话与其持锁/等待关联                                     |
 | 节点视图 | 集群节点、Leader 标识（Phase 2 部署下）                   |
+
+> **P3-13 实施勘误（2026-09-09）**：锁列表"排序"本期基线为**服务端 key 字典序 + 控制台当前页内交互排序**；跨页按等待数/租约排序需服务端 `sort_by` 字段，作为后续 v3 协议小增量评估（change phase3-t3-admin-console Open Question），不影响本期 spec/task 形状。
 
 ### 4.4 部署形态
 

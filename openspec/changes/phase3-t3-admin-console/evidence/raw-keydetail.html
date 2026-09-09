@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8"/>
+    <meta http-equiv="refresh" content="2"/>
+    <title>OpenLatch 控制台 · 锁详情</title>
+    <link rel="stylesheet" href="/console.css"/>
+</head>
+<body>
+<nav class="nav">
+    <span class="brand">OpenLatch 控制台</span>
+    <a href="/">概览</a>
+    <a href="/keys" class=" on">锁列表</a>
+    <a href="/sessions">会话列表</a>
+    <a href="/nodes">节点视图</a>
+    <span class="readonly-tag">只读观察</span>
+</nav>
+
+
+<main class="page">
+    <div class="card">
+        
+        
+            <h2>
+                <a href="/keys?node=127.0.0.1:9410">← 锁列表</a>
+                <span>order:1</span>
+                <span class="tag">lock</span>
+            </h2>
+            <div class="lease">
+                剩余租约 <strong>22118ms</strong>
+                
+                
+            </div>
+
+            <h3>持有者</h3>
+            <table class="grid">
+                <tr><th>会话</th><th>线程</th><th>计数/许可</th><th>角色</th></tr>
+                <tr>
+                    <td>3990998452072426371</td>
+                    <td>3</td>
+                    <td>1</td>
+                    <td>writer</td>
+                </tr>
+                
+            </table>
+
+            <h3>等待队列</h3>
+            
+            
+                <table class="grid">
+                    <tr><th>位次</th><th>会话</th><th>请求</th><th>许可</th><th>已等待</th><th>已通知</th></tr>
+                    <tr>
+                        <td>1</td>
+                        <td>3990998452072426371</td>
+                        <td>3</td>
+                        <td>1</td>
+                        <td>28069ms</td>
+                        <td>否</td>
+                    </tr>
+                    
+                </table>
+            
+        
+        
+    </div>
+</main>
+</body>
+</html>

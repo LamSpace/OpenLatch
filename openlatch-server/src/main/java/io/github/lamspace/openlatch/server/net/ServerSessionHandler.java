@@ -22,8 +22,10 @@ import io.github.lamspace.openlatch.protocol.HelloRequest;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.server.AdminConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.server.admin.AdminRequestHandler;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.server.raft.ClusterRuntime;
 import io.github.lamspace.openlatch.server.session.ServerSession;
@@ -61,6 +63,10 @@ import org.slf4j.LoggerFactory;
  *   <li>在途请求超过 {@code maxInflightPerConnection}：回 {@code OVERLOADED}，
  *       不计入在途；</li>
  *   <li>{@code PING}：不回复（活动信号已被空闲检测计入）；</li>
+ *   <li>{@code ADMIN_*}（Phase 3 T3 管理观察）：独立早退交
+ *       {@link io.github.lamspace.openlatch.server.admin.AdminRequestHandler}
+ *       受理（令牌校验 + 本节点只读观察），MUST NOT 进入业务分发与指标
+ *       埋点；未注入处理器时按"未配置令牌"形态一律拒绝并断连；</li>
  *   <li>其余业务消息：交 {@link RequestDispatcher} 分发并写回响应；分发过程
  *       抛出的未预期异常被兜底为 {@code INTERNAL_ERROR} 响应（回显请求类型
  *       失败时以 {@code MESSAGE_TYPE_UNKNOWN} 占位）并记 WARN 日志，
@@ -91,9 +97,12 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     private final RequestDispatcher dispatcher;
     /** 集群运行时（非空即集群模式：HELLO/写请求/断连全部改走复制路径）。 */
     private final ClusterRuntime cluster;
+    /** 管理观察处理器（Phase 3 T3；恒非空——兼容构造回落"未配置令牌"形态）。 */
+    private final AdminRequestHandler adminHandler;
 
     /**
-     * 构造会话处理器（共享实例，无连接级可变状态；单机模式）。
+     * 构造会话处理器（共享实例，无连接级可变状态；单机模式，ADMIN 一律
+     * 拒绝——管理观察需经带 {@link AdminRequestHandler} 的构造注入）。
      *
      * @param core       锁语义核心
      * @param config     服务器配置（限额）
@@ -102,12 +111,13 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
      */
     public ServerSessionHandler(CoreEngine core, ServerConfig config,
                                 ServerSessionRegistry registry, RequestDispatcher dispatcher) {
-        this(core, config, registry, dispatcher, null);
+        this(core, config, registry, dispatcher, null, null);
     }
 
     /**
      * 构造会话处理器（集群模式：{@code cluster} 非空时握手、写请求与断连
-     * 清理改走复制路径，{@code core}/{@code dispatcher} 不再被触碰）。
+     * 清理改走复制路径，{@code core}/{@code dispatcher} 不再被触碰；
+     * ADMIN 一律拒绝）。
      *
      * @param core       锁语义核心（集群模式传 {@code null}）
      * @param config     服务器配置（限额）
@@ -118,11 +128,33 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     public ServerSessionHandler(CoreEngine core, ServerConfig config,
                                 ServerSessionRegistry registry, RequestDispatcher dispatcher,
                                 ClusterRuntime cluster) {
+        this(core, config, registry, dispatcher, cluster, null);
+    }
+
+    /**
+     * 构造会话处理器（全装配形态，Phase 3 T3）：注入管理观察处理器后
+     * {@code ADMIN_*} 消息在业务分发之前独立早退。
+     *
+     * @param core          锁语义核心（集群模式传 {@code null}）
+     * @param config        服务器配置（限额）
+     * @param registry      会话注册表
+     * @param dispatcher    请求分发器（集群模式传 {@code null}）
+     * @param cluster       集群运行时，{@code null} 表示单机模式
+     * @param adminHandler  管理观察处理器；{@code null} 回落"未配置令牌"
+     *                      形态（一律拒绝 ADMIN，与库内嵌不启用管理面一致）
+     */
+    public ServerSessionHandler(CoreEngine core, ServerConfig config,
+                                ServerSessionRegistry registry, RequestDispatcher dispatcher,
+                                ClusterRuntime cluster, AdminRequestHandler adminHandler) {
         this.core = core;
         this.config = config;
         this.registry = registry;
         this.dispatcher = dispatcher;
         this.cluster = cluster;
+        this.adminHandler = adminHandler != null
+                ? adminHandler
+                : new AdminRequestHandler(AdminConfig.unconfigured(), core, cluster,
+                        registry, () -> 0L);
     }
 
     /**
@@ -140,7 +172,9 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     /**
      * 入站信封裁决（处理矩阵见类注释）：未握手交握手门闩；重复 {@code HELLO}
      * 拒绝不断连；在途超限直接回 {@code OVERLOADED}——计数未递增故不产生
-     * {@code endRequest}；其余同步分发：PING 丢弃并立即终结在途记账，响应
+     * {@code endRequest}；{@code ADMIN_*} 在限额记账后、业务分发之前交管理
+     * 处理器独立早退（Phase 3 T3，不进指标埋点，在途记账由其写完成处终结）；
+     * 其余同步分发：PING 丢弃并立即终结在途记账，响应
      * 写回在写完成 listener 中 {@code endRequest}（写完成前请求持续计入在途，
      * 这是 {@code OVERLOADED} 可达的来源之一）。在所属连接 EventLoop 上执行，
      * 单连接内串行。
@@ -163,6 +197,12 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
         // 自我保护限额（设计说明书 §5.4，design.md D4）。
         if (!session.tryBeginRequest(config.maxInflightPerConnection())) {
             ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.OVERLOADED));
+            return;
+        }
+        if (AdminRequestHandler.isAdminType(msg.getType())) {
+            // 管理观察独立早退（Phase 3 T3）：不进业务分发、不进指标埋点；
+            // 在途记账由处理器在写完成处终结（与业务路径同一收口纪律）。
+            adminHandler.handle(ctx, session, msg);
             return;
         }
         if (cluster != null) {

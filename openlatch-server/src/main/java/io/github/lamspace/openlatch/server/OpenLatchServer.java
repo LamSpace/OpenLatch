@@ -18,6 +18,7 @@ package io.github.lamspace.openlatch.server;
 
 import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.SystemClock;
+import io.github.lamspace.openlatch.server.admin.AdminRequestHandler;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
 import io.github.lamspace.openlatch.server.metrics.MetricsHttpServer;
 import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
@@ -69,7 +70,9 @@ import java.util.concurrent.TimeUnit;
  * <p><b>生命周期</b>：构造只组装不占资源；{@link #start} 启动调度与监听
  * （集群模式先组网后开端口，失败抛出，调用方负责退出），并按
  * {@link MetricsConfig} 绑定管理端口（{@code /metrics} + {@code /healthz}，
- * Phase 3 T2）；{@link #stop} 幂等，关停顺序见该方法。
+ * Phase 3 T2）、按 {@link AdminConfig} 装配 {@code ADMIN_*} 管理观察处理器
+ * （Phase 3 T3，业务端口上的只读观察通道，未配置令牌即一律拒绝）；
+ * {@link #stop} 幂等，关停顺序见该方法。
  */
 public final class OpenLatchServer {
 
@@ -96,6 +99,28 @@ public final class OpenLatchServer {
         return clientVersion >= MIN_CLIENT_PROTOCOL_VERSION && clientVersion <= PROTOCOL_VERSION;
     }
 
+    /**
+     * 服务端版本字符串（ADMIN_SUMMARY 的 {@code version} 来源，Phase 3 T3
+     * design D8）：优先取 jar manifest 的 {@code Implementation-Version}；
+     * manifest 不可得（测试 classpath、未 repackage 的模块直接运行）回落
+     * 构建常量 {@value #VERSION_FALLBACK}。
+     *
+     * @return 版本字符串，恒非空
+     */
+    public static String serverVersion() {
+        return SERVER_VERSION;
+    }
+
+    /**
+     * 解析 manifest 版本并在解析失败时回落——静态初始化一次，调用方无感。
+     *
+     * @return 版本字符串
+     */
+    private static String resolveServerVersion() {
+        String v = OpenLatchServer.class.getPackage().getImplementationVersion();
+        return v == null || v.isBlank() ? VERSION_FALLBACK : v;
+    }
+
     /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(OpenLatchServer.class);
     /** Netty 优雅关停的安静期（毫秒），取 0 表示立即进入关停。 */
@@ -109,6 +134,8 @@ public final class OpenLatchServer {
     private final ClusterConfig clusterConfig;
     /** 指标配置（不可变；兼容构造重载取 {@link MetricsConfig#disabled()}）。 */
     private final MetricsConfig metricsConfig;
+    /** 管理观察配置（不可变；兼容构造重载取 {@link AdminConfig#unconfigured()}）。 */
+    private final AdminConfig adminConfig;
     /** 指标词表门面：双路径埋点数据落点，{@code /metrics} 的 scrape 来源。 */
     private final ServerMetrics metrics = new ServerMetrics();
     /** 管理端口 HTTP 服务（{@code enabled} 时于 {@link #start} 绑定，此前与关停后为 {@code null}）。 */
@@ -126,8 +153,19 @@ public final class OpenLatchServer {
     /** 全部活动连接，关停时统一关闭。 */
     private final ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
 
+    /**
+     * 版本回落常量：manifest 的 {@code Implementation-Version} 不可得时
+     * （测试 classpath / 非 repackage 形态）ADMIN_SUMMARY 报此值，与根
+     * pom 项目版本同步维护（Phase 3 T3 design D8）。
+     */
+    private static final String VERSION_FALLBACK = "1.0.0-dev";
+    /** 服务端版本（manifest Implementation-Version，缺失回落 {@value #VERSION_FALLBACK}）。 */
+    private static final String SERVER_VERSION = resolveServerVersion();
+
     /** 租约扫描调度器，启动后非空，关停后置回 {@code null}。 */
     private ScheduledExecutorService scheduler;
+    /** 启动成功时刻（epoch 毫秒，0=未启动）——ADMIN_SUMMARY 运行时长基准（Phase 3 T3）。 */
+    private volatile long startedAtMs;
     /** accept 线程组（1 线程）。 */
     private EventLoopGroup bossGroup;
     /** IO 线程组。 */
@@ -160,8 +198,8 @@ public final class OpenLatchServer {
     }
 
     /**
-     * 构造服务器（全配置形态）：指标启停与管理端口由 {@code metricsConfig}
-     * 决定（{@code enabled=true} 时 {@link #start()} 绑定，端口冲突快速失败）。
+     * 构造服务器（全装配形态，不含管理观察配置）：ADMIN 一律拒绝
+     * （{@link AdminConfig#unconfigured()} 语义）。
      *
      * @param config        服务器配置
      * @param clusterConfig 集群配置（已校验）
@@ -169,9 +207,26 @@ public final class OpenLatchServer {
      */
     public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
                            MetricsConfig metricsConfig) {
+        this(config, clusterConfig, metricsConfig, AdminConfig.unconfigured());
+    }
+
+    /**
+     * 构造服务器（全配置形态）：指标启停与管理端口由 {@code metricsConfig}
+     * 决定（{@code enabled=true} 时 {@link #start()} 绑定，端口冲突快速失败）；
+     * 管理观察通道由 {@code adminConfig} 决定（Phase 3 T3：未配置令牌即
+     * 拒绝一切 {@code ADMIN_*}，配置后 {@link #start()} 装配管理处理器）。
+     *
+     * @param config        服务器配置
+     * @param clusterConfig 集群配置（已校验）
+     * @param metricsConfig 指标配置（已校验）
+     * @param adminConfig   管理观察配置（已归一）
+     */
+    public OpenLatchServer(ServerConfig config, ClusterConfig clusterConfig,
+                           MetricsConfig metricsConfig, AdminConfig adminConfig) {
         this.config = config;
         this.clusterConfig = clusterConfig;
         this.metricsConfig = metricsConfig;
+        this.adminConfig = adminConfig;
         this.core = clusterConfig.enabled()
                 ? null
                 : new CoreEngine(config.toCoreConfig(), new SystemClock(), new NotifyEventBridge(sessions));
@@ -199,9 +254,14 @@ public final class OpenLatchServer {
         }
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup(config.workerThreads());
+        // 管理观察处理器（Phase 3 T3）：数据源按装配形态二选一，未配置
+        // 令牌时同样注入——由处理器自身执行"一律拒绝"的安全默认。
+        AdminRequestHandler adminHandler =
+                new AdminRequestHandler(adminConfig, core, cluster, sessions, this::uptimeMs);
         ServerSessionHandler handler = clusterConfig.enabled()
-                ? new ServerSessionHandler(null, config, sessions, null, cluster)
-                : new ServerSessionHandler(core, config, sessions, new RequestDispatcher(core, metrics));
+                ? new ServerSessionHandler(null, config, sessions, null, cluster, adminHandler)
+                : new ServerSessionHandler(core, config, sessions,
+                        new RequestDispatcher(core, metrics), null, adminHandler);
         ServerChannelInitializer initializer = new ServerChannelInitializer(
                 config.idleTimeoutMs(), handler, channels);
         ServerBootstrap bootstrap = ServerBootstrapFactory.create(bossGroup, workerGroup, initializer);
@@ -228,12 +288,14 @@ public final class OpenLatchServer {
                 throw e;
             }
         }
+        startedAtMs = System.currentTimeMillis();
         log.info("OpenLatch server started: port={}, protocolVersion={}, maxKeyLength={}, "
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, defaultLeaseMs={}, "
-                        + "clusterEnabled={}, clusterNodeId={}, metricsPort={}",
+                        + "clusterEnabled={}, clusterNodeId={}, metricsPort={}, adminEnabled={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
                 config.maxInflightPerConnection(), config.defaultLeaseMs(),
-                clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort());
+                clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort(),
+                adminConfig.isConfigured());
     }
 
     /**
@@ -245,6 +307,17 @@ public final class OpenLatchServer {
     public int metricsPort() {
         MetricsHttpServer http = metricsHttp;
         return http == null ? -1 : http.port();
+    }
+
+    /**
+     * 自启动以来的运行时长（毫秒，ADMIN_SUMMARY 的 {@code uptime_ms}
+     * 来源）。尚未 {@link #start()} 或已 {@link #stop()} 时为 0。
+     *
+     * @return 运行时长（毫秒）
+     */
+    public long uptimeMs() {
+        long at = startedAtMs;
+        return at == 0 ? 0 : System.currentTimeMillis() - at;
     }
 
     /**
@@ -303,6 +376,7 @@ public final class OpenLatchServer {
      * 探针/扫描线程停止、Raft 服务关闭，spec"关停无悬挂请求"）。幂等，可重复调用。
      */
     public synchronized void stop() {
+        startedAtMs = 0;
         if (metricsHttp != null) {
             metricsHttp.close();
             metricsHttp = null;
@@ -382,17 +456,20 @@ public final class OpenLatchServer {
         ServerConfig config;
         ClusterConfig clusterConfig;
         MetricsConfig metricsConfig;
+        AdminConfig adminConfig;
         try {
             String path = System.getProperty(ServerConfig.CONFIG_PATH_PROPERTY);
             config = ServerConfig.load(path);
             clusterConfig = ClusterConfig.load(path);
             metricsConfig = MetricsConfig.load(path);
+            adminConfig = AdminConfig.load(path);
         } catch (IllegalArgumentException e) {
             System.err.println(e.getMessage());
             System.exit(1);
             return;
         }
-        OpenLatchServer server = new OpenLatchServer(config, clusterConfig, metricsConfig);
+        OpenLatchServer server =
+                new OpenLatchServer(config, clusterConfig, metricsConfig, adminConfig);
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "openlatch-shutdown"));
         try {
             server.start();

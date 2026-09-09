@@ -17,6 +17,7 @@ OpenLatch 是一个轻量级分布式锁服务（Phase 1 / MVP）：单节点内
 | `openlatch-server` | Netty 单节点服务器（可执行 jar） |
 | `openlatch-client` | 客户端 SDK（异步内核 + JUC 风格同步包装 + 看门狗 + 重连） |
 | `openlatch-spring-boot-starter` | Spring Boot 4 自动装配 + `@OpenLatch` 注解与切面 |
+| `openlatch-console` | 只读管理控制台（Web，ADMIN 协议；见下"管理控制台"） |
 | `openlatch-examples` | 示例与基准 harness（不发布） |
 
 ## 构建
@@ -110,6 +111,29 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 # SpringAnnotationExample / BenchmarkMain（约 60s，产出基线报告）
 ```
 
+## 管理控制台
+
+`openlatch-console` 是**独立部署的只读** Web 控制台（默认 HTTP **9413**）：经 v3
+`ADMIN_*` 管理协议查询各节点业务端口，以服务端 `openlatch.server.admin.token`
+认证；概览页另拉各节点 `/metrics`（9412）渲染 sparkline。无任何写操作入口
+（无强制解锁/踢会话）。T4（TLS）落地前管理通道为明文，**仅限内网部署**。
+
+```bash
+java -Dopenlatch.console.config=/path/to/console.properties \
+     -jar openlatch-console/target/openlatch-console-1.0-SNAPSHOT-executable.jar
+```
+
+配置键（模板见 `openlatch-console/console.properties.example`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `openlatch.console.server-addresses` | 必填 | 逗号分隔 `host:port` 节点**业务**端口 |
+| `openlatch.console.admin-token` | 必填 | 须与服务端 `openlatch.server.admin.token` 一致；不符时页面降级为认证横幅 |
+| `openlatch.console.port` | `9413` | 控制台 HTTP 端口 |
+| `openlatch.console.refresh-interval-seconds` | `5` | 页面轮询刷新间隔 |
+| `openlatch.console.metrics-port` | `9412` | 概览曲线所用的各节点指标端口 |
+| `openlatch.console.request-timeout-ms` | `5000` | 单条管理请求超时 |
+
 ## 配置参考
 
 ### 服务器（Properties，`-Dopenlatch.config=<path>`）
@@ -128,6 +152,7 @@ mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | 单连接未完成请求上限 |
 | `openlatch.server.metrics.enabled` | `true` | 是否启用指标管理端点（Prometheus 抓取 `http://<host>:<port>/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0` 为临时端口）；冲突时启动快速失败 |
+| `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理协议令牌（控制台用）；未配置 = 一切管理请求被拒 |
 
 ### 客户端（`OpenLatchClient.builder()`）
 
