@@ -235,22 +235,26 @@ Phase 3 T4 保护**客户端接入端口**（业务与 `ADMIN_*` 消息共用该
 - **重启即全释放**：Phase 1 为单机内存锁，服务器重启后所有锁消失（客户端感知为超时→重连→重新竞争，无残留假锁）。
 - **异步回调线程**：`acquireAsync`/`releaseAsync` 的 future 在网络线程完成，链接的回调不得执行阻塞操作；锁丢失回调在专用单线程执行器上，同样不得阻塞。
 
-## 已知局限（Phase 1）
+## 已知局限
 
-1. 高竞争读场景读者逐个串行推进（批量授予优化留 Phase 3 评估）；
+1. 高竞争读场景读者逐个串行推进——读者批量授予优化为遗留项（Phase 3 评估：与 FairLock 公平性回归套件互斥，未采纳；见 Phase 3 详设 §9-2）；
 2. 客户端放弃等待不主动取消排队，靠队首响应超时回收；
-3. 单机内存锁，无持久化与集群（Phase 2）；
-4. `waitTime > 0` 的计时在客户端，时钟回拨可能使等待略长。
+3. `waitTime > 0` 的计时在客户端，时钟回拨可能使等待略长；
+4. CountDownLatch 屏障条目一经定型存续至节点重启、不随参与者散尽回收；遗弃屏障按 key 命名约定治理（每轮屏障带轮次标识）。
 
 ## 基准基线
 
-最近一次基线：[docs/benchmark-baseline-2026-08-29.md](docs/benchmark-baseline-2026-08-29.md)
+最近一次基线：[docs/benchmark-baseline-2026-09-10.md](docs/benchmark-baseline-2026-09-10.md)
 （手写 harness，防退化参考，不作发布门槛；复跑 `BenchmarkMain`。）
 
 ## 文档
 
 - [Phase 1 详细设计说明书](docs/OpenLatch-Phase1-详细设计说明书.md)
+- [Phase 2 详细设计说明书](docs/OpenLatch-Phase2-详细设计说明书.md)
+- [Phase 3 详细设计说明书](docs/OpenLatch-Phase3-详细设计说明书.md)
 - [Phase 1 验收报告](docs/Phase1-验收报告.md)
+- [Phase 2 验收报告](docs/Phase2-验收报告.md)
+- [Phase 3 验收报告](docs/Phase3-验收报告.md)
 
 ## 许可
 

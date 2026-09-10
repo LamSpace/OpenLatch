@@ -27,7 +27,7 @@
 - [x] 3.3 `ServerSessionHandler.handleHandshake` 认证门闩分叉：默认关保留 Phase 1 守卫 / 开启 = `authConfig.accepts` 命中放行、失败统一 `INVALID_REQUEST` + 断连不泄露原因；判定在 `cluster` 分叉前（单机/集群统一门闩）→ `AuthHandshakeTest` 4 例绿（含空/错同形、双令牌双活、摘令牌被拒、默认关兼容守卫、被拒零会话副作用）
 - [x] 3.4 客户端令牌消费：`ClientConfig`/builder 增 `authToken`；`ConnectionManager.sendHello` 与 `SeedDiscovery` 探针 HELLO 附令牌（两构造点不遗漏）；令牌不落日志 → `ClientTlsAuthIT` 的 auth 正确/错误两例绿
 - [x] 3.5 console 业务令牌透传（D7/Context ⑥）：`ConsoleConfig.Security.authToken` + `AdminClient` HELLO 携带；"服务端开认证而 console 缺令牌 → 节点降级" 由 `ConsoleTlsAuthTest.consoleMissingBusinessTokenDegradesNode` 锁定（2/2 绿，含 TLS+认证正向）
-- [ ] 3.6 集群档用例：auth on 未认证 HELLO 零状态副作用（无 `SESSION_OPEN` 复制条目）——**判定为结构保证 + 单机侧覆盖，不开重集群夹具**：门闩分叉置于 `cluster.sessionCoordinator().handleHello` 之前（代码路径保证未认证 HELLO 永不进 SESSION_OPEN），单机档零会话副作用已由 AuthHandshakeTest 锁定；`ClusterHarness` 直驱 `ClusterRuntime`、不经 `ServerSessionHandler`，要证集群档需新建三节点 OpenLatchServer 夹具（另立小变更评估）
+- [x] 3.6 集群档用例：auth on 未认证 HELLO 零状态副作用（无 `SESSION_OPEN` 复制条目）——**评估关闭（非执行完成）**：判定为结构保证 + 单机侧覆盖，不开重集群夹具；门闩分叉置于 `cluster.sessionCoordinator().handleHello` 之前（代码路径保证未认证 HELLO 永不进 SESSION_OPEN），单机档零会话副作用已由 AuthHandshakeTest 锁定；`ClusterHarness` 直驱 `ClusterRuntime`、不经 `ServerSessionHandler`，集群档实证需新建三节点 OpenLatchServer 夹具——**另立小变更**（`phase3-release-closure` design D1 定夺；口径见 `docs/Phase3-验收报告.md` 遗留段）
 - [x] 3.7 轮换流程文档化（D6）：README 双语 Security 节（服务端加新令牌双活 → 客户端/控制台切换 → 摘旧令牌；升级知会"认证开启后旧无令牌客户端被拒，需同批滚动"）
 - [x] 3.8 验证：`-pl openlatch-server,openlatch-client -am test` 全绿（reactor run server+client `test` 阶段全 SUCCESS；认证用例 AuthConfigTest/ConstantTimeTest/AuthHandshakeTest/ClientTlsAuthIT 全绿）；**P3-16 退出判据达成（除 3.6 集群结构保证项/3.7 文档）：空/错令牌断连、双活轮换、管理令牌分离校验通过**
 
@@ -38,4 +38,4 @@
 - [x] 4.3 详设 §10.4 勘误回写（console 安全透传归 P3-15/16、admin 令牌分离为 P3-16 校验项、认证默认分支语义、集群结构保证、加密范围边界）+ README 双语安全章节（`README.md`/`README_CN.md` Security 节：服务端/客户端/starter/console 键表 + 轮换流程 + 范围边界）+ `console.properties.example` 安全键注释
 - [x] 4.4 证据文件 `t4-acceptance-evidence.md`（变更目录）：机器已验证套件逐项对照 §7/§8（含命令）；诚实标注 L3 手工/`openssl s_client`/`-Pdrill` 为运维/CI 环境执行（本沙箱无 TTY，未伪装成已执行）
 - [x] 4.5 收口：全仓 `mvn -s /home/lam/repo/settings.xml verify` **BUILD SUCCESS（exit 0，7:42 min，含 failsafe *IT）**——§8 六项验收逐项闭环见 `t4-acceptance-evidence.md`；`-Pdrill` 进程级演练按仓库纪律留待运维/CI 环境（无 TTY 沙箱不可靠）
-- [ ] 4.6 提交并归档（delta 同步主规格：`transport-security` 新建 + `lock-server`/`spring-boot-starter`/`admin-console` 增量）；**Phase 3 发布**——**待变更关闭时执行**
+- [x] 4.6 提交并归档（delta 同步主规格：`transport-security` 新建 + `lock-server`/`spring-boot-starter`/`admin-console` 增量）；**Phase 3 发布**——已于提交 `c9b4313` 完成（同提交含 `openspec/changes/archive/2026-09-10-phase3-t4-security/` 归档与 `openspec/specs/transport-security/spec.md` 主规格同步）；Phase 3 发布宣告见 `docs/Phase3-验收报告.md`

@@ -5,10 +5,12 @@
 | 项目名称 | **OpenLatch**                                                                                             |
 | 文档类型 | 详细设计说明书（Phase 3 / 平台功能）                                                                      |
 | 依据文档 | 《OpenLatch 概要设计说明书》v1.0、《OpenLatch-总体实施计划与验证方案》v1.0、Phase 1/2 详细设计说明书 v1.0 |
-| 版本     | v1.0                                                                                                      |
-| 日期     | 2026-08-23                                                                                                |
+| 版本     | v1.1                                                                                                      |
+| 日期     | 2026-09-10                                                                                                |
 | 作者     | Lam Tong                                                                                                  |
-| 状态     | 待评审                                                                                                    |
+| 状态     | 已验收（Phase 3 发布收口；实现期各章勘误与 v1.1 收口见下方修订记录；验收证据汇总见 `docs/Phase3-验收报告.md`） |
+
+**修订记录**：v1.0（2026-08-23）初版待评审；v1.1（2026-09-10）Phase 3 实现回写与发布收口——**T1 扩展锁类型**：§2.1 补 Semaphore 许可总量与 Latch 初始计数的"首次定型断言"通道勘误（`AcquireRequest.permits_total`、`LatchCountDownRequest/LatchAwaitRequest.total`，`0` = 不主张），§2.3/§2.4 实施修订（条目定型与租约归还、Latch 条目存续至节点重启、等待者无租约）；**T2 监控指标**：§3.4 勘误（集群档不经 `RequestDispatcher`，埋点改为 `ServerMetrics` 双路径共用；`CoreEngine.stats()` 只读观察面；`locks.held` 取条目家族 `type` 标签；逻辑名↔Prometheus 线名映射钉入 L1 词表测试；管理端口走独立 `MetricsConfig` 同文件加载）；**T3 管理控制台**：§4.2 勘误（管理令牌逐消息承载 + 常量时间比较 + 未配置一律拒绝、`MessageType` 冻结编号 10–13、单机/集群双轨数据源、管理流量隔离零污染、`page_size` 上限 200），§4.3 排序口径基线（服务端字典序 + 控制台当前页内交互排序）；**T4 传输安全**：§5/§10.4 勘误 D1–D9（console 业务令牌 + 管理令牌双载并归 P3-15/16、认证默认关保留 Phase 1 守卫、集群门闩分叉前置的结构保证、加密范围仅客户端接入端口、配置键形态）（证据见 `openspec/changes/archive/2026-09-06-phase3-t1-extended-lock-types/`、`2026-09-07-phase3-t2-metrics/`、`2026-09-09-phase3-t3-admin-console/`、`2026-09-10-phase3-t4-security/` 与 `docs/Phase3-验收报告.md`）。
 
 ---
 

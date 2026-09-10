@@ -238,22 +238,26 @@ the intranet / behind network isolation. Full end-to-end TLS is intentionally no
 - **Restart = full release**: Phase 1 is a single-node in-memory lock; after a server restart all locks are gone (clients see timeouts → reconnect → re-compete; no phantom locks).
 - **Async callback threads**: futures from `acquireAsync`/`releaseAsync` complete on the network thread — never block in chained callbacks. Lock-lost callbacks run on a dedicated single thread; same rule.
 
-## Known Limitations (Phase 1)
+## Known Limitations
 
-1. Under hot read contention readers advance one at a time (batch granting deferred to Phase 3);
+1. Under hot read contention readers advance one at a time — batch granting is a deferred item (evaluated in Phase 3 and not adopted: it conflicts with the FairLock ordering regression suite; see Phase 3 design §9-2);
 2. Abandoning a wait does not proactively cancel the queue slot; it is reclaimed via the head-reply timeout;
-3. Single-node in-memory locks, no persistence or clustering (Phase 2);
-4. `waitTime > 0` is timed client-side; clock rollback may slightly extend a wait.
+3. `waitTime > 0` is timed client-side; clock rollback may slightly extend a wait;
+4. A CountDownLatch entry, once initialized, lives until node restart and is not reclaimed when participants disperse; abandoned barriers are managed by key naming convention (one round identifier per barrier).
 
 ## Benchmark Baseline
 
-Latest baseline: [docs/benchmark-baseline-2026-08-29.md](docs/benchmark-baseline-2026-08-29.md)
+Latest baseline: [docs/benchmark-baseline-2026-09-10.md](docs/benchmark-baseline-2026-09-10.md)
 (hand-written harness; a regression reference, not a release gate — re-run `BenchmarkMain`).
 
 ## Documentation
 
 - [Phase 1 Detailed Design (zh)](docs/OpenLatch-Phase1-详细设计说明书.md)
+- [Phase 2 Detailed Design (zh)](docs/OpenLatch-Phase2-详细设计说明书.md)
+- [Phase 3 Detailed Design (zh)](docs/OpenLatch-Phase3-详细设计说明书.md)
 - [Phase 1 Acceptance Report (zh)](docs/Phase1-验收报告.md)
+- [Phase 2 Acceptance Report (zh)](docs/Phase2-验收报告.md)
+- [Phase 3 Acceptance Report (zh)](docs/Phase3-验收报告.md)
 
 ## License
 
