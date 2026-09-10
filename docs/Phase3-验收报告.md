@@ -108,4 +108,5 @@ Phase 3 未引入锁热路径的性能相关变更（扩展锁类型与 TLS 均�
 - **版本**：Phase 3（功能完整平台），协议 v3，模块 `openlatch-*` 1.0-SNAPSHOT（沿 Phase 2 定夺：维持 1.0-SNAPSHOT 与无 tag 现状，定版随后续发布窗口另行执行）。
 - **判据**：《总体实施计划与验证方案》§5.3 六项——**六项 ✅**；DoD §5.4 五条自检 **✅**。
 - **发布定夺**：Phase 3 功能交付发布；本变更（`phase3-release-closure`）归档提交即宣告。
+- **提交**：收口提交 `064d09c`（本报告、基准基线、详设 v1.1、README 双语、T4 记账 + 本变更工件）；change 归档于 `openspec/changes/archive/2026-09-10-phase3-release-closure/`。
 - **签署**：评审人 ____________　日期 ____________

@@ -54,7 +54,9 @@
 
 ## 6. 归档与发布宣告（design D6）
 
-- [ ] 6.1 验收报告发布宣告尾注填版本/日期/commit
+- [x] 6.1 验收报告发布宣告尾注填版本/日期/commit
   - verify：尾注字段齐备
-- [ ] 6.2 提交并归档本 change：`openspec archive phase3-release-closure`——**归档即 Phase 3 发布宣告**
+  - 执行记录：尾注含版本（Phase 3 / 协议 v3 / 1.0-SNAPSHOT）、日期（2026-09-10）、收口提交 `064d09c` 与归档位置
+- [x] 6.2 提交并归档本 change：`openspec archive phase3-release-closure`——**归档即 Phase 3 发布宣告**
   - verify：归档完成；git 主干含 `docs/Phase3-验收报告.md`；工作树干净
+  - 执行记录（2026-09-10）：收口提交 `064d09c`（10 文件，+349/−15）；`openspec archive` → `openspec/changes/archive/2026-09-10-phase3-release-closure/`；**Phase 3 发布宣告**
