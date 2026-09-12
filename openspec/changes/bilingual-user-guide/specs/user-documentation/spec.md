@@ -1,0 +1,31 @@
+# user-documentation Delta Specification
+
+## ADDED Requirements
+
+### Requirement: 双语用户指南分区与章节覆盖
+
+仓库 SHALL 提供 `docs/guide/zh/` 与 `docs/guide/en/` 双语对照用户指南，章节覆盖 MUST 完整：简介与架构、核心概念（租约、看门狗续租、锁丢失、等待-通知-重发、FIFO 公平、超时纪律）、快速上手、客户端 SDK（各锁类型与同步/异步 API 及语义边界）、Spring Boot starter（`@OpenLatch`、SpEL、锁先于事务、AOP 自调用局限）、集群部署与运维（拓扑、种子发现、Leader 迁移、滚动重启序与 supervisor 配置）、安全（TLS/mTLS、业务 Token 与轮换流程、管理 Token 独立性）、管理控制台、可观测性（/metrics、/healthz、管理端口）、故障排查与 FAQ（错误码语义如 NOT_LEADER/NOT_HELD、恢复窗口、双活审计）、兼容性与协议版本（Java 25、Spring Boot 4.x only、协议 v1/v2/v3 协商与"不做隐式兼容"）、术语表。指南 MUST 是用户细节的唯一权威载体，README 仅保留最小上手闭环与索引。
+
+#### Scenario: 新用户完成学习闭环
+
+- **WHEN** 用户从 README 进入 guide，按 00→02 顺序执行
+- **THEN** 无需打开 `docs/design/` 任何文件即可完成"理解概念→跑通单机→部署集群"全路径
+
+#### Scenario: 双语页面对账
+
+- **WHEN** 任一语言的指南页在其对侧缺失
+- **THEN** 该侧索引页显式标注缺失（不允许静默不对称）
+
+### Requirement: 指南内容纪律
+
+指南技术表述 MUST 与实现及定案验收口径一致（含"重启语义单机/集群分立"“锁可能丢失必须处理回调”等既有 README 正确表述的承接）；示例命令 MUST 可在通用环境复制执行（不依赖任何私有配置）；指南 MUST NOT 引用内部过程文档与代号（《详细设计说明书》、验收报告、Phase 代号、design DN 等——内部引用检查模式集扩展至 `docs/guide/**`）；对未提供的能力（如控制台写操作）MUST 如实标注"未提供"而非省略或暗示存在。
+
+#### Scenario: 门禁覆盖指南
+
+- **WHEN** 某指南页引入"详设 §5.2"字样
+- **THEN** 反内部引用检查（含 guide 目录模式）非零退出
+
+#### Scenario: 排障答案与实现一致
+
+- **WHEN** 用户按 FAQ 处理 NOT_LEADER 响应
+- **THEN** 指南描述的语义与协议实现/错误码定义逐字一致
