@@ -34,7 +34,7 @@ public record ReleaseCommand(
         int permits) {
 
     /**
-     * 锁家族便捷构造（Phase 1/2 既有调用形态）：归还数取缺省 1。
+     * 锁家族便捷构造：归还数取缺省 1。
      *
      * @param sessionId  发起请求的会话
      * @param key        锁键

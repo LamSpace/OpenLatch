@@ -19,15 +19,15 @@ package io.github.lamspace.openlatch.server.raft;
 import io.github.lamspace.openlatch.core.Clock;
 
 /**
- * 条目时刻时间源（详设 §4.3.4，design D2）：在状态机应用线程内返回
+ * 条目时刻时间源：在状态机应用线程内返回
  * "条目携带时刻"，线程之外回落系统时钟，使 {@link io.github.lamspace.openlatch.core.CoreEngine}
  * 在零改动的情况下满足 Raft 回放确定性——同一日志序列在任何副本、任何
  * 物理时刻重放，租约到期/续租结果完全一致。
  *
  * <p><b>成立前提（契约边界）</b>：
  * <ol>
- *   <li>状态机应用为单线程串行（Ratis {@code StateMachineUpdater} 线程模型，
- *       见 design D10——仅应用已提交条目且逐条串行）；</li>
+ *   <li>状态机应用为单线程串行（Ratis {@code StateMachineUpdater} 线程模型——
+ *       仅应用已提交条目且逐条串行）；</li>
  *   <li>标记的 set/clear 与全部引擎调用发生在同一线程，apply 路径 MUST NOT
  *       向其它线程逃逸执行引擎调用（否则该调用静默读到系统时钟，回放结果
  *       依赖物理时间，确定性被破坏且无任何报错）。</li>

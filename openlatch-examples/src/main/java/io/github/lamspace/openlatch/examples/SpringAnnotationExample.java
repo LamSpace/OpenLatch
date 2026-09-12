@@ -30,12 +30,12 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.spring.OpenLatch;
 
 /**
- * 示例 5：Spring Boot 应用 + {@code @OpenLatch}（SpEL key，详设 §9），
- * 兼作验收标准 4 的活证据——除 starter 依赖与注解外零接入代码。
+ * 示例 5：Spring Boot 应用 + {@code @OpenLatch}（SpEL key），
+ * 除 starter 依赖与注解外零接入代码。
  *
  * <p>演示三件事：异 key 并发（{@code #orderId}）、同 key 串行排队、
  * 立即式获取被拒抛 {@link LockAcquisitionTimeoutException}。
- * 服务器以进程内内嵌方式启动（design D6，演示夹具，生产请独立部署）。
+ * 服务器以进程内内嵌方式启动（演示夹具，生产请独立部署）。
  *
  * <p>运行：{@code mvn -pl openlatch-examples exec:java
  * -Dexec.mainClass=io.github.lamspace.openlatch.examples.SpringAnnotationExample}

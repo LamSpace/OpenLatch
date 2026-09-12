@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.core.lock;
 import io.github.lamspace.openlatch.core.LockType;
 
 /**
- * 等待者。{@code notifyDeadlineMs > 0} 表示"已通知、待重发"状态（设计说明书 §4.5）。
+ * 等待者。{@code notifyDeadlineMs > 0} 表示"已通知、待重发"状态。
  * 通知队首时以 {@link #withDeadline(long)} 生成新实例替换队首，保持不可变。
  *
  * @param sessionId        等待者所属会话
@@ -40,7 +40,7 @@ public record Waiter(
         long notifyDeadlineMs) {
 
     /**
-     * 锁等待者便捷构造（Phase 1/2 既有形态）：许可数取缺省 1。
+     * 锁等待者便捷构造：许可数取缺省 1。
      *
      * @param sessionId        等待者所属会话
      * @param requestId        获取请求的请求 id

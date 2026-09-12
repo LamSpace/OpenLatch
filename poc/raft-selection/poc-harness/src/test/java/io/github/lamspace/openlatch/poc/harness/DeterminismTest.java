@@ -12,7 +12,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 回放确定性与快照回灌单测（P2-01，spec「CoreEngine 零改动接入」场景）。
+ * 回放确定性与快照回灌单测（CoreEngine 零改动接入场景）。
  */
 class DeterminismTest {
 

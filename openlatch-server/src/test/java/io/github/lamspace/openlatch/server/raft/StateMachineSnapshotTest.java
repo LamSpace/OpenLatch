@@ -19,10 +19,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 快照通道测试（详设 §10"状态机单元"层 + §7，S4/P2-15 验证列"快照可加载"）：
+ * 快照通道测试（状态机单元层，验证列"快照可加载"）：
  * {@code snapshotState/installSnapshot} 的 round-trip 保真与<b>切割点不变性</b>
  * ——对随机序列在任意位置切快照，"前缀装快照 + 后缀回放"的终态与全程直接
- * 回放的终态 digest 逐字段一致（发号水位 design D10 的判据载体）。
+ * 回放的终态 digest 逐字段一致（发号水位的判据载体）。
  */
 class StateMachineSnapshotTest {
 
@@ -103,7 +103,7 @@ class StateMachineSnapshotTest {
         assertThat(restored.shadow().isHeld("z")).isTrue();
     }
 
-    // 属性测试组数 ≥100（沿 P2-06 口径）：随机序列、随机切割点。
+    // 属性测试组数 ≥100：随机序列、随机切割点。
     @ParameterizedTest(name = "快照切割点不变性 seed={0}")
     @MethodSource("cutPointSeeds")
     void snapshotAtAnyCutPointYieldsEquivalentTailReplay(long seed) throws Exception {

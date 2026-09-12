@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 控制台端到端冒烟（单机档，spec"五页面只读呈现"）：同 JVM 拉起真
+ * 控制台端到端冒烟（单机档，五页面只读呈现）：同 JVM 拉起真
  * 服务器（锁端口 0 + 指标端口 0 + admin-token 已配置）与真 Boot 控制台，
  * 以业务 client SDK 预置"重入锁持有+排队、Semaphore 部分许可+大请求排队、
  * Latch 等待者"，对五页面 HTML 逐项断言并覆盖轮询刷新后的曲线区。

@@ -23,9 +23,9 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * 测试侧 Prometheus 0.0.4 文本exposition解析器（T2 L2 断言工具）：新
+ * 测试侧 Prometheus 0.0.4 文本exposition解析器（L2 断言工具）：新
  * Prometheus 客户端库不提供官方解析器，文本格式合规性以真 Prometheus
- * 抓取联调记录（{@code t2-acceptance-evidence.md}）为准，本工具仅承担
+ * 抓取联调验证为准，本工具仅承担
  * "线名/标签/值"的结构化提取以便逐项差值断言。
  *
  * <p>支持：{@code name{label="value",...} number} 样本行；跳过注释与空行；

@@ -25,14 +25,13 @@ import java.util.List;
 import java.util.Properties;
 
 /**
- * 控制台配置（Phase 3 详设 §4.4，spec"部署形态与配置"；
- * {@code openlatch.console.*} 键族，Properties 文件与 Spring Environment
+ * 控制台配置（{@code openlatch.console.*} 键族，Properties 文件与 Spring Environment
  * 双通道同源——main 经文件桥接为系统属性，测试/直配经 Environment 绑定，
  * 两路取值口径逐键一致）。
  *
  * <p><b>快速失败契约</b>：地址列表为空、令牌空白、端口越界、间隔/超时
- * 非正——全部在构造即抛 {@link IllegalArgumentException} 并指明配置键
- * （spec"坏配置快速失败"），MUST NOT 静默回落。
+ * 非正——全部在构造即抛 {@link IllegalArgumentException} 并指明配置键，
+ * MUST NOT 静默回落。
  *
  * @param addresses        目标节点地址列表（≥1 项，指向服务端业务端口）
  * @param adminToken       管理令牌（与服务端 {@code openlatch.server.admin.token} 一致）
@@ -40,8 +39,8 @@ import java.util.Properties;
  * @param refreshSeconds   页面轮询刷新间隔（秒）
  * @param metricsPort      节点指标端口（概览页 {@code /metrics} 拉取目标）
  * @param requestTimeoutMs 管理请求超时（毫秒）
- * @param security         节点连接安全配置（Phase 3 T4，spec admin-console"部署形态与
- *                         配置"：可选业务令牌与 TLS；缺省 {@link Security#NONE} 明文无令牌）
+ * @param security         节点连接安全配置（可选业务令牌与 TLS；缺省
+ *                         {@link Security#NONE} 明文无令牌）
  */
 public record ConsoleConfig(
         List<Address> addresses,
@@ -56,7 +55,7 @@ public record ConsoleConfig(
     public static final String KEY_PREFIX = "openlatch.console.";
 
     /**
-     * 节点连接安全配置（Phase 3 详设 §5.1/§5.2，spec admin-console 增量）：
+     * 节点连接安全配置：
      * 控制台与节点间亦过服务端同一 TLS/认证门闩——{@code tlsEnabled} 开启时
      * AdminClient 以 PEM 执行 TLS 握手，{@code authToken} 配置时 HELLO 携带
      * 该业务令牌（与逐消息 {@code admin-token} 独立、不互替借道）。
@@ -129,7 +128,7 @@ public record ConsoleConfig(
         }
     }
 
-    /** 默认 HTTP 监听端口（详设 §4.4）。 */
+    /** 默认 HTTP 监听端口。 */
     public static final int DEFAULT_PORT = 9413;
     /** 默认轮询刷新间隔（秒）。 */
     public static final int DEFAULT_REFRESH_SECONDS = 5;

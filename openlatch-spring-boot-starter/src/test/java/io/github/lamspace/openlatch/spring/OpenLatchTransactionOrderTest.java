@@ -46,7 +46,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 锁定"锁在事务外层"的默认顺序（详设 §8.3 事务交互；spec 场景
+ * 锁定"锁在事务外层"的默认顺序（事务交互场景
  * "提交后才释放锁"）。以真实 Spring 上下文装配切面与事务通知：
  * 切面 {@code @Order(0)}、事务通知默认 {@code LOWEST_PRECEDENCE}，
  * 事件序断言 acquire → begin → business → commit → release。

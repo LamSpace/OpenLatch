@@ -39,18 +39,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * 滚动重启演练（S4/P2-18；详设 §8"滚动重启"行、§11 验收 5）：三节点集群在
+ * 滚动重启演练：三节点集群在
  * 持续混合负载下逐台重启（任意时刻 ≥ 多数派存活），两种顺序（先主后从 /
  * 先从后主），统计<b>应用可见</b>客户端错误。
  *
- * <p><b>判据口径（phase2-leader-stall-followup 2B.1 分段修订，经批准）</b>：
- * 复制停摆看门狗（cluster-node-lifecycle"复制停滞自愈"）上线后，本演练判据从
+ * <p><b>判据口径（分段）</b>：
+ * 复制停摆看门狗（复制停滞自愈）机制上线后，本演练判据从
  * "全程错误率 &lt; 1%"改为<b>自愈前后分段</b>——
  * ①<b>自愈后零残留</b>：最后一个重启窗口结束后经自愈预算窗
  * （{@value #RESIDUAL_BUDGET_MS}ms ≥ T_stall+让位+观察窗+重启+重选+提交恢复
  * 的最坏链）起至驱动结束的区间内错误数 MUST = 0（存在未愈停摆回归即红）；
  * ②<b>自愈前窗内错误与全程错误率仅如实报告</b>（命中停摆的轮次预算窗内错误率
- * 必然超旧线，其数值与自愈事件计数入报告，供验收报告标准 5 复核改判引用）。
+ * 必然超旧线，其数值与自愈事件计数入报告，供分段口径的复核改判引用）。
  * 全程错误率的旧 &lt;1% 判定废除——它既被停摆双稳态概率性击穿（收口缺陷档案），
  * 又无法区分"瞬态窗内错误"与"永久停摆"，分段零残留才是无人值守可用性的正确形状。
  *
@@ -118,7 +118,7 @@ class RollingRestartDrillIT {
     }
 
     /**
-     * 场景 C（Phase 3 T1/P3-07）：扩展原语跨全量滚动重启存续——Latch 计数
+     * 场景 C：扩展原语跨全量滚动重启存续——Latch 计数
      * 纯复制态必达零并放行；Semaphore 许可池在"持有方归还或租约到期"两径
      * 之一收敛后满量可再取（不赌到期时序，预算 120s 覆盖 60s 租约）。
      */
@@ -232,7 +232,7 @@ class RollingRestartDrillIT {
         List<Long> restartMs = new ArrayList<>();
         List<String> errorSamples = java.util.Collections.synchronizedList(new ArrayList<>());
         // 错误与重启窗口的时间线（相对 t0，毫秒）：区分"切换窗口内突发"与
-        // "降级后持续失败"两类形态——后者即客户端/服务端真实缺陷（P2-18 目的）。
+        // "降级后持续失败"两类形态——后者即客户端/服务端真实缺陷（本演练的甄别目的）。
         long drillT0 = System.currentTimeMillis();
         List<Long> errorTimesMs = java.util.Collections.synchronizedList(new ArrayList<>());
         List<long[]> restartWindows = java.util.Collections.synchronizedList(new ArrayList<>());
@@ -301,8 +301,8 @@ class RollingRestartDrillIT {
                 Thread.sleep(1_000); // 让集群稳定再动下一台
             }
 
-            // 稳态续流：重启序列后继续驱动至总时长，摊薄切换窗瞬错（§11-5
-            // 口径"仅切换窗口瞬时错误"，比率判定需要足够分母）。
+            // 稳态续流：重启序列后继续驱动至总时长，摊薄切换窗瞬错（口径
+            // "仅切换窗口瞬时错误"，比率判定需要足够分母）。
             long driveDeadline = System.currentTimeMillis()
                     + TimeUnit.SECONDS.toMillis(driveSeconds);
             while (System.currentTimeMillis() < driveDeadline && !stop.get()) {
@@ -499,7 +499,7 @@ class RollingRestartDrillIT {
         if (jar == null) {
             System.err.println("[WARN] RollingRestartDrillIT SKIPPED: openlatch-server executable "
                     + "shade jar not found; run 'mvn -s <settings> -pl openlatch-server -am package' "
-                    + "before '-Pdrill' to make this P2-18 fault-injection case effective.");
+                    + "before '-Pdrill' to make this fault-injection case effective.");
         }
         assumeTrue(jar != null, "openlatch-server shaded jar not built; run package first");
         return jar;
@@ -545,7 +545,7 @@ class RollingRestartDrillIT {
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {
-            Files.writeString(out, "# 滚动重启演练报告（s4 P2-18）\n\n"
+            Files.writeString(out, "# 滚动重启演练报告\n\n"
                     + "- 生成：3 节点本机 shaded jar，election-timeout 800ms，"
                     + DRIVERS + " 驱动线程 × " + DRIVE_INTERVAL_MS + "ms 节奏\n\n");
         }

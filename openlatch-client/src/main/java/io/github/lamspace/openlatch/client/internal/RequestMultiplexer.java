@@ -31,22 +31,21 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * 单连接请求多路复用器（详设 §6.4）：全部出站请求的唯一收口。
+ * 单连接请求多路复用器：全部出站请求的唯一收口。
  *
  * <p><b>职责与不变量</b>：
  * <ul>
  *   <li>每个出站请求以当前会话的 {@code requestId} 登记
  *       {@code requestId → (future, deadline)}，并在共享定时器上挂超时任务；</li>
  *   <li>入站响应按 {@code request_id} 摘除并完成对应 future；</li>
- *   <li><b>每个请求必有超时</b>（概要设计 §4.3 标准 3）：超时任务触发时以
+ *   <li><b>每个请求必有超时</b>：超时任务触发时以
  *       {@link OpenLatchTimeoutException} 失败对应 future；超时摘除以条目身份
  *       CAS（{@code remove(id, entry)}）执行，同 id 重复登记时旧条目的超时
  *       任务不会误杀新条目；</li>
  *   <li>同 id 重复登记（重发交叠）时，旧条目以 {@code superseded} 异常完成后
- *       让位于新条目——任何已挂起调用方的 future 都不会被静默覆盖丢失
- *       （变更 phase1-audit-remediation design D3）；</li>
+ *       让位于新条目——任何已挂起调用方的 future 都不会被静默覆盖丢失；</li>
  *   <li>无匹配挂起项的入站信封（孤儿响应）路由给孤儿下沉点，由等待跟踪
- *       组件处理补偿归还（详设 §6.5、design.md D3）。</li>
+ *       组件处理补偿归还。</li>
  * </ul>
  *
  * <p><b>线程模型</b>：future 在事件发生处完成——响应在 EventLoop 线程、
@@ -55,7 +54,7 @@ import java.util.function.Supplier;
  */
 public final class RequestMultiplexer {
 
-    /** v3 协议版本（Phase 3 T1 起），业务出站信封固定携带（服务端应答回显此版本）。 */
+    /** v3 协议版本，业务出站信封固定携带（服务端应答回显此版本）。 */
     private static final int PROTOCOL_VERSION = 3;
 
     /** 挂起请求表：requestId → (future, 超时任务)。 */
@@ -66,14 +65,14 @@ public final class RequestMultiplexer {
     private final Supplier<Channel> channelSupplier;
     /** 当前会话供应者；无活动会话时返回 {@code null}。 */
     private final Supplier<SessionContext> sessionSupplier;
-    /** 客户端指标门面（T2）；禁用形态下观测回调整体不注册（零额外路径）。 */
+    /** 客户端指标门面；禁用形态下观测回调整体不注册（零额外路径）。 */
     private final ClientMetrics metrics;
     /** 孤儿响应下沉点；未设置时静默丢弃。 */
     private volatile Consumer<Envelope> orphanSink = envelope -> {
         // 默认丢弃：等待跟踪组件装配前的窗口期不应有孤儿响应
     };
     /**
-     * 出站门（测试注入口，design.md D7）：谓词返回 {@code false} 时请求
+     * 出站门（测试注入口）：谓词返回 {@code false} 时请求
      * 仍登记挂起但不实际写出，模拟半开连接的"写黑洞"。生产代码不设置。
      */
     private volatile java.util.function.Predicate<Envelope> outboundGate = envelope -> true;
@@ -102,7 +101,7 @@ public final class RequestMultiplexer {
 
     /**
      * 创建多路复用器（生产形态：请求终局经 {@code metrics} 旁路观测，
-     * 不影响任何完成语义与返回值，T2）。
+     * 不影响任何完成语义与返回值）。
      *
      * @param timer           共享定时器
      * @param channelSupplier 活动通道供应者
@@ -144,7 +143,7 @@ public final class RequestMultiplexer {
      * 与握手请求使用），登记挂起项与超时任务。同 id 存在旧挂起项时不静默覆盖：
      * 新条目替换登记，旧条目取消其超时任务并以 {@code superseded} 的
      * {@link io.github.lamspace.openlatch.client.OpenLatchException} 完成，
-     * 保证两个调用方的 future 均有界完成（design D3）。
+     * 保证两个调用方的 future 均有界完成。
      *
      * @param envelope  完整信封（已含请求 id）
      * @param timeoutMs 该请求的超时（毫秒）
@@ -160,7 +159,7 @@ public final class RequestMultiplexer {
         CompletableFuture<Envelope> future = new CompletableFuture<>();
         long requestId = envelope.getRequestId();
         // 超时回调持有本条目引用，摘除以 remove(id, entry) 身份 CAS 执行，
-        // 同 id 交叠时先到的超时不会误杀后登记的条目（design D3）。
+        // 同 id 交叠时先到的超时不会误杀后登记的条目。
         PendingRequest[] holder = new PendingRequest[1];
         Timeout timeoutTask = timer.newTimeout(t -> onTimeout(requestId, holder[0]), timeoutMs,
                 java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -169,7 +168,7 @@ public final class RequestMultiplexer {
         PendingRequest previous = inflight.put(requestId, entry);
         if (previous != null && previous != entry) {
             // 同 id 重复登记（重发交叠）：旧条目以 superseded 完成后让位于新条目，
-            // 杜绝"覆盖后旧 future 永不完成"的悬挂（design D3）。
+            // 杜绝"覆盖后旧 future 永不完成"的悬挂。
             previous.timeoutTask().cancel();
             previous.future().completeExceptionally(new OpenLatchException(
                     "request " + requestId + " superseded by re-registration"));
@@ -181,7 +180,7 @@ public final class RequestMultiplexer {
     }
 
     /**
-     * 观测挂载（T2）：在返回的 future 上注册旁路完成回调记录请求终局。
+     * 观测挂载：在返回的 future 上注册旁路完成回调记录请求终局。
      * 禁用形态（{@code metrics == null} 或未启用）原样返回——不注册回调、
      * 零额外对象分配；启用时回调仅做记录，MUST NOT 改变 future 的完成值、
      * 完成时序或异常传播（返回值即入参，链在观测回调之后）。
@@ -219,7 +218,7 @@ public final class RequestMultiplexer {
     }
 
     /**
-     * 以给定原因使全部挂起请求失败（断连快速失败路径，详设 §6.2）。
+     * 以给定原因使全部挂起请求失败（断连快速失败路径）。
      * 摘除全部挂起项并取消其超时任务。
      *
      * @param cause 失败原因
@@ -244,7 +243,7 @@ public final class RequestMultiplexer {
     }
 
     /**
-     * 设置出站门（测试注入口，design.md D7）。谓词返回 {@code false} 的信封
+     * 设置出站门（测试注入口）。谓词返回 {@code false} 的信封
      * 不实际写出但仍走超时登记，用于模拟半开连接。
      *
      * @param gate 出站谓词

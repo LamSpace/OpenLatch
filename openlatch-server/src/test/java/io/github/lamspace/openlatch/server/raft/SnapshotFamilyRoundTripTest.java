@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * P3-07 快照扩展往返（spec snapshot-recovery"含新条目的恢复往返"）：
+ * 快照扩展往返（含新条目的恢复往返）：
  * Semaphore/Latch 条目经 {@code snapshotState → installSnapshot} 全量回灌后，
  * 许可池、屏障计数、租约驱动与摘要逐项一致；锁条目序列化字节形不受
  * v3 新字段扰动（缺省字段不出现）。
@@ -62,7 +62,7 @@ class SnapshotFamilyRoundTripTest {
                 .toByteArray());
         assertThat(restored.shadow().isSemaphore("sem")).isFalse();
         assertThat(restored.shadow().permitsAvailable("sem"))
-                .isEqualTo(Integer.MAX_VALUE); // 条目回收：重建语义（design D4 边界）
+                .isEqualTo(Integer.MAX_VALUE); // 条目回收：重建语义
     }
 
     @Test

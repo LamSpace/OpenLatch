@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 /**
- * 客户端指标门面与多路复用器观测收口（T2，spec"客户端可选监控指标"）：
+ * 客户端指标门面与多路复用器观测：
  * 默认关闭零记录；启用后按 {type,status} 逐项计数（成功应答取状态码名，
  * 失败归 TIMEOUT/UNAVAILABLE/FAILED）、耗时样本伴随、重连与失锁计数。
  */

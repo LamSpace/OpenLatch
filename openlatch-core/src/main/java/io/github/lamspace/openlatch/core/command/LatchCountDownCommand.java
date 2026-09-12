@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.core.command;
 
 /**
- * 屏障倒计数命令（Phase 3 详设 §2.4 / design D1）。
+ * 屏障倒计数命令。
  *
  * @param sessionId 发起请求的会话（登记为屏障参与者）
  * @param key       屏障键

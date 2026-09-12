@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.core;
 
 /**
- * 引擎统计观察面的一次性快照（Phase 3 T2，spec"只读统计观察面"）。
+ * 引擎统计观察面的一次性快照。
  *
  * <p>由 {@code CoreEngine.stats()} 弱一致遍历产出——各字段读自条目锁内、
  * 但彼此间不构成同一瞬间的原子视图；消费者（server 层 gauge 绑定）按

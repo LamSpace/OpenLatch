@@ -31,9 +31,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * JUC 风格同步包装语义用例（tasks 5.2–5.5）：对真实服务器验证互斥、
+ * JUC 风格同步包装语义用例：对真实服务器验证互斥、
  * 重入计数、非法解锁守卫、持锁查询与限时等待；另覆盖不可重入 SIMPLE、
- * 读写基本互斥、lockAsync 授予、锁键监听器生命周期（design D4）与
+ * 读写基本互斥、lockAsync 授予、锁键监听器生命周期与
  * 过期后解锁。
  */
 class OLockSyncWrapperTest {
@@ -234,7 +234,7 @@ class OLockSyncWrapperTest {
         lock.unlock();
     }
 
-    /** 锁完全释放后该键监听器登记被丢弃、重持不复活（design D4）。 */
+    /** 锁完全释放后该键监听器登记被丢弃、重持不复活。 */
     @Test
     void keyListenersDiscardedAfterFullRelease() throws Exception {
         OLock lock = clientA.newReentrantLock("listener-lifecycle");

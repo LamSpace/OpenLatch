@@ -31,7 +31,7 @@ import java.net.ServerSocket;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 故障降级用例（spec"任一节点故障 MUST NOT 阻断对其余节点的呈现"）：
+ * 故障降级用例（任一节点故障 MUST NOT 阻断对其余节点的呈现）：
  * 地址列表含一个真服务器与一个"占而未听"端口（宕机形态），概览须逐块
  * 如实降级——死节点标注不可达、活节点数字照常呈现、恢复后自动回连由
  * 懒重连语义保证（下一次查询即重握手）。

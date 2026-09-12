@@ -38,8 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 请求多路复用单测（tasks 3.1–3.3）：响应关联、每请求超时、未知 id 路由、
- * 连接不可用快速失败与同 id supersede 及超时竞争（design D3）。
+ * 请求多路复用单测：响应关联、每请求超时、未知 id 路由、
+ * 连接不可用快速失败与同 id supersede 及超时竞争。
  */
 class RequestMultiplexerTest {
 
@@ -82,7 +82,7 @@ class RequestMultiplexerTest {
         multiplexer.send(acquireBuilder(), 1000);
         Envelope out = channel.readOutbound();
         assertThat(out).isNotNull();
-        // v3（Phase 3 T1）：出站信封固定携带协议版本 3（详设 §6.1/§6 兼容性）。
+        // v3：出站信封固定携带协议版本 3。
         assertThat(out.getProtocolVersion()).isEqualTo(3);
         assertThat(out.getRequestId()).isEqualTo(1);
 
@@ -175,7 +175,7 @@ class RequestMultiplexerTest {
     }
 
     /**
-     * 同 id 重复登记（design D3）：旧条目立即以 superseded 异常完成让位于
+     * 同 id 重复登记：旧条目立即以 superseded 异常完成让位于
      * 新条目，挂起表只保留新条目，响应完成的是新条目 future。
      */
     @Test
@@ -200,7 +200,7 @@ class RequestMultiplexerTest {
     }
 
     /**
-     * 同 id 交叠的超时竞争（design D3）：旧条目的定时器先于新条目到期时，
+     * 同 id 交叠的超时竞争：旧条目的定时器先于新条目到期时，
      * 身份 CAS 摘除落空，新条目不被误杀、future 不被提前完成。
      */
     @Test

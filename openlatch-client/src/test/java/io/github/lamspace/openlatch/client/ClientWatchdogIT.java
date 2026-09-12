@@ -26,14 +26,14 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 看门狗端到端（§10.3，task 8.4）：3s 租约持有 10s，期间续租生效、
+ * 看门狗端到端：3s 租约持有 10s，期间续租生效、
  * 锁不过期；释放后可被其他客户端获取。
  */
 class ClientWatchdogIT {
 
     /** 短租约（毫秒）：端到端用例的授予租约。 */
     private static final long SHORT_LEASE_MS = 3000;
-    /** 持有时长（毫秒）：预留参考值；当前用例检查点最大 9.5s，常量未被引用（死代码待办登记于 design D5，不删除）。 */
+    /** 持有时长（毫秒）：预留参考值；当前用例检查点最大 9.5s，常量未被引用（有意保留，不删除）。 */
     private static final long HOLD_MS = 10_000;
 
     /** 被测服务器。 */

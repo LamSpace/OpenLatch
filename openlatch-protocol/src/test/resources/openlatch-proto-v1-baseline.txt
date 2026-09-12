@@ -1,4 +1,4 @@
-# Phase 1 wire 基线：每行必须原样出现在全量契约中（编号不可变更/删除/复用）
+# v1 wire 基线：每行必须原样出现在全量契约中（编号不可变更/删除/复用）
 enum MessageType
   MESSAGE_TYPE_UNKNOWN 0
   HELLO 1

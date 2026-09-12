@@ -17,8 +17,7 @@
 package io.github.lamspace.openlatch.client;
 
 /**
- * 单个网络请求（获取/释放/续租/握手）在请求超时时限内未收到响应时抛出
- * （详设 §6.4"每个请求必有超时"）。对应概要设计 §4.3 标准 3：
+ * 单个网络请求（获取/释放/续租/握手）在请求超时时限内未收到响应时抛出：
  * 客户端所有请求路径带超时，无死等。
  */
 public class OpenLatchTimeoutException extends OpenLatchException {

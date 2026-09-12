@@ -49,9 +49,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * P1-29 切面行为单测（design D9）：mock 客户端异步内核，不起服务器。
+ * 切面行为单测：mock 客户端异步内核，不起服务器。
  * 覆盖 waitTime 三分支映射、leaseTime 换算、DENIED/总超时异常语义、
- * 业务异常后释放、锁丢失释放守卫（design D3）、SpEL 求值与缓存。
+ * 业务异常后释放、锁丢失释放守卫、SpEL 求值与缓存。
  */
 class OpenLatchAspectTest {
 
@@ -131,7 +131,7 @@ class OpenLatchAspectTest {
         }
 
         /**
-         * 公平锁类型（Phase 3 T1 starter type = FAIR）。
+         * 公平锁类型（starter type = FAIR）。
          *
          * @return 固定返回值
          */
@@ -218,7 +218,7 @@ class OpenLatchAspectTest {
     }
 
     /**
-     * type = FAIR（Phase 3 T1/P3-02）：注解取值直通 v3 公平类型，
+     * type = FAIR：注解取值直通 v3 公平类型，
      * 映射为 AcquireSpec.lockType == FAIR 并正常执行与释放。
      */
     @Test

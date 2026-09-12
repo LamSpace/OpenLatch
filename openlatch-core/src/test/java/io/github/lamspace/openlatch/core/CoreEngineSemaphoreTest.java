@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T1 Semaphore 语义用例组（Phase 3 详设 §2.3 / P3-03）：严格 FIFO
+ * Semaphore 语义用例组：严格 FIFO
  * 仅队首授予（防大请求饥饿）、重入按次累加、租约到期整体归还、
  * 超额释放拒绝、会话清理不泄漏、许可总量定型与断言、类型不匹配矩阵。
  * 手工时钟驱动，无 sleep。

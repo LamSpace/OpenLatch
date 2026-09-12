@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 客户端指标端到端（T2，spec"客户端可选监控指标"）：注入注册表的客户端
+ * 客户端可选监控指标端到端：注入注册表的客户端
  * 按固定脚本逐项核对 {type,status} 计数与耗时样本；未注入的客户端行为
  * 一致（默认关闭）；停服断连场景钉住 {@code reconnect.total} 与
  * {@code locks.lost.total}（失锁裁决至多一次）。

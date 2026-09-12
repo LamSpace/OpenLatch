@@ -17,9 +17,9 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 集群级快照测试（详设 §10"快照"层的集成半区，S4/P2-15 验证列"快照可加载；
+ * 集群级快照测试（快照层的集成半区，验证列"快照可加载；
  * 快照期间服务不受影响"）：真实 3 节点集群上验证小阈值自动触发、保留上限、
- * 触发位点合法性与手动触发通道（design D6）——负载与快照生成经不同线程
+ * 触发位点合法性与手动触发通道——负载与快照生成经不同线程
  * 真实交错（EmbeddedChannel 驱动线程 vs Ratis 应用线程）。
  */
 @Timeout(value = 120, unit = TimeUnit.SECONDS)

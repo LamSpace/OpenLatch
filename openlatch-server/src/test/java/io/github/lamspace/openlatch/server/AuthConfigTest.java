@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link AuthConfig} 加载与校验（spec"业务令牌认证与默认兼容守卫"）：缺省回落
+ * {@link AuthConfig} 加载与校验：缺省回落
  * 兼容守卫、键覆盖、开启缺令牌快速失败、多令牌命中语义。
  */
 class AuthConfigTest {

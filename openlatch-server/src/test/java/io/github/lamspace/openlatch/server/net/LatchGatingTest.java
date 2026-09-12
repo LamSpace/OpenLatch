@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Phase 3 T1 P3-05 协议层用例：LATCH_COUNT_DOWN / LATCH_AWAIT 的 v3 门控
+ * 协议层用例：LATCH_COUNT_DOWN / LATCH_AWAIT 的 v3 门控
  * （低版本会话消息级拒绝、不断连）、负参数与无断言拒绝、纯初始化 →
  * 等待挂起 → 倒计数归零 → {@code AWAIT_NOTIFY} 推送 → 同 id 重发放行的
  * 单机双会话线路往返。

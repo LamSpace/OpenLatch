@@ -12,7 +12,7 @@
 
     <artifactId>openlatch-client</artifactId>
     <name>openlatch-client</name>
-    <description>OpenLatch 客户端 SDK（M3 交付）：异步内核 + 同步包装 + 看门狗 + 重连</description>
+    <description>OpenLatch 客户端 SDK：异步内核 + 同步包装 + 看门狗 + 重连</description>
 
     <dependencies>
         <!-- 客户端仅依赖协议与 netty：锁语义裁决全部在服务端（详设 §2 约束 2） -->

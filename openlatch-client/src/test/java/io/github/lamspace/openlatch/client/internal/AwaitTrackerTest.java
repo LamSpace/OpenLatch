@@ -43,8 +43,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 等待跟踪单测（tasks 4.1–4.5）：§6.5 边界场景表逐项覆盖，含
- * 重发超时保持挂起（D1）与重复/孤儿授予补偿归还（D3）。
+ * 等待跟踪单测：边界场景逐项覆盖，含
+ * 重发超时保持挂起与重复/孤儿授予补偿归还。
  */
 class AwaitTrackerTest {
 
@@ -163,7 +163,7 @@ class AwaitTrackerTest {
         assertThat(channel.outboundMessages()).isEmpty();
     }
 
-    /** 重发无响应（请求超时）：保持挂起，再次通知可再次重发（D1）。 */
+    /** 重发无响应（请求超时）：保持挂起，再次通知可再次重发。 */
     @Test
     void resendTimeoutKeepsWaitingForNextNotify() throws Exception {
         tearDown();
@@ -186,7 +186,7 @@ class AwaitTrackerTest {
         assertThat(secondResend.getRequestId()).isEqualTo(requestId);
     }
 
-    /** 重复通知导致重复授予：首个交付调用方，重复者归还（D3；经真实多路复用器 supersede 路径）。 */
+    /** 重复通知导致重复授予：首个交付调用方，重复者归还（经真实多路复用器 supersede 路径）。 */
     @Test
     void duplicateGrantCompensatedWithRelease() throws Exception {
         tearDown();
@@ -196,7 +196,7 @@ class AwaitTrackerTest {
         long requestId = out.getRequestId();
         multiplexer.onResponse(acquireResponse(requestId, StatusCode.QUEUED, 0, 0));
 
-        // 双通知：两次同 id 重发均经真实 sendWithId——第二次 supersede 第一次（design D3）。
+        // 双通知：两次同 id 重发均经真实 sendWithId——第二次 supersede 第一次。
         tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
         tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
         assertThat((Envelope) channel.readOutbound()).isNotNull();
@@ -239,7 +239,7 @@ class AwaitTrackerTest {
         assertThat(future.get(1, TimeUnit.SECONDS).leaseToken()).isEqualTo(66);
     }
 
-    /** 总超时后在途重发被授予：归还（D3）。 */
+    /** 总超时后在途重发被授予：归还。 */
     @Test
     void grantAfterTotalTimeoutCompensatedWithRelease() throws Exception {
         CompletableFuture<LockGrant> future = startAcquire(150);

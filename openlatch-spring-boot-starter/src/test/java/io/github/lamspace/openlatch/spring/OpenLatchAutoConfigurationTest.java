@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * P1-28 条件装配测试（design D9）：不起服务器，验证客户端 Bean 的
+ * 条件装配测试：不起服务器，验证客户端 Bean 的
  * 存在性、默认值绑定、属性覆盖与"用户 Bean 让位"，以及服务器不可达时
  * 上下文照常启动（异步连接契约）。
  */
@@ -44,7 +44,7 @@ class OpenLatchAutoConfigurationTest {
                     OpenLatchAspectConfiguration.class));
 
     /**
-     * 零配置：Bean 存在且 §8.2 默认值逐项落到 client.config()。
+     * 零配置：Bean 存在且默认值逐项落到 client.config()。
      */
     @Test
     void defaultsBindPerSpec() {
@@ -115,7 +115,7 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * 默认状态：锁切面 Bean 注册（spec"enabled 开关"默认生效侧）。
+     * 默认状态：锁切面 Bean 注册（enabled 开关默认生效侧）。
      */
     @Test
     void aspectRegisteredByDefault() {
@@ -124,8 +124,8 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * enabled=false：切面不注册，客户端 Bean 照常装配（design D4——
-     * 开关只关注解面，编程式路径不受影响）。
+     * enabled=false：切面不注册，客户端 Bean 照常装配
+     * （开关只关注解面，编程式路径不受影响）。
      */
     @Test
     void disabledSwitchRemovesAspectKeepsClient() {
@@ -136,7 +136,7 @@ class OpenLatchAutoConfigurationTest {
                 });
     }
 
-    /** 临时端口服务器（T2 starter 注入用例的真流量来源）。 */
+    /** 临时端口服务器（starter 指标注入用例的真流量来源）。 */
     private static OpenLatchServer startServer() {
         ServerConfig d = ServerConfig.defaults();
         OpenLatchServer server = new OpenLatchServer(new ServerConfig(0, d.workerThreads(),
@@ -148,7 +148,7 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * T2 spec"度量注册表自动注入"存在侧：上下文含 MeterRegistry Bean 时
+     * 度量注册表自动注入存在侧：上下文含 MeterRegistry Bean 时
      * 客户端指标注册进该注册表（真流量断言，无显式配置）。
      */
     @Test
@@ -179,7 +179,7 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * T2 spec"无注册表不受扰"：上下文不含任何度量注册表时客户端照常
+     * 无注册表不受扰：上下文不含任何度量注册表时客户端照常
      * 装配与工作（默认关闭，不报错、无指标副作用）。
      */
     @Test
@@ -200,7 +200,7 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * Phase 3 T4 spec spring-boot-starter"配置属性绑定与默认值"：TLS/认证属性
+     * 配置属性绑定与默认值：TLS/认证属性
      * 透传至所建客户端（PEM 路径仅为配置值，客户端首次连接时才读取文件——
      * 此处断言绑定面，不真连）。
      */
@@ -224,8 +224,8 @@ class OpenLatchAutoConfigurationTest {
     }
 
     /**
-     * Phase 3 T4 默认形态：零配置安全项关闭（TLS 关、无业务令牌）——既有明文
-     * 装配行为不变（spec"零配置明文装配不变"）。
+     * 默认形态：零配置安全项关闭（TLS 关、无业务令牌）——既有明文
+     * 装配行为不变（零配置明文装配不变）。
      */
     @Test
     void securityDefaultsOffWithoutProperties() {

@@ -27,31 +27,31 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * 集群配置（详设 §9，spec"集群配置体系"；{@code openlatch.cluster.*} 键族）。
+ * 集群配置（{@code openlatch.cluster.*} 键族）。
  *
  * <p><b>与 {@link ServerConfig} 的关系</b>：同一 Properties 文件的集群子集，
  * 独立记录而非扩展既有记录——保持 {@code ServerConfig} 构造签名稳定
- * （Phase 1 既有装配与测试不受扰动）。默认实例 {@link #disabled()} 即
- * "关闭集群 = Phase 1 单机行为"（同一二进制，§9）。
+ * （既有装配与测试不受扰动）。默认实例 {@link #disabled()} 即
+ * "关闭集群 = 单机行为"（同一二进制）。
  *
  * <p><b>校验契约</b>：{@code enabled=true} 时 {@code node-id} 与 {@code peers}
  * 必填且 {@code peers} 必须包含本节点条目；缺失/非法以指明配置键的
  * {@link IllegalArgumentException} 快速失败，MUST NOT 静默降级为单机。
  * {@code clientAddresses} 为可选项：配置时逐条校验 {@code id@host:port} 格式
  * 与 id 唯一（未配置不阻塞启动，Leader 提示的地址字段降级为空串，
- * 客户端以种子发现兜底，见 s3 design D4）。
+ * 客户端以种子发现兜底）。
  *
- * @param enabled           是否启用集群（{@code false} 即 Phase 1 单机）
+ * @param enabled           是否启用集群（{@code false} 即单机）
  * @param nodeId            本节点唯一 id（启用时必填，≥1；参与 sessionId 高位编码）
  * @param peers             全成员列表 {@code id@host:port}（启用时必填，含本节点）
  * @param clientAddresses   各节点客户端接入地址列表 {@code id@host:port}（可选，
  *                          v2 Leader 提示与 {@code CLUSTER_VIEW} 作答的地址来源）
  * @param raftPort          本节点 Raft 复制通信监听端口
  * @param dataDir           Raft 日志与快照目录
- * @param snapshotThreshold 快照触发条目数（S4 起接入 Ratis 自动触发阈值）
+ * @param snapshotThreshold 快照触发条目数（作为 Ratis 自动快照触发阈值）
  * @param electionTimeoutMs 选举超时上界（Raft 层语义透传）
  * @param logSegmentBytes   Raft 日志 segment 上限字节（Raft 层语义透传，
- *                          {@code 0} 取库默认；S4 追赶用例用小值驱动截断与
+ *                          {@code 0} 取库默认；取小值可驱动日志截断与
  *                          快照安装流）
  */
 public record ClusterConfig(
@@ -102,7 +102,7 @@ public record ClusterConfig(
                 electionTimeoutMs, 0);
     }
 
-    /** 配置键前缀（§9）。 */
+    /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.cluster.";
 
     /** 默认关闭（单机）。 */
@@ -175,7 +175,7 @@ public record ClusterConfig(
     }
 
     /**
-     * 全量校验（spec"缺必填项启动失败"）：{@code enabled=true} 时
+     * 全量校验：{@code enabled=true} 时
      * {@code node-id >= 1}；{@code peers} 非空、逐条
      * {@code id@host:port} 合法、id 唯一，且必须包含本节点的条目；
      * {@code clientAddresses} 可选——未配置直接放行，配置时逐条
@@ -364,7 +364,7 @@ public record ClusterConfig(
      *
      * @param nodeId 目标节点 id
      * @return {@code host:port}；未配置该节点映射时为空串（提示降级，
-     *         客户端以种子发现兜底，design D4）
+     *         客户端以种子发现兜底）
      */
     public String clientAddress(int nodeId) {
         return clientAddressMap().getOrDefault(nodeId, "");

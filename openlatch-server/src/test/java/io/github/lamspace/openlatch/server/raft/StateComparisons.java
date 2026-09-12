@@ -26,13 +26,13 @@ import java.util.Map;
 import java.util.function.Supplier;
 
 /**
- * 复制状态全量比对工具（P2-10 交付，design D8）：S2 退出门的跨副本一致判据
- * 与 S4 快照恢复比对（P2-16）共用的单一实现，随 openlatch-server test-jar
+ * 复制状态全量比对工具：跨副本一致判据（复制收敛收口）
+ * 与快照恢复比对共用的单一实现，随 openlatch-server test-jar
  * 发布供下游测试模块复用。
  *
  * <p>两级比对：摘要级（{@link #awaitDigestsAgree}，快速判定"是否一致"）与
  * 结构级（{@link #diff}，在不一致时给出逐字段差异清单，定位到 key/holder
- * 粒度——MUST NOT 以抽样代替全量，§10 快照层要求）。
+ * 粒度——MUST NOT 以抽样代替全量）。
  */
 public final class StateComparisons {
 

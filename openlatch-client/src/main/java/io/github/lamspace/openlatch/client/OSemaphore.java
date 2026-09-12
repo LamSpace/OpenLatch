@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.client;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 分布式信号量（Phase 3 详设 §2.3 / P3-04）：N 个许可的共享资源门闸，
+ * 分布式信号量：N 个许可的共享资源门闸，
  * 许可获取受租约保护（持有者进程死亡时由服务端到期回收归还，不泄漏）。
  *
  * <p><b>归属与重入</b>：归属为 {@code (会话, 线程)}——同一线程重复获取

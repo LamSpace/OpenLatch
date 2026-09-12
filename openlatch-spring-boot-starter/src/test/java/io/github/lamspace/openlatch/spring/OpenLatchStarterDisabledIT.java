@@ -38,8 +38,8 @@ import io.github.lamspace.openlatch.server.ServerConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * enabled=false 的端到端用例（4.5）：真实服务器上切面不注册，
- * 带注解方法按无注解原样执行，客户端 Bean 仍可用（design D4）。
+ * enabled=false 的端到端用例：真实服务器上切面不注册，
+ * 带注解方法按无注解原样执行，客户端 Bean 仍可用。
  */
 @SpringBootTest(classes = StarterITApp.class,
         webEnvironment = SpringBootTest.WebEnvironment.NONE,

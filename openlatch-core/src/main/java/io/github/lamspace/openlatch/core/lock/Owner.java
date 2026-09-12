@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.core.lock;
 
 /**
- * 锁归属，由 {@code (sessionId, threadId)} 唯一确定（概要设计 §6.4）。
+ * 锁归属，由 {@code (sessionId, threadId)} 唯一确定。
  *
  * @param sessionId 持有者所属会话
  * @param threadId  持有者的客户端线程标识

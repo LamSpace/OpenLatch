@@ -35,9 +35,9 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Semaphore 客户端端到端·集群档（P3-04）：真三节点集群（Raft 复制组 +
+ * Semaphore 客户端端到端·集群档：真三节点集群（Raft 复制组 +
  * Leader 改道）上的许可计数、跨客户端等待-通知-重发闭环，以及经 Follower
- * 种子接入的获取改道路径。切换/快照深场景归 P3-07 演练矩阵。
+ * 种子接入的获取改道路径。切换/快照深场景归演练矩阵。
  */
 @Timeout(value = 150, unit = TimeUnit.SECONDS)
 class ClientSemaphoreClusterIT {
@@ -147,7 +147,7 @@ class ClientSemaphoreClusterIT {
 
     @Test
     void countingReentrancyAndTotalAssertAcrossCluster() throws Exception {
-        // 集群计数档（排队-通知闭环归 P3-07/7.2 矩阵）：跨会话计数、同线程
+        // 集群计数档（排队-通知闭环归演练矩阵）：跨会话计数、同线程
         // 重入累加与对称归还、总量断言不符经应用路径显式拒绝。
         startCluster(3);
         OpenLatchClient a = clientToAllSeeds();
@@ -164,7 +164,7 @@ class ClientSemaphoreClusterIT {
         sa.release(2);
         assertThat(sb.tryAcquire(2, 10, TimeUnit.SECONDS)).isTrue(); // 归还后即可授
         sb.release(2);
-        // 总量断言不符的集群码形（回执映射归 P3-07/7.1），单机侧已由
+        // 总量断言不符的集群码形（回执映射归演练矩阵），单机侧已由
         // SemaphoreGatingTest 钉住 INVALID_REQUEST。
     }
 

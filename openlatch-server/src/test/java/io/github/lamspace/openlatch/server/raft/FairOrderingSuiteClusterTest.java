@@ -28,7 +28,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * FairLock 公平性回归套件·集群档（Phase 3 P3-02，常开）：Leader 侧
+ * FairLock 公平性回归套件·集群档（常开）：Leader 侧
  * {@code WaitQueue} 位次经复制路径推进时"通知序 == 排队序 == 授予序"
  * 依旧成立（位次裁决在 Leader 内存、授予裁决经日志，两层不得合谋插队）。
  * {@code FAIR} 与 {@code REENTRANT} 参数化同矩阵。

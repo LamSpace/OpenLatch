@@ -39,13 +39,13 @@ import java.util.Optional;
 import java.util.function.ToDoubleFunction;
 
 /**
- * 控制台五页面路由（Phase 3 详设 §4.3，spec"五页面只读呈现"）：全部为
+ * 控制台五页面路由：全部为
  * GET 只读渲染（MUST NOT 存在任何写操作入口）；每页面按节点"尽力而为"
  * 聚合并行级降级（失败节点标注、认证被拒聚合横幅）。
  *
  * <p><b>多节点合并口径</b>：列表/会话页对全部（或 ?node= 选定的）配置节点
- * 逐一查询并按节点分块呈现——服务端"仅本节点视角"的语义（spec"双形态
- * 数据源与集群视角口径"）在页面上保持分块可溯，不做跨节点强合并。
+ * 逐一查询并按节点分块呈现——服务端"仅本节点视角"的语义在页面上保持
+ * 分块可溯，不做跨节点强合并。
  */
 @Controller
 public final class ConsoleController {

@@ -73,3 +73,4 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 1. **创建 Java 源文件时必须添加详细的 Javadoc**。深度按契约分量分级：承载行为契约、并发保证或协议可见语义的类与方法按 JDK `Lock` 接口级撰写（类级：职责、线程模型、状态机、契约边界；方法级：分支语义、判定顺序、幂等性、调用者义务）；简单访问器与数据载体保持简洁，不制造深度。私有方法、私有构造器与私有字段同样必须有 Javadoc（`maven-javadoc-plugin` 已配置 `show=private`，缺失即构建失败）。
 2. **任何 Java 源文件的变更必须同步修改对应的 Javadoc**。行为变化时注释一并更新，保持"只读注释即可懂契约"；注释语义以代码实现为准，写注释前先读懂代码。
+3. **对外源码注释与发布元数据禁止引用内部过程文档**。发布模块 `src/main` 全部注释/Javadoc 与模块 `pom.xml` 的 `<description>` 不得出现内部过程材料与代号（《设计说明书/概要设计/详设》及 §x.y 节号、Phase N、任务号 P1-NN、任务家族代号 T/S 族、里程碑 M 族、design D[0-9] 决策号、openspec change 名与 spec"XX" 引用）；引用删除后注释须只读自洽，纯修订跟踪句整句删除。门禁：`bash scripts/check-source-citations.sh`（命中即非零退出并定位 file:line，模式集以脚本头注释为准单一事实源；`--selftest` 校验模式集夹具，提交前自查与 CI 共用）。

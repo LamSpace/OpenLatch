@@ -22,7 +22,7 @@ import io.netty.util.AttributeKey;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Channel 绑定的会话簿记：握手状态、sessionId、inflight 计数（设计说明书 §5.1）。
+ * Channel 绑定的会话簿记：握手状态、sessionId、inflight 计数。
  * 实例经 {@link #KEY} 存于 Channel 属性；握手成功后另行登记到
  * {@link ServerSessionRegistry} 供通知桥反查。
  *
@@ -44,7 +44,7 @@ public final class ServerSession {
     private final Channel channel;
     /**
      * 建连时刻（epoch 毫秒，accept 挂载簿记时取样）——管理观察
-     * {@code ADMIN_LIST_SESSIONS} 的"建连时间"来源（Phase 3 T3）。
+     * {@code ADMIN_LIST_SESSIONS} 的"建连时间"来源。
      * final 随构造定型，跨线程观察经对象安全发布（构造先于事件回调）。
      */
     private final long connectedAtMs;
@@ -54,7 +54,7 @@ public final class ServerSession {
     private volatile long sessionId;
     /**
      * 握手协商的客户端协议版本（应答信封回显来源，v2 起服务端按连接协商版本
-     * 出站）。未握手连接的兜底值为 1（Phase 1 默认；推送仅可能发生在握手后，
+     * 出站）。未握手连接的兜底值为 1（推送仅可能发生在握手后，
      * 兜底值实际不可观察）。
      */
     private volatile int protocolVersion = 1;
@@ -135,7 +135,7 @@ public final class ServerSession {
      * 幂等关闭标记：断连清理只执行一次。前提是所有调用点（通道失效、
      * 空闲关闭）都在本连接所属 EventLoop 上串行——读-判-写在该前提下
      * 即足够；若未来允许多线程并发调用，"首次"判定将不成立，须改用
-     * CAS 实现（代码侧待办，登记于变更 design D5）。
+     * CAS 实现（代码侧待办）。
      *
      * @return true 表示本次调用是首次关闭
      */

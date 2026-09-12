@@ -46,7 +46,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 测试用最小协议客户端（design.md D7）：仅收发 {@code Envelope}，不含任何客户端
+ * 测试用最小协议客户端：仅收发 {@code Envelope}，不含任何客户端
  * 锁语义（无看门狗、重连、本地簿记）。响应按 {@code request_id} 关联；
  * {@code AWAIT_NOTIFY} 推送进入独立队列。
  */
@@ -81,7 +81,7 @@ public final class TestProtocolClient implements AutoCloseable {
     }
 
     /**
-     * 建立连接并装配协议 pipeline（Phase 3 T4：{@code sslContext} 非空时开启
+     * 建立连接并装配协议 pipeline（{@code sslContext} 非空时开启
      * TLS——pipeline 首位装配 {@link SslContext} 的 {@code SslHandler}，与明文
      * 形态的其余装配一致）。
      *

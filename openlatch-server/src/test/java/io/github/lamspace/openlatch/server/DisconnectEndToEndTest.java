@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Timeout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 规格"断连会话清理与空闲检测"：持锁断连即时释放、等待中断连摘除、空闲连接被断开。
+ * 断连会话清理与空闲检测：持锁断连即时释放、等待中断连摘除、空闲连接被断开。
  */
 class DisconnectEndToEndTest {
 

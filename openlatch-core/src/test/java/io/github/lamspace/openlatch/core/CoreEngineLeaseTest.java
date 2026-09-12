@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** §10.1 租约用例组（手工时钟，无 sleep）。 */
+/** 租约用例组（手工时钟，无 sleep）。 */
 class CoreEngineLeaseTest {
 
     /** 手工时钟：用例以相对推进驱动租约到期，无 sleep。 */

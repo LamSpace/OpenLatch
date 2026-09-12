@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Timeout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * FairLock 公平性回归套件·服务端端到端档（Phase 3 P3-02，验收 §8-1 常开）：
+ * FairLock 公平性回归套件·服务端端到端档（常开）：
  * 真实端口与真实协议收发，断言"通知推送顺序 == 排队顺序、授予顺序 == 排队
  * 顺序"贯穿线路层。与 core 直驱档（{@code FairOrderingSuiteTest}）、集群档
  * （{@code FairOrderingSuiteClusterTest}）共享同一场景骨架。

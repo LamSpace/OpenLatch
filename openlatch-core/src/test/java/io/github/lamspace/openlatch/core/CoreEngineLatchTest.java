@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T1 CountDownLatch 语义用例组（Phase 3 详设 §2.4 / P3-05）：total
+ * CountDownLatch 语义用例组：total
  * 定型（双通道）、纯初始化、扣减下限、归零全体广播与重发离队、一次性、
  * 等待者无租约（到期零触及）、断连摘除、类型不匹配矩阵。手工时钟，无 sleep。
  */
@@ -118,7 +118,7 @@ class CoreEngineLatchTest {
         assertThat(engine.latchAwait(new LatchAwaitCommand(w2, 12, "l", 0)).outcome()).isEqualTo(Outcome.GRANTED);
         assertThat(engine.latchAwait(new LatchAwaitCommand(w3, 13, "l", 0)).outcome()).isEqualTo(Outcome.GRANTED);
 
-        // 全员离队后一次性护栏持续（条目存续至节点重启，design D5 修订）：
+        // 全员离队后一次性护栏持续（条目存续至节点重启）：
         // 参与者散尽也不回收，晚到纯加入始终直接放行。
         assertThat(engine.latchAwait(new LatchAwaitCommand(w4, 15, "l", 0)).outcome())
                 .isEqualTo(Outcome.GRANTED);

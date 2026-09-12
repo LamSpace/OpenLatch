@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 全量比对工具自测（6.1 交付判据："工具本身正确"——S4 快照比对以它为唯一
+ * 全量比对工具自测（判据："工具本身正确"——快照比对以它为唯一
  * 裁判，裁判 MUST 先于使用被验证）。
  */
 class StateComparisonsTest {

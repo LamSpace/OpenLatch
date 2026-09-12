@@ -33,15 +33,15 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 影子状态表（详设 §4.1 复制边界的逻辑镜像）：状态机应用路径同步维护的
+ * 影子状态表（复制边界的逻辑镜像）：状态机应用路径同步维护的
  * "已复制锁状态"视图，以逻辑会话 id 为归属标识（各副本引擎的内部 sid 不外露）。
  *
- * <p><b>职责</b>：①跨副本一致性摘要的载体（{@link #digest()}，P2-10 退出门与
- * S4 快照比对共用）；②快照序列化结构（{@link #toProto()}/{@link #load}，
- * §7.1 内容 = 锁条目 + 会话注册表，<b>不含</b>等待队列与本地配置，design D9）；
+ * <p><b>职责</b>：①跨副本一致性摘要的载体（{@link #digest()}，一致性断言与
+ * 快照比对共用）；②快照序列化结构（{@link #toProto()}/{@link #load}，
+ * 内容 = 锁条目 + 会话注册表，<b>不含</b>等待队列与本地配置）；
  * ③Leader 侧预检查与到期扫描的无锁读索引（{@link #isHeld}/{@link #isHeldBy}/{@link #heldEntries()}，
  * 供 {@code ReplicationGateway} 与到期驱动消费）；④管理观察的明细投影
- * （{@link #adminEntry}/{@link #adminEntries()}，Phase 3 T3——逐应用点整体
+ * （{@link #adminEntry}/{@link #adminEntries()}，逐应用点整体
  * 重发布、逻辑会话口径、LATCH 亦在列，供 {@code ADMIN_*} 消息跨线程弱一致读）。
  *
  * <p><b>与引擎的双写核算</b>：每次条目应用同时驱动
@@ -54,7 +54,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 读侧 digest/toProto 同线程。无锁索引 {@code heldIndex} 是结构变更的
  * 最终一致投影（{@link ConcurrentHashMap}），跨线程读仅用于预检查/扫描这类
  * "结果可旧不可错"的路径：读到过期状态最多导致一次多余的日志提交或一个
- * 扫描周期的延后，正确性裁决恒在应用路径（§4.5"以应用结果为准"）。
+ * 扫描周期的延后，正确性裁决恒在应用路径。
  *
  * <p><b>顺序契约</b>：锁条目按 key 首次授予的插入序保持（{@link LinkedHashMap}），
  * 会话按登记序保持（{@link LinkedHashSet}），使 {@link #digest()} 跨副本可比；
@@ -74,7 +74,7 @@ public final class ShadowTable {
      * 无锁索引的投影记录：当前租约凭证、到期时刻、持有者集快照与条目的
      * 协议锁类型数值（重入预检消费；holders 快照仅在授予/装载时刷新，
      * 摘除可短暂滞后，判定容错语义见 {@link #isHeldBy}；{@code lockType}
-     * 随条目定型不变，T2 gauge 按家族聚合的读数来源）。
+     * 随条目定型不变，按家族聚合的指标读数来源）。
      *
      * @param leaseToken  当前租约凭证
      * @param expiresAtMs 到期时刻（毫秒时间戳）
@@ -84,7 +84,7 @@ public final class ShadowTable {
     public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders, int lockType) { }
 
     /**
-     * 管理观察的条目全量投影（Phase 3 T3，spec"双形态数据源与集群视角口径"）：
+     * 管理观察的条目全量投影：
      * 应用线程在每次结构变更后自 {@link SLock} 同步发布的不可变明细视图，
      * 以逻辑会话 id 为归属标识（跨节点可对齐；引擎内部 sid 不外露）。
      * 与 {@link HeldRef} 的"授予时点 holders 快照"不同，本视图逐应用点整体
@@ -160,7 +160,7 @@ public final class ShadowTable {
     /** 会话无锁投影（预检查/失联批量清理的跨线程读）。 */
     private final java.util.Set<Long> sessionIndex = java.util.concurrent.ConcurrentHashMap.newKeySet();
     /**
-     * 管理观察明细投影（Phase 3 T3）：key → 不可变全字段视图，应用线程在
+     * 管理观察明细投影：key → 不可变全字段视图，应用线程在
      * 每个结构变更点后整体重发布（发布点与本表 {@link #locks} 的变更同一
      * 应用时刻，读侧弱一致"可旧不可错"）；仅 ADMIN 消费，不参与 digest。
      */
@@ -217,7 +217,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 授予登记（计数增量形态，Phase 3 T1）：Semaphore 一次授予归还多许可，
+     * 授予登记（计数增量形态）：Semaphore 一次授予归还多许可，
      * 影子表按引擎实际持有增量镜像（{@code holderDelta = permits}），锁家族
      * 恒 1——保持与引擎 {@code holders} 计数严格对称，digest 与释放回退
      * 不因许可语义漂移。
@@ -299,7 +299,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 释放登记（计数增量形态，Phase 3 T1）：归还 {@code releaseDelta} 个
+     * 释放登记（计数增量形态）：归还 {@code releaseDelta} 个
      * 持有计数，归零摘除归属；条目无持有者时移除 key。
      *
      * @param sessionId     逻辑会话 id
@@ -391,8 +391,8 @@ public final class ShadowTable {
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
             SLock l = en.getValue();
             if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
-                // 屏障条目存续不随参与者散尽而回收（一次性护栏，design D5
-                // 修订）：仅摘除参与身份，条目留在表内。
+                // 屏障条目存续不随参与者散尽而回收（一次性护栏）：
+                // 仅摘除参与身份，条目留在表内。
                 if (l.latchParticipants.remove(sessionId)) {
                     adminView.put(en.getKey(), viewOf(l));
                 }
@@ -451,7 +451,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 指定归属当前是否持有该 key（Phase 3 T1 重入预检通道）：读取
+     * 指定归属当前是否持有该 key（重入预检通道）：读取
      * {@code heldIndex} 快照的持有者集——快照仅在授予/装载时刷新，
      * 持有者移除后可短暂滞后（"结果可旧不可错"：误判重入也只是多一次
      * 提案，授予与否恒由应用路径引擎裁决；同归属先后授予经
@@ -503,7 +503,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 从 proto 全量恢复（替换当前内容；S4 快照加载使用）。
+     * 从 proto 全量恢复（替换当前内容；快照加载使用）。
      *
      * @param st 快照状态
      */
@@ -549,8 +549,8 @@ public final class ShadowTable {
     }
 
     /**
-     * 全量摘要（SHA-256 hex）：跨副本一致性比对基准（P2-10 退出门、
-     * 故障演练"锁不丢"断言与 S4 快照比对的公共判据）。
+     * 全量摘要（SHA-256 hex）：跨副本一致性比对基准（"锁不丢"断言与
+     * 快照比对的公共判据）。
      *
      * @return 64 位十六进制摘要
      */
@@ -564,7 +564,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 屏障倒计数应用点镜像（Phase 3 T1）：条目不存在则按 {@code total}
+     * 屏障倒计数应用点镜像：条目不存在则按 {@code total}
      * 创建（纯初始化的复制落点），存在则刷新剩余计数并登记参与会话。
      * 参与者散尽的回收经 {@link #dropSessionHolders} 同路径完成。
      *
@@ -663,7 +663,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 指定 key 的管理观察视图（Phase 3 T3，ADMIN_KEY_DETAIL 集群数据源）。
+     * 指定 key 的管理观察视图（ADMIN_KEY_DETAIL 集群数据源）。
      * 跨线程弱一致读：结果可落后于 apply 一至数个变更点，MUST NOT 用于
      * 授予判定。
      *
@@ -675,7 +675,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 全部条目的管理观察视图（Phase 3 T3，ADMIN_LIST_KEYS 集群数据源）。
+     * 全部条目的管理观察视图（ADMIN_LIST_KEYS 集群数据源）。
      *
      * @return key → 视图 的弱一致并发视图（不复制，只读用途）
      */
@@ -684,7 +684,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 按家族聚合的持有中条目数（Phase 3 T2 gauge 读数）：弱一致遍历无锁
+     * 按家族聚合的持有中条目数（gauge 指标读数）：弱一致遍历无锁
      * 投影 {@code heldIndex}（并发读取口径与本类线程模型注释一致——结果
      * 可旧不可错），SEMAPHORE 家族按 {@code lockType} 归组、其余投影条目
      * 归锁家族；LATCH 无持有语义、恒不入投影，天然排除。
@@ -715,7 +715,7 @@ public final class ShadowTable {
     }
 
     /**
-     * 摘要输入的字节长度（digest 前序列化开销的观测口，P2-10 记录用）。
+     * 摘要输入的字节长度（digest 前序列化开销的观测口）。
      *
      * @return {@link #toProto()} 序列化的字节数
      */

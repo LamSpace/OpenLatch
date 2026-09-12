@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 配置加载（设计说明书 §5.7）：默认值、空白路径回落、Properties 覆盖、缺省键回落、
+ * 配置加载：默认值、空白路径回落、Properties 覆盖、缺省键回落、
  * 非法值快速失败（指明配置键）、配置文件缺失快速失败、port=0 临时端口绑定、
  * 租约序约束与 core 映射。
  */
@@ -129,7 +129,7 @@ class ServerConfigTest {
                 .hasMessageContaining("port");
     }
 
-    /** 端口 0（OS 分配临时端口）经配置文件合法（变更 phase1-audit-remediation design D5）。 */
+    /** 端口 0（OS 分配临时端口）经配置文件合法。 */
     @Test
     void port_zero_loads_for_ephemeral_bind() throws IOException {
         Path file = tempDir.resolve("zero-port.properties");

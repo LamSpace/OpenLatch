@@ -9,12 +9,12 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link LeaderTracker} 提示视图契约单元测试（s3 design D3/D4）：
+ * {@link LeaderTracker} 提示视图契约单元测试：
  * {@code -1} 的确切语义（"本节点尚未取得 Leader 身份"——初始态或显式
  * no-leader 事件）、地址解析与缺映射降级、视图生成。
  *
  * <p>注意 leader 死亡过渡期 Ratis 不向 follower 投 null 事件，提示保持
- * 最后已知值属预期行为（陈旧性由客户端改连失败 + 强制发现兜底，design D3），
+ * 最后已知值属预期行为（陈旧性由客户端改连失败 + 强制发现兜底），
  * 本测试只钉死"事件→视图"的折算规则。
  */
 class LeaderTrackerTest {
@@ -55,7 +55,7 @@ class LeaderTrackerTest {
         LeaderTracker t = new LeaderTracker(cfg(false));
         t.onLeaderChanged(3);
         assertThat(t.snapshot().leaderNodeId()).isEqualTo(3);
-        assertThat(t.snapshot().leaderAddress()).isEmpty(); // design D4 降级：空串 + 客户端种子发现
+        assertThat(t.snapshot().leaderAddress()).isEmpty(); // 降级：空串 + 客户端种子发现
         assertThat(t.clusterView().getNodesList().stream()
                 .filter(NodeInfo::getIsLeader).map(NodeInfo::getNodeId).toList())
                 .containsExactly(3L);

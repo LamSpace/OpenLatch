@@ -18,7 +18,7 @@ package io.github.lamspace.openlatch.client;
 
 /**
  * 获取锁的总等待时限（调用方指定的等待时长或 {@code lock()} 的兜底超时）
- * 到达而仍未被授予时抛出（详设 §6.3）。
+ * 到达而仍未被授予时抛出。
  *
  * <p>与 {@link OpenLatchTimeoutException} 的区别：前者是 <b>等待整体</b>
  * 超时（期间可能经历了多次请求/重发），后者是 <b>单个请求</b> 无响应。

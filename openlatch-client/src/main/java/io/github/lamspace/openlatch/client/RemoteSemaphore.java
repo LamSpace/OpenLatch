@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * {@link OSemaphore} 的远程实现（Phase 3 详设 §2.3 / P3-04）：许可裁决全部
+ * {@link OSemaphore} 的远程实现：许可裁决全部
  * 在服务端（{@code SemaphoreEntry}），本地复用 {@link RemoteLock} 同源的
  * 桥接机制——阻塞上界（等待时长 + 请求超时 + 余量）、中断补偿归还、
  * 授予登记与看门狗续租、丢失裁决。

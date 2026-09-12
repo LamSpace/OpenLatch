@@ -18,8 +18,8 @@ package io.github.lamspace.openlatch.core.result;
 
 /**
  * 获取结果。将协议单值 {@code REJECT_KEY} 细分为
- * {@link #REJECT_KEY_EMPTY} / {@link #REJECT_KEY_TOO_LONG} 两值
- * （设计说明书 v1.2 §4.2 已同步为两值），使 server 层无需重校验即可映射到
+ * {@link #REJECT_KEY_EMPTY} / {@link #REJECT_KEY_TOO_LONG} 两值，
+ * 使 server 层无需重校验即可映射到
  * 协议 {@code KEY_EMPTY} / {@code KEY_TOO_LONG}。
  *
  * <p><b>返回步骤与优先级</b>：会话校验（{@link #REJECT_SESSION}）→
@@ -59,16 +59,16 @@ public enum Outcome {
     REJECT_TYPE_MISMATCH,
     /**
      * 拒绝：Semaphore 许可总量断言不成立——建条目请求缺失 {@code > 0}
-     * 的 {@code permitsTotal}，或既有条目上非零主张与定型值不符
-     * （Phase 3 T1 详设 §2.3 / design D1）；条目状态零扰动，server 层
+     * 的 {@code permitsTotal}，或既有条目上非零主张与定型值不符；
+     * 条目状态零扰动，server 层
      * 映射协议 {@code INVALID_REQUEST}。
      */
     REJECT_SEMAPHORE_TOTAL,
     /**
      * 拒绝：Latch 初始计数断言不成立——屏障不存在且请求（countDown/await
      * 任一通道）未携带 {@code > 0} 的 {@code total}（含对不存在屏障的无断言
-     * 扣减/挂起），或既有屏障上非零主张与定型值不符（Phase 3 详设 §2.4 /
-     * design D1）；条目状态零扰动，server 层映射协议 {@code INVALID_REQUEST}。
+     * 扣减/挂起），或既有屏障上非零主张与定型值不符；条目状态零扰动，
+     * server 层映射协议 {@code INVALID_REQUEST}。
      */
     REJECT_LATCH_TOTAL
 }

@@ -27,9 +27,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * HELLO 业务令牌认证门控（Phase 3 详设 §5.2/§10.4 P3-16，spec"业务令牌认证与
- * 默认兼容守卫"）：开启命中放行/失败同形拒绝并断连零会话副作用、多令牌双活、
- * 摘令牌后被拒、默认关闭维持 Phase 1"非空即拒"兼容守卫。
+ * HELLO 业务令牌认证门控：开启命中放行/失败同形拒绝并断连零会话副作用、多令牌双活、
+ * 摘令牌后被拒、默认关闭维持"非空即拒"兼容守卫。
  */
 class AuthHandshakeTest {
 
@@ -144,7 +143,7 @@ class AuthHandshakeTest {
     }
 
     @Test
-    void authOffKeepsPhase1Guard() throws Exception {
+    void authOffKeepsCompatGuard() throws Exception {
         OpenLatchServer server = startDefaultServer();
         try (TestProtocolClient plain = new TestProtocolClient()) {
             plain.connect("127.0.0.1", server.port());
@@ -155,7 +154,7 @@ class AuthHandshakeTest {
         try (TestProtocolClient token = new TestProtocolClient()) {
             token.connect("127.0.0.1", server.port());
             Envelope resp = token.sendAndAwait(helloEnvelope(token.nextRequestId(), "unexpected"));
-            // 默认关闭 = Phase 1 兼容守卫：非空令牌仍被拒（spec 兼容回归）。
+            // 默认关闭 = v1 兼容守卫：非空令牌仍被拒（兼容回归）。
             assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);
             awaitClosed(token, 3000);
         }

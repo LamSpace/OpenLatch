@@ -18,13 +18,13 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 10 万锁条目快照基准（详设 §2.4 门槛 + §10"快照"层，S4/P2-16 验证列
- * "恢复 &lt; 30s；全量比对一致"，design D9）。
+ * 10 万锁条目快照基准（门槛判据：
+ * 恢复 &lt; 30s、全量比对一致）。
  *
  * <p><b>构造取向</b>：apply 直灌（每条目独立序列化→解析→应用，贴近真实
  * apply 路径而不引入网络吞吐变量）。状态形态刻意含 <b>历史释放空洞</b>
  * （5 万条 acquire+release 交错）与双持有（读锁两读者/重入两读者），使
- * 基准同时是 design D10 发号水位在规模下的判据载体。
+ * 基准同时是发号水位在规模下的判据载体。
  *
  * <p><b>度量口径</b>：序列化（applyLock 内一致性副本）、落盘（真实磁盘写
  * +原子 rename+MD5 伴随）、加载（快照解析+引擎重建）、尾部回放到"恢复完成"
@@ -34,13 +34,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(value = 240, unit = TimeUnit.SECONDS)
 class SnapshotBenchmarkTest {
 
-    /** 存活锁条目数（§2.4 规模）。 */
+    /** 存活锁条目数（基准规模）。 */
     private static final int LIVE_LOCKS = 100_000;
     /** 释放空洞条目对数（acquire+release 各一）。 */
     private static final int CHURN_PAIRS = 50_000;
     /** 逻辑会话数。 */
     private static final int SESSIONS = 500;
-    /** 恢复完成判定阈值（毫秒，§2.4 门槛 30s）。 */
+    /** 恢复完成判定阈值（毫秒，门槛 30s）。 */
     private static final long RECOVERY_BUDGET_MS = 30_000;
 
     @Test
@@ -137,7 +137,7 @@ class SnapshotBenchmarkTest {
         System.out.printf("[bench] liveLocks=%d entries=%d snapshotBytes=%d "
                         + "serializeMs=%d writeMs=%d recoveryMs(install+tail)=%d budgetMs=%d%n",
                 LIVE_LOCKS, seq, bytes.length, serializeMs, writeMs, recoveryMs, RECOVERY_BUDGET_MS);
-        assertThat(recoveryMs).as("加载+回放恢复总耗时（§2.4：10 万条目 < 30s）")
+        assertThat(recoveryMs).as("加载+回放恢复总耗时（10 万条目 < 30s）")
                 .isLessThan(RECOVERY_BUDGET_MS);
 
         Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(f -> {

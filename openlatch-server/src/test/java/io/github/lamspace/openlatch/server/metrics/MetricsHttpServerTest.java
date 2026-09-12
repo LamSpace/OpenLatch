@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 管理端口 HTTP 服务（spec"管理端点仅两路径"）：临时端口绑定、两路径响应
+ * 管理端口 HTTP 服务（管理端点仅两路径）：临时端口绑定、两路径响应
  * 与 Content-Type、未知路径/方法 404、关停解除绑定、端口冲突快速失败。
  */
 class MetricsHttpServerTest {

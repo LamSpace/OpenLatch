@@ -52,7 +52,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 单节点管理客户端（Phase 3 T3 design D6）：懒连接、HELLO(v3) 后同步
+ * 单节点管理客户端：懒连接、HELLO(v3) 后同步
  * ADMIN 问答、断线懒重连、认证失败退避——控制台与服务端之间唯一的管理
  * 协议通道，每节点一实例（{@link AdminClientPool} 编排）。
  *
@@ -68,9 +68,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p><b>失败面</b>：连接/读写异常与超时统一折算 {@link AdminUnavailableException}
  * （kind=UNREACHABLE/TIMEOUT）；ADMIN 应答携带 {@code INVALID_REQUEST} 且随后
- * 连接被服务端断开（令牌被拒的线路形态，spec"管理令牌认证"）折算 kind=AUTH，
- * 并进入退避窗（默认 30s）——退避窗内 MUST NOT 反复重握手造成风暴
- * （spec"节点连接管理与故障降级"）。
+ * 连接被服务端断开（令牌被拒的线路形态）折算 kind=AUTH，
+ * 并进入退避窗（默认 30s）——退避窗内 MUST NOT 反复重握手造成风暴。
  *
  * <p><b>线程模型</b>：{@code request*} 由 Web 线程调用（synchronized 串行）；
  * Netty EventLoop 仅完成 promise 投递；实例字段经 {@code synchronized(this)}
@@ -91,7 +90,7 @@ public final class AdminClient implements AutoCloseable {
     private final long timeoutMs;
     /** 共享 IO 线程组（由池创建，本实例不拥有）。 */
     private final EventLoopGroup group;
-    /** 节点 TLS 上下文（Phase 3 T4）；{@code null} 即明文（明文形态与 T3 一致）。 */
+    /** 节点 TLS 上下文；{@code null} 即明文。 */
     private final SslContext sslContext;
     /** 业务令牌（HELLO 携带）；{@code null} 表示服务端业务认证关闭或未配置。 */
     private final String businessToken;
@@ -106,7 +105,7 @@ public final class AdminClient implements AutoCloseable {
     private volatile long authBackoffUntilMs;
 
     /**
-     * 构造单节点客户端（不连接；明文、无业务令牌——T4 前的既有形态）。
+     * 构造单节点客户端（不连接；明文、无业务令牌）。
      *
      * @param address   目标节点地址
      * @param token     管理令牌
@@ -119,7 +118,7 @@ public final class AdminClient implements AutoCloseable {
     }
 
     /**
-     * 构造单节点客户端（Phase 3 T4 全形态：可选节点 TLS 与业务令牌）。
+     * 构造单节点客户端（可选节点 TLS 与业务令牌）。
      *
      * @param address       目标节点地址
      * @param token         管理令牌
@@ -288,7 +287,7 @@ public final class AdminClient implements AutoCloseable {
                     .handler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel c) {
-                            // TLS 必居 pipeline 首位（Phase 3 T4）：握手/加解密先于
+                            // TLS 必居 pipeline 首位：握手/加解密先于
                             // 分帧编解码；与服务端/客户端同构。
                             if (sslContext != null) {
                                 c.pipeline().addLast("ssl", sslContext.newHandler(c.alloc()));
@@ -315,7 +314,7 @@ public final class AdminClient implements AutoCloseable {
         }
         channel = ch;
         // HELLO v3：配置了业务令牌即随 HELLO 携带（服务端业务认证开启时必需——
-        // 认证开启下逐消息 admin-token 不构成 HELLO 放行依据，spec"不可借道"）；
+        // 认证开启下逐消息 admin-token 不构成 HELLO 放行依据）；
         // 未配置（认证关闭）维持既有"auth_token 留空"形态。client_name 自证身份。
         long rid = requestSeq.incrementAndGet();
         CompletableFuture<Envelope> future = new CompletableFuture<>();

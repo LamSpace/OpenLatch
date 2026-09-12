@@ -12,7 +12,7 @@
 
     <artifactId>openlatch-server</artifactId>
     <name>openlatch-server</name>
-    <description>OpenLatch Netty 单节点服务器（M2 交付）</description>
+    <description>OpenLatch Netty 服务器（单节点与 Raft 集群形态）</description>
 
     <dependencies>
         <dependency>

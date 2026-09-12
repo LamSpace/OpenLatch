@@ -22,17 +22,17 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
- * {@code openlatch.*} 配置属性（详设 §8.2 全表）。
+ * {@code openlatch.*} 配置属性。
  *
- * <p><b>职责</b>：绑定并承载 starter 的全部可配置项，缺省值即详设 §8.2
- * 默认列；由 {@link OpenLatchAutoConfiguration} 映射到
+ * <p><b>职责</b>：绑定并承载 starter 的全部可配置项，缺省值即下方
+ * {@code @param} 所列默认值；由 {@link OpenLatchAutoConfiguration} 映射到
  * {@link io.github.lamspace.openlatch.client.OpenLatchClient.Builder}。
  *
  * <p><b>契约边界</b>：仅承载配置，不做校验——时长为正、退避上限不小于初始值等
  * 约束由客户端 Builder 单一事实源校验（违例在 Bean 创建期以
  * {@link IllegalArgumentException} 失败，应用上下文启动中止）。
  * {@code enabled=false} 仅关闭 {@code @OpenLatch} 切面注册，客户端 Bean 照常
- * 装配（design D4）。时长类属性支持标准 Duration 写法（如 {@code 5s}、
+ * 装配。时长类属性支持标准 Duration 写法（如 {@code 5s}、
  * {@code 100ms}）。
  *
  * @param enabled                 注解与切面总开关，默认 {@code true}；关闭后

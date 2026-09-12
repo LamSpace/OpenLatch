@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 服务器生命周期（设计说明书 §5.2/§5.6）：监听与端口释放、端口冲突快速失败与资源回收、
+ * 服务器生命周期：监听与端口释放、端口冲突快速失败与资源回收、
  * 关停幂等与未启动即关停的安全性。
  */
 class OpenLatchServerTest {

@@ -23,16 +23,15 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * 管理观察配置（Phase 3 详设 §4.2 T3，spec"管理令牌认证"；
- * {@code openlatch.server.admin.*} 键族）。
+ * 管理观察配置（{@code openlatch.server.admin.*} 键族）。
  *
  * <p><b>与 {@link ServerConfig}/{@link MetricsConfig} 的关系</b>：同一
  * Properties 文件的管理子集，独立记录而非扩展既有记录（"同文件独立加载"
  * 先例，构造面不受扰动）。
  *
- * <p><b>令牌承载通道（change design D1）</b>：管理令牌经每条 ADMIN 请求
+ * <p><b>令牌承载通道</b>：管理令牌经每条 ADMIN 请求
  * 的 {@code token} 字段承载、逐请求校验，MUST NOT 占用 HELLO 的
- * {@code auth_token}（Phase 1"非空即断连"规则保持，T4 业务令牌通道
+ * {@code auth_token}（其"非空即断连"规则保持，与业务令牌通道
  * 互不纠缠）。
  *
  * <p><b>默认值口径</b>：未配置（{@code path} 空白、键缺省或值为空白串）
@@ -43,7 +42,7 @@ import java.util.Properties;
  */
 public record AdminConfig(String token) {
 
-    /** 配置键前缀（详设 §4.2）。 */
+    /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.server.admin.";
 
     /**

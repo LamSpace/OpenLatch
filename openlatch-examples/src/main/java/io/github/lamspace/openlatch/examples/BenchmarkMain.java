@@ -33,11 +33,11 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 
 /**
- * 基准 harness（详设 §9/§10.5，design D5 手写方案）：
+ * 基准 harness（手写方案）：
  * 产出三项基线指标——无竞争 {@code tryLock} 往返吞吐、竞争（16/64 线程）
  * 吞吐、竞争授予延迟分位数（蓄水池采样，P50/P99）。
  *
- * <p><b>定位</b>：记录为基线防退化参考，<b>不作发布门槛</b>（§10.5）；
+ * <p><b>定位</b>：记录为基线防退化参考，<b>不作发布门槛</b>；
  * 结果写入 {@code docs/benchmark-baseline-<date>.md}（可用系统属性
  * {@code -Dbenchmark.output=<path>} 覆盖），报告注明机器/JDK/服务器档位。
  *
@@ -369,9 +369,9 @@ public final class BenchmarkMain {
                                        List<List<long[]>> contThroughput,
                                        List<List<double[]>> latencies) {
         StringBuilder sb = new StringBuilder();
-        sb.append("# OpenLatch Phase 1 基准基线\n\n");
+        sb.append("# OpenLatch 基准基线\n\n");
         sb.append("生成：").append(java.time.LocalDate.now())
-                .append("　来源：`BenchmarkMain`（design D5 手写 harness）\n\n");
+                .append("　来源：`BenchmarkMain`（手写 harness）\n\n");
         sb.append("## 环境\n\n");
         sb.append("| 项 | 值 |\n|---|---|\n");
         sb.append("| OS | ").append(System.getProperty("os.name"))
@@ -399,7 +399,7 @@ public final class BenchmarkMain {
                     .append(" |\n");
         }
         sb.append("\n> 竞争场景延迟列为**授予延迟**（发起到授予，含排队）。")
-                .append("本基线仅作防退化参考，不作发布门槛（详设 §10.5）。\n");
+                .append("本基线仅作防退化参考，不作发布门槛。\n");
         return sb.toString();
     }
 

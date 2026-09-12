@@ -18,11 +18,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 成员变更用例（详设 §7.4/§10，S4/P2-17 验证列"加节点追赶、删节点用例通过"，
- * spec cluster-node-lifecycle"成员变更运维"三场景）。
+ * 成员变更用例（验证列"加节点追赶、删节点用例通过"，成员变更运维三场景）。
  *
- * <p>编排口径与部署文档一致（design D6）：加=listener 加入→追赶收敛→升
- * voter；删=单步出组＋被移除节点会话的显式批量清理（同 §5.2 规则 4 车道）。
+ * <p>编排口径与部署文档一致：加=listener 加入→追赶收敛→升
+ * voter；删=单步出组＋被移除节点会话的显式批量清理（与会话批量清理同车道）。
  */
 @Timeout(value = 180, unit = TimeUnit.SECONDS)
 class ClusterMembershipTest {
@@ -77,7 +76,7 @@ class ClusterMembershipTest {
 
             // 升 voter：四投票者全集。
             leader.runtime.subsystem().setMembers(specsOf(h, h.nodes()), List.of());
-            // 升票后可当选并服务（§7.4"先加后删"的验证端）。
+            // 升票后可当选并服务（"先加后删"的验证端）。
             h.transferLeadership(4);
             h.awaitTrue(() -> {
                 ClusterHarness.Node l = h.leader();
@@ -99,7 +98,7 @@ class ClusterMembershipTest {
             ClusterHarness.Node victim = h.nodes().stream()
                     .filter(x -> !x.isLeader()).findFirst().orElseThrow();
 
-            // 让 victim 先当主：其接入的会话才能持有锁（ACQUIRE 角色门 §4.5）。
+            // 让 victim 先当主：其接入的会话才能持有锁（ACQUIRE 角色门）。
             h.transferLeadership(victim.id);
             h.awaitTrue(() -> {
                 ClusterHarness.Node l = h.leader();

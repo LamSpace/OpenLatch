@@ -17,11 +17,11 @@
 package io.github.lamspace.openlatch.console.admin;
 
 /**
- * 管理通道不可用异常（Phase 3 T3）：控制台侧对"节点查询失败"的单一收口
+ * 管理通道不可用异常：控制台侧对"节点查询失败"的单一收口
  * 类型——Web 层按 {@link Kind} 分流降级呈现（认证失败横幅 vs 不可达标注）。
  *
  * <p>非受检：页面装配路径上每个节点查询都是"尽力而为 + 局部降级"，
- * 受检异常会把降级逻辑撕成样板（详设 §4.3 只读容错取向）。
+ * 受检异常会把降级逻辑撕成样板（只读容错取向）。
  */
 public class AdminUnavailableException extends RuntimeException {
 

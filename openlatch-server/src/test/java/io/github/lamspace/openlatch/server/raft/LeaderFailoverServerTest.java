@@ -22,9 +22,8 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * S3/P2-12 服务端角色语义集成测试（spec"Follower 写请求分车道"全场景 +
- * "Leader 提示的权威来源"一致性场景 + cluster-node-lifecycle"非 Leader
- * 节点的查询应答"）。
+ * 服务端角色语义集成测试（Follower 写请求分车道全场景 +
+ * Leader 提示的权威来源一致性场景 + 非 Leader 节点的查询应答）。
  *
  * <p>基座 {@link ClusterHarness}（v2 HELLO、合成 client-addresses 接入表、
  * Ratis transferLeadership 存活让位）。每用例独立集群，{@code @Timeout} 兜底。
@@ -120,7 +119,7 @@ class LeaderFailoverServerTest {
             long token = g.getAcquireResponse().getLeaseToken();
             assertThat(g.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
 
-            // 存活让位：原 Leader 进程/连接/会话全活，角色转 Follower（§8 行 2）
+            // 存活让位：原 Leader 进程/连接/会话全活，角色转 Follower
             int target = oneFollower(h).id;
             h.transferLeadership(target);
             h.awaitTrue(() -> {
@@ -155,8 +154,8 @@ class LeaderFailoverServerTest {
             h.awaitTrue(() -> !h.hasLeader(), 10_000, "仅剩单节点无 Leader");
 
             // ACQUIRE 10s 内必有 NOT_LEADER 应答（无悬挂）。提示为最后已知 Leader
-            // 或 -1（视 Ratis 是否投 null 事件）——均不阻塞客户端（design D3：
-            // 陈旧提示由客户端改连失败 + 强制发现兜底）。
+            // 或 -1（视 Ratis 是否投 null 事件）——均不阻塞客户端
+            // （陈旧提示由客户端改连失败 + 强制发现兜底）。
             Envelope resp = c.request(acquire(2, "eg"));
             assertThat(resp.getAcquireResponse().getStatus()).isEqualTo(StatusCode.NOT_LEADER);
             assertThat(resp.getAcquireResponse().getLeaderNodeId())

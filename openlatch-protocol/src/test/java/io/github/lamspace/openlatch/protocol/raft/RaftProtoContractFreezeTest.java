@@ -19,7 +19,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * raft.proto 编号契约冻结测试（详设 §4.2 / §7.1，spec"条目编号冻结"）。
+ * raft.proto 编号契约冻结测试（条目编号冻结）。
  *
  * <p>日志条目与快照的字段号/枚举值一经发布即持久化兼容性契约：变更或复用
  * 编号会让存量日志与快照在回放时静默错位。本测试把生成描述符的全量

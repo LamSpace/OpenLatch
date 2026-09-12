@@ -30,10 +30,10 @@ import org.junit.jupiter.api.Timeout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Phase 3 T2 集群路径 L1/L3 用例（spec"请求埋点覆盖单机与集群双路径"/
- * "Gauge 取值语义与采样安全"）：Leader 授予-排队-释放-续租失败的计数与
+ * 集群路径 L1/L3 用例（请求埋点覆盖单机与集群双路径、
+ * Gauge 取值语义与采样安全）：Leader 授予-排队-释放-续租失败的计数与
  * 耗时档位、复制态 gauge（held/waiters/队深/is_leader）、Follower 的
- * {@code NOT_LEADER} 计数（证明集群路径非盲，§3.4 勘误的回归锁定）、
+ * {@code NOT_LEADER} 计数（证明集群路径非盲，勘误的回归锁定）、
  * 租约到期各副本恰 +1（在途重试与守卫空操作零计）。
  */
 @Timeout(value = 120, unit = java.util.concurrent.TimeUnit.SECONDS)

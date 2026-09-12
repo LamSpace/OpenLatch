@@ -1,4 +1,4 @@
-# raft.proto 编号契约冻结基准（详设 §4.2 / §7.1）。
+# raft.proto 编号契约冻结基准。
 # 由 RaftProtoContractFreezeTest 与生成描述符逐行比对。
 # 纪律：已发布字段的名称与编号 MUST NOT 变更或复用；新增字段只许追加并同步本文件。
 enum RaftEntryType

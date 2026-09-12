@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 /**
- * 等待跟踪器（详设 §6.5）：管理排队中的获取请求全生命周期。
+ * 等待跟踪器：管理排队中的获取请求全生命周期。
  *
  * <p><b>状态机</b>：
  * <pre>
@@ -50,13 +50,13 @@ import java.util.function.BiConsumer;
  *   ├─ DENIED   → future 失败（LockDeniedException），等待结束
  *   └─ 错误码   → future 失败（携带状态码），等待结束
  * 挂起中：
- *   ├─ AWAIT_NOTIFY → 以同一 requestId 重发（服务端幂等，§4.8）
+ *   ├─ AWAIT_NOTIFY → 以同一 requestId 重发（服务端幂等）
  *   ├─ 重发响应 OK/QUEUED/错误 → 同上各分支
- *   ├─ 重发请求超时 → 仅结束该次重发，保持挂起等待下一次通知（design.md D1）
+ *   ├─ 重发请求超时 → 仅结束该次重发，保持挂起等待下一次通知
  *   └─ 用户总超时 → future 失败（LockAcquisitionTimeoutException），等待结束
  * </pre>
  *
- * <p><b>补偿归还（design.md D3）</b>：等待以任何方式结束后，其 {@code requestId}
+ * <p><b>补偿归还</b>：等待以任何方式结束后，其 {@code requestId}
  * 在保留窗口内维持 {@code requestId → (key, threadId)} 映射；无挂起项匹配的
  * 授予响应（孤儿 OK）到达时发送补偿 {@code RELEASE} 归还，防止锁泄漏。
  * 覆盖三种孤儿时序：重复通知双授予、总超时后在途重发被授予、断连外的一切
@@ -88,7 +88,7 @@ public final class AwaitTracker {
     /** 已结束等待映射的保留时长（毫秒）。 */
     private final long abandonedRetentionMs;
     /**
-     * v2 {@code NOT_LEADER} 接管钩子（S3 客户端重定向，详设 §6.3）：
+     * v2 {@code NOT_LEADER} 接管钩子（客户端重定向）：
      * 默认空实现（返回 false，按错误码失败等待——v1/单机语义回归不变）。
      */
     private volatile NotLeaderHandler notLeaderHandler = request -> false;
@@ -149,7 +149,7 @@ public final class AwaitTracker {
         private final CompletableFuture<LockGrant> userFuture;
         /** 等待总超时任务句柄；不限时等待为 {@code null}。 */
         private Timeout totalTimeoutTask;
-        /** 是否曾收到 QUEUED：重发超时保持挂起（D1）的判定依据。 */
+        /** 是否曾收到 QUEUED：重发超时保持挂起的判定依据。 */
         private volatile boolean everQueued;
         /** 等待总截止时刻（epoch 毫秒；{@code Long.MAX_VALUE}=不限时/立即式）。 */
         private final long deadlineMs;
@@ -222,7 +222,7 @@ public final class AwaitTracker {
 
     /**
      * 处理服务端队首通知：命中挂起项则以同一 {@code requestId} 重发；
-     * 未命中（等待已超时/失败/完成）则忽略（详设 §6.5 边界场景）。
+     * 未命中（等待已超时/失败/完成）则忽略。
      *
      * @param notify 通知消息
      */
@@ -245,7 +245,7 @@ public final class AwaitTracker {
      * 仅处理获取响应：
      * <ul>
      *   <li>等待仍挂起（重发请求超时后响应才到）→ 按正常授予/失败处理；</li>
-     *   <li>等待已结束且在保留窗口内 → 对授予发送补偿释放（D3）。</li>
+     *   <li>等待已结束且在保留窗口内 → 对授予发送补偿释放。</li>
      * </ul>
      *
      * @param envelope 孤儿信封
@@ -273,7 +273,7 @@ public final class AwaitTracker {
     }
 
     /**
-     * 断连清空：全部挂起等待以给定原因快速失败（详设 §6.2）。
+     * 断连清空：全部挂起等待以给定原因快速失败。
      *
      * @param cause 失败原因
      */
@@ -302,7 +302,7 @@ public final class AwaitTracker {
     }
 
     /**
-     * 可迁移等待快照（S3 Leader 改道：本车道降级时挂起项向新主车道的
+     * 可迁移等待快照（Leader 改道：本车道降级时挂起项向新主车道的
      * 重新排队移交上下文）。
      *
      * @param requestId   原请求 id（新车道重放将换新 id）
@@ -368,8 +368,8 @@ public final class AwaitTracker {
 
     /**
      * 错型响应处理（协议违例防御）：首次请求收到错型响应 → 等待失败；
-     * 重发阶段收到错型响应 → 保持挂起等待下一次通知（与 D1 同调：
-     * 等待项在服务端队列中的资格不因一次异常响应而丧失）。
+     * 重发阶段收到错型响应 → 保持挂起等待下一次通知
+     * （等待项在服务端队列中的资格不因一次异常响应而丧失）。
      *
      * @param entry 等待条目
      * @param resp  错型信封
@@ -393,7 +393,7 @@ public final class AwaitTracker {
 
     /**
      * 请求收发失败处理：首次请求失败 → 等待失败；<b>重发</b>失败仅结束该次
-     * 重发、保持挂起等待下一次通知（design.md D1），由等待总超时兜底。
+     * 重发、保持挂起等待下一次通知，由等待总超时兜底。
      *
      * @param entry 等待条目
      * @param err   失败原因
@@ -507,7 +507,7 @@ public final class AwaitTracker {
 
     /**
      * 等待总超时回调：终止等待并以 {@link LockAcquisitionTimeoutException}
-     * 失败用户 future。服务端队列条目按 §6.3 惰性回收。
+     * 失败用户 future。服务端队列条目惰性回收。
      *
      * @param requestId 超时的请求 id
      */

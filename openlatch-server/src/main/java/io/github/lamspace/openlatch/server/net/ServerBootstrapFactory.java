@@ -22,8 +22,8 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 
 /**
- * Netty ServerBootstrap 构建（设计说明书 §5.2）：boss/worker 线程组均由
- * 调用方传入并原样装配（本应用按 §5.2 取 boss=1、worker 可配置，选择
+ * Netty ServerBootstrap 构建：boss/worker 线程组均由
+ * 调用方传入并原样装配（本应用取 boss=1、worker 可配置，选择
  * 在 {@code OpenLatchServer} 侧，工厂自身不约束线程数）。
  */
 public final class ServerBootstrapFactory {

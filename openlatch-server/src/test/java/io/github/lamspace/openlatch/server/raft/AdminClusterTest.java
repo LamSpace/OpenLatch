@@ -37,7 +37,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 管理协议集群档消息级用例（spec"双形态数据源与集群视角口径"）：
+ * 管理协议集群档消息级用例（双形态数据源与集群视角口径）：
  * 三节点 {@link ClusterHarness} 基座上直驱 {@link AdminRequestHandler}
  * （每节点一个处理器实例，数据源为该节点运行时）——覆盖复制态镜像跨
  * 副本可查、等待队列 Leader 专属标注、会话列表按接入节点分治、SUMMARY
@@ -162,7 +162,7 @@ class AdminClusterTest {
         assertThat(kd.getHoldersList().get(0).getSessionId()).isEqualTo(holderSid);
         assertThat(kd.getWaitersList().get(0).getSessionId()).isEqualTo(waiterSid);
         assertThat(kd.getWaitersList().get(0).getPosition()).isEqualTo(1);
-        // 逻辑会话高位 = 接入节点 id（spec"接入节点由会话 id 高位导出"）。
+        // 逻辑会话高位 = 接入节点 id（接入节点由会话 id 高位导出）。
         assertThat(holderSid >>> 32).isEqualTo(leader.id);
 
         // 会话列表分治：Leader 列 2、Follower 列 0。
@@ -208,7 +208,7 @@ class AdminClusterTest {
         admin(leader, handler, conn, listSessions(6));
         admin(leader, handler, conn, summary(7));
         List<Long> after = harness.nodes().stream().map(ClusterHarness.Node::lastApplied).toList();
-        assertThat(after).isEqualTo(before); // spec"管理查询不产生复制日志条目"
+        assertThat(after).isEqualTo(before); // 管理查询不产生复制日志条目
         harness.setProbesEnabled(true);
     }
 }

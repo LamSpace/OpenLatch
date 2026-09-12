@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.client;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 分布式倒计数屏障（Phase 3 详设 §2.4 / P3-06）：一次性倒计数栅栏，
+ * 分布式倒计数屏障：一次性倒计数栅栏，
  * 计数归零瞬间全体等待者放行。
  *
  * <p><b>定型与初始化</b>：初始计数由携带非零 {@code total} 断言的首个请求
@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  * 持有资源、不参与看门狗与续租。
  *
  * <p><b>一次性</b>：归零后 {@code await} 立即通过、{@code countDown} 为
- * 无操作；不支持重置——新一轮屏障使用新 key（详设 §2.4 文档化约定）。
+ * 无操作；不支持重置——新一轮屏障使用新 key。
  *
  * <p><b>countDown 的投递语义</b>：至多一次——请求超时以异常结束并交由
  * 调用方裁决（服务端结果不可知，客户端不自动重发以防重复扣减）。

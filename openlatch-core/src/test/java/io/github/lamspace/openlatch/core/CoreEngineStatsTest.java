@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T2 只读统计观察面用例（spec"只读统计观察面"）：稳态精确断言
+ * 只读统计观察面用例：稳态精确断言
  * （held 按家族、LATCH 排除、等待者含 awaiter、队深、会话数）与
  * 并发读数安全（无异常、弱一致合理区间）。手工时钟，无 sleep。
  */

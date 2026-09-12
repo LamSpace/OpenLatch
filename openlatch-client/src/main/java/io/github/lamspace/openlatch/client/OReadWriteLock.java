@@ -17,11 +17,11 @@
 package io.github.lamspace.openlatch.client;
 
 /**
- * 读写锁门面（详设 §6.3）：同一锁键上的读/写两个 {@link OLock} 句柄。
+ * 读写锁门面：同一锁键上的读/写两个 {@link OLock} 句柄。
  *
- * <p>读写互斥与严格 FIFO 由服务端裁决（详设 §4.4 规则 5）：
+ * <p>读写互斥与严格 FIFO 由服务端裁决：
  * 有写持有者或等待队列非空时读者排队，杜绝写者饥饿。
- * Phase 1 不支持持读升级写或持写降级读的特判。
+ * 不支持持读升级写或持写降级读的特判。
  */
 public interface OReadWriteLock {
 

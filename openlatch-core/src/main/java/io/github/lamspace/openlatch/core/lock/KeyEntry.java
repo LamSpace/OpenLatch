@@ -28,7 +28,7 @@ import java.util.List;
  * 回收、已通知队首清扫）。授予/释放/续租等命令语义 MUST NOT 进入本接口——各家族
  * 差异大（锁有读写重入、Semaphore 有许可计数、Latch 无租约），强行统一
  * 会产出满是不可达分支的抽象；命令分派由 {@code CoreEngine} 按
- * {@link #family()} 完成（Phase 3 T1 design D2）。
+ * {@link #family()} 完成。
  *
  * <p><b>并发模型</b>：实现类的本接口方法与其余状态迁移一样，全部在
  * 条目自身监视器（{@code synchronized(this)}）内完成并对外提供线程安全；
@@ -117,7 +117,7 @@ public interface KeyEntry {
     boolean sweepNotifiedHead(long now, long headReplyTimeoutMs, List<Waiter> notify);
 
     /**
-     * 等待队列条目读数（统计观察面，Phase 3 T2）：锁/Semaphore 为等待队列
+     * 等待队列条目读数（统计观察面）：锁/Semaphore 为等待队列
      * 长度，Latch 为 awaiter 队列长度——三家统一为"本 key 当前排队等待项数"，
      * 供 {@code CoreEngine.stats()} 聚合。只读，MUST NOT 改变队列状态。
      * 须在持有条目锁时调用（{@code CoreEngine} 保证）。

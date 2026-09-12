@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * inflight 计数逻辑（design.md D4）：计数语义在本类经直接调用锁定。
+ * inflight 计数逻辑：计数语义在本类经直接调用锁定。
  * 限额在正常同步分发节奏下难以触发，但可经写完成背压达到
  * （{@code endRequest} 挂在响应写完成回调上，写完成前请求持续计入在途），
  * handler 级 OVERLOADED 可达性由同模块 {@code InflightOverloadTest} 覆盖。

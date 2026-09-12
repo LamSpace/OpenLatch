@@ -39,9 +39,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 控制台对 TLS/认证节点的连接（Phase 3 详设 §5，spec admin-console 增量：
- * TLS/认证节点可只读观察 / 服务端开认证而控制台缺业务令牌 → 节点认证失败
- * 降级，不以无令牌请求反复冲击）。经 {@link AdminClientPool}/{@link AdminClient}
+ * 控制台对 TLS/认证节点的连接：TLS/认证节点可只读观察 / 服务端开认证而
+ * 控制台缺业务令牌 → 节点认证失败
+ * 降级，不以无令牌请求反复冲击。经 {@link AdminClientPool}/{@link AdminClient}
  * 直连真服务器（走同一业务端口的 HELLO + ADMIN 通道），证书夹具为
  * {@code src/test/resources/tls/} 的预生成 PEM。
  */

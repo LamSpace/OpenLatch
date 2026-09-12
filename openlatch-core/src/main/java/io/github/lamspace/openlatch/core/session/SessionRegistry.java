@@ -20,7 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 会话登记表：{@code sessionId → 该会话触及的 key 集合}，加速断连清理（设计说明书 §4.7）。
+ * 会话登记表：{@code sessionId → 该会话触及的 key 集合}，加速断连清理。
  * 授予/排队时登记 key；{@link #remove} 原子移除会话并返回其触及的 key 集合，
  * 使会话校验（{@link #touchIfPresent}）与清理（{@link #remove}）相互原子互斥。
  */
@@ -80,7 +80,7 @@ public final class SessionRegistry {
     }
 
     /**
-     * 已登记会话数（统计观察面，Phase 3 T2；弱一致读数）。
+     * 已登记会话数（统计观察面；弱一致读数）。
      *
      * @return 当前登记在册的会话数量
      */

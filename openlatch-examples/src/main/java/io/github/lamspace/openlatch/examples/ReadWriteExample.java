@@ -25,7 +25,7 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 
 /**
- * 示例 3：读写锁并发矩阵（详设 §9）——读读共享、读写互斥。
+ * 示例 3：读写锁并发矩阵——读读共享、读写互斥。
  *
  * <p>运行：{@code mvn -pl openlatch-examples exec:java
  * -Dexec.mainClass=io.github.lamspace.openlatch.examples.ReadWriteExample}

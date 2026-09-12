@@ -36,8 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 看门狗单测（tasks 6.1–6.5）：周期续租、明确失效错误即时失锁、
- * 连续两次超时失锁、断连跳过不计数（D5）、解锁注销。
+ * 看门狗单测：周期续租、明确失效错误即时失锁、
+ * 连续两次超时失锁、断连跳过不计数、解锁注销。
  */
 class WatchdogTest {
 
@@ -191,7 +191,7 @@ class WatchdogTest {
         assertThat(lostEntries.poll(2, TimeUnit.SECONDS)).isSameAs(entry);
     }
 
-    /** 断连期间跳过续租且不计数（D5）；恢复后继续。 */
+    /** 断连期间跳过续租且不计数；恢复后继续。 */
     @Test
     void disconnectedSkipsWithoutCounting() throws Exception {
         HeldLockRegistry.HeldEntry entry = registerEntry();

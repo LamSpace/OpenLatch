@@ -25,7 +25,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * 服务器配置。配置键与默认值对齐设计说明书 §5.7。
+ * 服务器配置。
  * <p>
  * 加载入口为 {@link #load(String)}：参数为 {@code null} 或空白时用内置默认值；
  * 否则从指定路径读取 Java Properties，缺省键回落默认值，非法值快速失败。

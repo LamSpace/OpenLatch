@@ -12,7 +12,7 @@
 
     <artifactId>openlatch-console</artifactId>
     <name>openlatch-console</name>
-    <description>OpenLatch 管理控制台（Phase 3 详设 §4 T3：只读观察 Web 应用，概要设计 §5.2）</description>
+    <description>OpenLatch 管理控制台（只读观察 Web 应用）</description>
 
     <dependencies>
         <!-- 概要设计 §5.2：控制台依赖 server——复用 EnvelopeCodecHandler 所在

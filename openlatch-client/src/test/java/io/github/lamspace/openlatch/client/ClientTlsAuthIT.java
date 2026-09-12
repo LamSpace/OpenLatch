@@ -33,8 +33,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 客户端 TLS 与业务令牌消费端到端（Phase 3 详设 §5.1/§5.2，spec"客户端 TLS 与
- * 认证消费"）：正确 trust-store + 业务令牌通过并走通业务；错误 trust-store /
+ * 客户端 TLS 与业务令牌消费端到端：正确 trust-store + 业务令牌通过并走通业务；错误 trust-store /
  * mTLS 缺客户端证书 / 令牌不符 → 连接不进入已建会话（挂起操作快速失败、退避
  * 重连不忙转）；默认关闭（明文无令牌）行为不受安全项影响。
  *

@@ -20,7 +20,7 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 
 /**
- * 示例共享夹具：进程内内嵌服务器（design D6）。
+ * 示例共享夹具：进程内内嵌服务器。
  *
  * <p>示例的可运行性以"自包含"为前提——不需要事先在机器上部署服务器；
  * 生产部署路径（{@code java -jar} 独立进程）见 README Quick Start。

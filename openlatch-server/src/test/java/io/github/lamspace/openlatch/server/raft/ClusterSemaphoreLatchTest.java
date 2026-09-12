@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Timeout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Phase 3 T1 P3-07 集群行为矩阵（协议档）：Semaphore 的许可感知队首推进
+ * 集群行为矩阵（协议档）：Semaphore 的许可感知队首推进
  * （部分释放驱动唤醒、池回收后纯加入显式拒绝、带断言重建）与 Latch 的
  * 计数复制/等待本地/归零广播/Leader 切换存续；副本摘要一致性全程钉住。
  */

@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * 屏障等待的通知路由登记表（Phase 3 P3-06）：{@code (会话, 请求 id) →
+ * 屏障等待的通知路由登记表：{@code (会话, 请求 id) →
  * 通知到达信号}。{@code AWAIT_NOTIFY} 推送不携带通道判别信息，按到达连接
  * 所属会话与 {@code request_id_ref} 命中登记项；未命中返回 {@code false}，
  * 由调用方回落锁等待队列路由（锁 tracker 对未命中本就静默）。

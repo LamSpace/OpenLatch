@@ -17,7 +17,7 @@ import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
 import com.google.protobuf.ByteString;
 
 /**
- * 测试用复制条目样本工厂：集中构造 §4.2 各类型条目，供确定性回放测试、
+ * 测试用复制条目样本工厂：集中构造各类型复制条目，供确定性回放测试、
  * 网关集成测试与到期用例复用（避免各测试类内联重复构造）。
  */
 final class RaftEntrySamples {

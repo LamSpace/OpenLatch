@@ -28,7 +28,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * 控制台入口（Phase 3 详设 §4.4，spec"部署形态与配置"）：独立部署的
+ * 控制台入口：独立部署的
  * Spring Boot Web 应用，HTTP 监听默认 9413，页面为服务端渲染 Thymeleaf
  * + 整页轮询刷新（无前端构建链）。
  *
@@ -41,8 +41,7 @@ import java.util.Properties;
  *       键（测试注入临时端口即走此路）。</li>
  * </ul>
  * 配置非法（地址为空/令牌空白/端口越界）在 {@link #consoleConfig} 构造即
- * 抛 {@link IllegalArgumentException}——容器启动失败退出（spec"坏配置快速
- * 失败"，不进入半启动）。
+ * 抛 {@link IllegalArgumentException}——容器启动失败退出（不进入半启动）。
  */
 @SpringBootApplication
 public class OpenLatchConsoleApplication implements EnvironmentAware {

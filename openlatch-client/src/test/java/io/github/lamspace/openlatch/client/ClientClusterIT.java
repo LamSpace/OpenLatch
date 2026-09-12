@@ -38,8 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 客户端 × 真集群端到端 IT（变更 s3-leader-discovery-failover 3.5，
- * spec"Leader 发现与故障转移"核心场景）：同 JVM 起三节点
+ * 客户端 × 真集群端到端 IT（Leader 发现与故障转移核心场景）：同 JVM 起三节点
  * {@link OpenLatchServer}（真 TCP 接入 + Raft 复制组 + client-addresses
  * 提示映射），驱动真 {@link OpenLatchClient}。恢复时限放宽（防 CI 抖动），
  * 断言语义正确性为主；进程级 {@code kill -9} 计时归 4.x 演练。
@@ -200,7 +199,7 @@ class ClientClusterIT {
             assertThat(lost.poll(20, TimeUnit.SECONDS)).as("失锁回调").isEqualTo("homekill");
 
             // 恢复：重试环直至落到存活节点获得新会话并完成一次授予（快速失败
-            // 为断连既定语义，需调用方重试——详设 §6.2/§6.3）。
+            // 为断连既定语义，需调用方重试）。
             awaitTrue(() -> leader() != null, "新主选出");
             long t0 = System.currentTimeMillis();
             long rdeadline = t0 + 25_000;
@@ -242,7 +241,7 @@ class ClientClusterIT {
         }
     }
 
-    // ---------- spec 场景"failover 期间持锁不丢"（§8 行 2 端到端） ----------
+    // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test
     void heldLockSurvivesAliveLeaderStepdown() throws Exception {
@@ -292,7 +291,7 @@ class ClientClusterIT {
         }
     }
 
-    // ---------- spec 场景"等待者跨 failover 重新排队" ----------
+    // ---------- 场景"等待者跨 failover 重新排队" ----------
 
     @Test
     void waiterRequeuesOnNewLeaderAfterFailover() throws Exception {
@@ -311,7 +310,7 @@ class ClientClusterIT {
             var bFirst = b.acquireAsync(spec("wq", 30_000));
             Thread.sleep(1_500);
 
-            // 杀 Leader：等待队列不复制（§4.4），B 的连接断开使其等待以"服务不可用"
+            // 杀 Leader：等待队列不复制，B 的连接断开使其等待以"服务不可用"
             // 快速失败（断连不自动重试为既定语义）；A 因 home 宕机收失锁回调
             // （短租约使 lostAt 落在窗口内）。
             stopNode(l);

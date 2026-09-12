@@ -26,8 +26,8 @@ import java.util.concurrent.TimeUnit;
 import io.github.lamspace.openlatch.client.LockType;
 
 /**
- * 声明式分布式锁（详设 §8.3，M4 定案：{@code type} 直接复用客户端公开枚举
- * {@link LockType}，不另造 {@code LockMode}，design D2）。
+ * 声明式分布式锁：{@code type} 直接复用客户端公开枚举
+ * {@link LockType}，不另造 {@code LockMode}。
  *
  * <p><b>语义</b>：方法调用前按 {@link #key()} 的 SpEL 求值结果获取锁，方法
  * 返回（或抛出异常）后释放。获取方式由 {@link #waitTime()} 决定：
@@ -56,11 +56,11 @@ import io.github.lamspace.openlatch.client.LockType;
  *   <li>与 {@code @Transactional} 同标注时锁在事务外层（获取先于事务开启、
  *       释放晚于提交）；</li>
  *   <li>{@code SIMPLE} 类型不可重入：同线程持锁期间再次进入同 key 的注解
- *       方法会排队等待自身，直至租约到期（详设 §4.4 自锁警示）；</li>
+ *       方法会排队等待自身，直至租约到期；</li>
  *   <li>锁可能在持有期间丢失（断连、租约失效），丢失经客户端
  *       {@link io.github.lamspace.openlatch.client.LockLostListener} 通道通知；
  *       切面释放时遇已丢失的锁静默跳过，不掩盖业务结果；</li>
- *   <li>Phase 1 不支持持读升级写 / 持写降级读特判；{@code READ}/{@code WRITE}
+ *   <li>不支持持读升级写 / 持写降级读特判；{@code READ}/{@code WRITE}
  *       的并发与排队行为遵循服务端严格 FIFO 语义。</li>
  * </ul>
  *
@@ -74,7 +74,7 @@ import io.github.lamspace.openlatch.client.LockType;
 public @interface OpenLatch {
 
     /**
-     * 锁键的 SpEL 表达式（详设 §8.3）。求值上下文注入方法形参
+     * 锁键的 SpEL 表达式。求值上下文注入方法形参
      * （{@code #参数名} 及 {@code #p0}/{@code #a0} 位置引用）；
      * 求值结果必须为非空字符串，否则抛
      * {@link io.github.lamspace.openlatch.client.OpenLatchException}。
@@ -84,7 +84,7 @@ public @interface OpenLatch {
     String key();
 
     /**
-     * 锁类型（客户端公开枚举，design D2）。
+     * 锁类型（客户端公开枚举）。
      *
      * @return 锁类型，默认可重入互斥
      */

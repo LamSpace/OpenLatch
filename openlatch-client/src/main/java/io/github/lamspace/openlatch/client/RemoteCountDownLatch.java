@@ -27,13 +27,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * {@link OCountDownLatch} 的远程实现（Phase 3 详设 §2.4 / P3-06）。
+ * {@link OCountDownLatch} 的远程实现。
  *
  * <p><b>等待编排</b>：{@code LATCH_AWAIT} 应答 OK 即归零放行；QUEUED 后
  * 挂起等待 {@code AWAIT_NOTIFY}——通知到达以同一 {@code requestId} 重发
  * （服务端按 {@code (会话, 请求)} 幂等去重）。断线时进行中的请求以传输
  * 失败终结，循环在剩余预算内等新会话就绪后以新 {@code requestId} 重放
- * （改连换 id 的幂等口径与 {@code OLock} 等待一致，详设 §6.3）。通知
+ * （改连换 id 的幂等口径与 {@code OLock} 等待一致）。通知
  * 等待设请求超时上限作推送丢失的兜底：到点自发重发一次（幂等无害）。
  *
  * <p><b>无租约</b>：等待者不登记持锁簿记、不启动看门狗——await 全程零

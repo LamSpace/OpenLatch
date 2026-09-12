@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §5.4 分发表（design.md D5）：逐消息映射、requestId 回显、非法消息裁决。纯单元，无 Netty。
+ * 分发表：逐消息映射、requestId 回显、非法消息裁决。纯单元，无 Netty。
  */
 class RequestDispatcherTest {
 

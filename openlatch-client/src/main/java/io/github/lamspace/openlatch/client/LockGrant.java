@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.client;
 
 /**
- * 锁授予结果（详设 §6.1）：获取成功时由异步接口返回。
+ * 锁授予结果：获取成功时由异步接口返回。
  *
  * @param leaseToken     服务端签发的租约凭证，释放与续租的唯一凭据
  * @param grantedLeaseMs 实际生效租约（毫秒），看门狗据此设定续租周期

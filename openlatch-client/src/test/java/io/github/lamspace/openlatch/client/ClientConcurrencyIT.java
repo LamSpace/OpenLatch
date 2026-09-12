@@ -30,12 +30,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 集成测试套件（§10.3，tasks 8.1/8.5/8.6）：多线程并发互斥、授予公平性、
+ * 集成测试套件：多线程并发互斥、授予公平性、
  * 放弃等待后的队列恢复（超时与通知竞争端到端）。
  */
 class ClientConcurrencyIT {
 
-    /** 并发线程数（§10.3 要求 ≥16）。 */
+    /** 并发线程数（要求 ≥16）。 */
     private static final int THREADS = 16;
     /** 竞争轮数。 */
     private static final int ROUNDS = 5;
@@ -163,7 +163,7 @@ class ClientConcurrencyIT {
             OLock holder = client.newReentrantLock(key);
             holder.lock();
 
-            // 等待者限时 600ms：到时放弃（服务端队列条目惰性回收，§6.3）
+            // 等待者限时 600ms：到时放弃（服务端队列条目惰性回收）
             assertThat(waiterClient.newReentrantLock(key)
                     .tryLock(600, TimeUnit.MILLISECONDS)).isFalse();
 

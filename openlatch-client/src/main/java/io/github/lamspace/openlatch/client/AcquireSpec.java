@@ -19,9 +19,9 @@ package io.github.lamspace.openlatch.client;
 import java.util.Objects;
 
 /**
- * 异步获取请求参数（详设 §6.3 {@code acquireAsync} 入参）。
+ * 异步获取请求参数（{@code acquireAsync} 入参）。
  *
- * <p><b>{@code waitMs} 语义</b>（详设 §3.2.2）：
+ * <p><b>{@code waitMs} 语义</b>：
  * <ul>
  *   <li>{@code 0}：立即式——无快路径（锁被占用，或虽无持有者但等待队列非空）
  *       时直接拒绝（{@code DENIED}），不排队；</li>
@@ -43,7 +43,7 @@ public record AcquireSpec(String key, LockType lockType, long threadId, long lea
         int permits, int permitsTotal) {
 
     /**
-     * 锁家族便捷构造（Phase 1/2 既有形态）：许可参数取缺省
+     * 锁家族便捷构造：许可参数取缺省
      * （{@code permits = 1}、{@code permitsTotal = 0}）。
      *
      * @param key      锁键

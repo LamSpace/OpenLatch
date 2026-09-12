@@ -28,7 +28,7 @@ import org.slf4j.LoggerFactory;
  * 其他未处理入站异常同样按不可恢复处理（记 WARN 后断连）——业务分发层
  * 自有 INTERNAL_ERROR 兜底，其正常路径不会有异常漏到此处。可解码但语义
  * 非法的消息（类型与 payload 不匹配等）不属异常、不经本类，由分发层回
- * {@code INVALID_REQUEST}（规格"消息合法性校验"）。
+ * {@code INVALID_REQUEST}。
  */
 @ChannelHandler.Sharable
 public final class EnvelopeCodecHandler extends ChannelInboundHandlerAdapter {

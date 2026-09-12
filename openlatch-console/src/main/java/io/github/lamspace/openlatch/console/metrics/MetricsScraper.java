@@ -32,7 +32,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 节点指标端点代理抓取器（Phase 3 T3 design D7，spec"轮询刷新与指标趋势"）：
+ * 节点指标端点代理抓取器：
  * 拉取 {@code http://<host>:<metrics-port>/metrics}（Prometheus 文本），
  * 解析概览页曲线所需的三条线（{@code openlatch_server_locks_held} 按 type
  * 求和、{@code openlatch_server_waiters}、{@code openlatch_server_sessions}），

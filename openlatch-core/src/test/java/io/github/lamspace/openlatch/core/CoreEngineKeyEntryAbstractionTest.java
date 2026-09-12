@@ -30,10 +30,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * P3-01 KeyEntry 抽象层用例组：家族判定的状态零扰动语义，与条目跨家族
+ * KeyEntry 抽象层用例组：家族判定的状态零扰动语义，与条目跨家族
  * 操作（释放/续租/到期/会话关闭/队首清扫）经 {@code KeyEntry} 抽象收口的
  * 行为等价性。类型不匹配拒绝（{@link Outcome#REJECT_TYPE_MISMATCH}）的
- * 可达面自 P3-03 起由 {@code CoreEngineSemaphoreTest} 类型矩阵覆盖，
+ * 可达面由 {@code CoreEngineSemaphoreTest} 类型矩阵覆盖，
  * 本组锁侧语义钉在"抽象化不改变既有行为"的契约上。
  */
 class CoreEngineKeyEntryAbstractionTest {

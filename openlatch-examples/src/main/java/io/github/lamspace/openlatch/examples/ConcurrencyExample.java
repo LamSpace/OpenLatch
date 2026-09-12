@@ -28,8 +28,8 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 
 /**
- * 示例 2：多线程竞争同一互斥锁，打印入队与授予顺序（详设 §9，
- * FIFO 公平性可观察）。授予顺序 == 入队顺序在集成测试中严格断言，
+ * 示例 2：多线程竞争同一互斥锁，打印入队与授予顺序（FIFO 公平性可观察）。
+ * 授予顺序 == 入队顺序在集成测试中严格断言，
  * 本示例仅演示观察方法。
  *
  * <p>运行：{@code mvn -pl openlatch-examples exec:java

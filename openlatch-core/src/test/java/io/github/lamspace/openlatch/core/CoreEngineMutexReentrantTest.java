@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** §10.1 互斥、重入用例组。 */
+/** 互斥、重入用例组。 */
 class CoreEngineMutexReentrantTest {
 
     /** 手工时钟：用例以相对推进驱动租约到期，无 sleep。 */
@@ -149,7 +149,7 @@ class CoreEngineMutexReentrantTest {
         assertThat(r.outcome()).isEqualTo(Outcome.GRANTED);
     }
 
-    /** 重入按本次请求租约值整段刷新（design D2）：重入者可将租约改短/改长。 */
+    /** 重入按本次请求租约值整段刷新：重入者可将租约改短/改长。 */
     @Test
     void reentrantRefreshesLeaseWithRequestedValue() {
         long a = engine.sessionOpened();

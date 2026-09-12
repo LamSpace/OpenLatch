@@ -29,31 +29,30 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 复制停摆自愈看门狗（phase2-leader-stall-followup T2/2B.1，design D2/D3/D6）。
+ * 复制停摆自愈看门狗。
  *
  * <p><b>职责</b>：检测「本节点为当值 Leader 但任期提交永久冻结」的停摆态（Ratis 3.3.0
- * 存量缺陷，取证与机理见
- * {@code openspec/changes/phase2-leader-stall-followup/observations-leader-stall-rootcause.md}），
+ * 存量缺陷），
  * 并按固定阶梯动作恢复写面：①让位一次（transferLeadership 至日志最新的健康对侧）；
  * ②让位后观察窗内提交仍零推进 → 进程级自杀式重启（{@code System.exit}，交外部
  * supervisor 拉起，以纯 follower 身份归群复位）。
  *
- * <p><b>检测信号（D2 双条件，防误伤；窗口键＝连续在任段）</b>：仅当「本节点
+ * <p><b>检测信号（双条件，防误伤；窗口键＝连续在任段）</b>：仅当「本节点
  * 不间断担任 Leader 的时长 &gt; {@code T_stall}」<b>且</b>「本节点 commitIndex
  * 连续 {@code M} 个采样周期零推进」同时成立才判停摆。任何一次 commitIndex
- * 推进清零计数；在任期间的任期跃迁（含同任期再任——r5 取证形态，新
+ * 推进清零计数；在任期间的任期跃迁（含同任期再任——新
  * {@code LeaderStateImpl} 的任期条目同冻）不重置计时、仅更换让位配额；失去
- * Leader 角色才弃置整段——与 {@code SessionCoordinator} 失联判定（D12 进度
+ * Leader 角色才弃置整段——与 {@code SessionCoordinator} 失联判定（进度
  * 保护）同构。
  * 选举空窗与非 Leader 角色天然豁免（角色采样恒先判）；正常选举/追赶窗内提交恢复
- * 推进，快于 {@code T_stall} 下限 10s（r1 实测恢复 1.6–1.9s，十倍余量）。
+ * 推进，快于 {@code T_stall} 下限 10s（实测恢复 1.6–1.9s，十倍余量）。
  *
- * <p><b>振荡保护（Risks 定稿）</b>：每任期至多让位一次；升级重启带进程生命期内的
+ * <p><b>振荡保护</b>：每任期至多让位一次；升级重启带进程生命期内的
  * 全局冷却窗（默认 5 分钟内不二次触发重启路径，冷却期内改为 WARN 挂起等待）。
  * 跨进程重启的循环抑制不在本类职责——由外部 supervisor 的退避拉起策略承载。
  *
- * <p><b>可配性（D6）</b>：全部阈值为装配层钉死常量（由 election-timeout 折算），
- * 不引入运维配置键（详设 §9 运维配置最小面口径）。
+ * <p><b>可配性</b>：全部阈值为装配层钉死常量（由 election-timeout 折算），
+ * 不引入运维配置键。
  *
  * <p><b>线程模型</b>：判定与动作全部发生在自有单线程调度器的 tick 序列内——
  * 无可变状态跨线程，无需加锁；{@link #close()} 幂等，先于其余组件关停
@@ -72,15 +71,15 @@ public final class ReplicationStallWatchdog implements AutoCloseable {
     /** 日志器：检测/动作/升级全程可观测（log 面即事件面）。 */
     private static final Logger log = LoggerFactory.getLogger(ReplicationStallWatchdog.class);
 
-    /** {@code T_stall} 下限（毫秒）：max(10s, 5×election-timeout) 的钉死底（D2）。 */
+    /** {@code T_stall} 下限（毫秒）：max(10s, 5×election-timeout) 的钉死底。 */
     static final long T_STALL_FLOOR_MS = 10_000;
-    /** 零推进连续样本数阈值 M：与失联判定容忍数同族（D2，3 个采样周期）。 */
+    /** 零推进连续样本数阈值 M：与失联判定容忍数同族（3 个采样周期）。 */
     static final int M_STALL_SAMPLES = 3;
     /** 让位 RPC 等待上限（毫秒，基座先例同值）。 */
     static final long TRANSFER_TIMEOUT_MS = 5_000;
     /** 让位→升级重启之间的观察窗下限（毫秒；实际取 max(本值, T_stall)）。 */
     static final long ESCALATE_GRACE_FLOOR_MS = 5_000;
-    /** 进程重启冷却窗（毫秒，Risks 定稿：5 分钟内不二次触发重启路径）。 */
+    /** 进程重启冷却窗（毫秒：5 分钟内不二次触发重启路径）。 */
     static final long RESTART_COOLDOWN_MS = 300_000;
     /** 自杀式重启退出码（supervisor 侧可辨识「停摆自愈退出」）。 */
     static final int RESTART_EXIT_CODE = 1;
@@ -165,8 +164,8 @@ public final class ReplicationStallWatchdog implements AutoCloseable {
      * 一段连续在任（Leader 身份不间断）的停摆观察状态：在任起始时刻、提交位点
      * 基准、连续零推进计数、让位配额与升级步进。仅在调度器线程内读写。
      *
-     * <p><b>窗口键＝连续在任段而非任期号</b>：在任期间任期号跃迁（含同任期再任，
-     * r5 取证形态）不重置计时——跃迁后新 {@code LeaderStateImpl} 的任期条目同样
+     * <p><b>窗口键＝连续在任段而非任期号</b>：在任期间任期号跃迁（含同任期再任）
+     * 不重置计时——跃迁后新 {@code LeaderStateImpl} 的任期条目同样
      * 冻结在窗内；失去 Leader 角色才弃置整段（角色翻转＝换代/下台，新主另起窗，
      * 选举与恢复追赶不误伤）。让位配额按任期记账（每任期至多一次）。
      */
@@ -229,7 +228,7 @@ public final class ReplicationStallWatchdog implements AutoCloseable {
     }
 
     /**
-     * 生产装配：以子系统实况构建探针与动作组，阈值按 D2/D6 由 election-timeout
+     * 生产装配：以子系统实况构建探针与动作组，阈值由 election-timeout
      * 折算钉死。
      *
      * @param subsystem 已启动的 Raft 子系统

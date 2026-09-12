@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 管理端口随服务器生命周期（spec"指标配置与管理端点生命周期"）：启用时随
+ * 管理端口随服务器生命周期：启用时随
  * {@code start} 绑定、随 {@code stop} 解除；兼容构造重载不监听（既有装配
  * 不受扰）；管理端口冲突整体启动失败、不进入半启动。
  */

@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** §10.1 会话、幂等、限额用例组。 */
+/** 会话、幂等、限额用例组。 */
 class CoreEngineSessionIdempotencyLimitTest {
 
     /** 手工时钟：本组用例不推进时间，注入仅为与其余套件一致的装配口径。 */
@@ -149,7 +149,7 @@ class CoreEngineSessionIdempotencyLimitTest {
         engine.sessionClosed(a); // 第二次无副作用
     }
 
-    /** 已通知队首的等待项被会话清理摘除后，新队首获得补通知（§4.5/§4.7 补强）。 */
+    /** 已通知队首的等待项被会话清理摘除后，新队首获得补通知。 */
     @Test
     void sessionClosedRemovesNotifiedHeadAndRepromotesNewHead() {
         long holder = engine.sessionOpened();
@@ -187,7 +187,7 @@ class CoreEngineSessionIdempotencyLimitTest {
         engine.release(new ReleaseCommand(holder, "k", g.leaseToken(), 1)); // 通知队首 r=2
 
         // 换 requestId 重发：(sessionId, requestId) 不再是队首匹配键 → 排队尾（位次 2，
-        // 原队首 r=2 仍在其前），固化规则 7 的匹配键语义（详设 §4.4）。
+        // 原队首 r=2 仍在其前），固化幂等的匹配键语义。
         AcquireResult r = engine.acquire(acquire(waiter, 3, "k", LockType.REENTRANT, 2));
         assertThat(r.outcome()).isEqualTo(Outcome.QUEUED);
         assertThat(r.queuePosition()).isEqualTo(2);

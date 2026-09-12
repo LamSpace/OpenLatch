@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.spring;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 
 /**
- * {@link OpenLatchClient.Builder} 的装配期扩展点（Phase 3 T2）。
+ * {@link OpenLatchClient.Builder} 的装配期扩展点。
  *
  * <p><b>存在动机</b>：把"宿主 classpath 上才有的类型"（如
  * {@code MeterRegistry}）与自动配置主类的加载解耦——主配置类只依赖本

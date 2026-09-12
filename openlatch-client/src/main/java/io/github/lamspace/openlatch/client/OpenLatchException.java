@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.client;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 
 /**
- * 客户端运行时异常基类（详设 §6.1）。
+ * 客户端运行时异常基类。
  *
  * <p>所有客户端可预期失败均以本类或其子类抛出（或以其完成失败的
  * {@link java.util.concurrent.CompletableFuture}），并尽量携带服务端状态码

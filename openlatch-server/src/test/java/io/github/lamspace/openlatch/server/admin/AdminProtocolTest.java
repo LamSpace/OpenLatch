@@ -51,7 +51,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 管理协议消息级用例（单机档，spec {@code admin-observability}）：
+ * 管理协议消息级用例（单机档，管理可观测性面）：
  * EmbeddedChannel 直驱完整接入层（握手 → ADMIN 早退分支 → 管理处理器），
  * 覆盖认证矩阵（对/错/空/未配置/握手前/低版本）、四消息逐字段断言、
  * 分页与过滤边界、管理流量指标零污染与 ADMIN 的在途限额。引擎状态经
@@ -174,7 +174,7 @@ class AdminProtocolTest {
         return outbound(ch);
     }
 
-    // ===================== 认证矩阵（spec"管理令牌认证"） =====================
+    // ===================== 认证矩阵（管理令牌认证） =====================
 
     @Test
     void wrongToken_rejected_andDisconnected() {
@@ -209,7 +209,7 @@ class AdminProtocolTest {
         EmbeddedChannel c = channelFor(ServerConfig.defaults(), new AdminConfig(TOKEN));
         c.writeInbound(adminSummary(4, 3, TOKEN));
         Envelope r = outbound(c);
-        // 握手门闩既有规则覆盖 ADMIN：INVALID_REQUEST（v3-T3 起状态码随
+        // 握手门闩既有规则覆盖 ADMIN：INVALID_REQUEST（v3 起状态码随
         // 类型化应答在线路可见）、不断连、可补发 HELLO。
         assertThat(r.getRequestId()).isEqualTo(4);
         assertThat(r.getAdminSummaryResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);
@@ -226,7 +226,7 @@ class AdminProtocolTest {
         assertThat(r.getAdminSummaryResponse().getStatus())
                 .isEqualTo(StatusCode.INVALID_REQUEST);
         assertThat(c.isOpen()).isTrue();
-        // 该会话既有 v2 业务路径照常服务（v1/v2 行为不变，验收 §8-6）。
+        // 该会话既有 v2 业务路径照常服务（v1/v2 行为不变）。
         c.writeInbound(Envelope.newBuilder().setProtocolVersion(2)
                 .setType(MessageType.LOCK_ACQUIRE).setRequestId(7)
                 .setAcquireRequest(AcquireRequest.newBuilder().setKey("biz").setThreadId(1))
@@ -418,7 +418,7 @@ class AdminProtocolTest {
         assertThat(s2.getHeldKeys()).isEqualTo(1);
     }
 
-    // ===================== 隔离与自我保护（spec"管理流量与业务面隔离"） =====================
+    // ===================== 隔离与自我保护（管理流量与业务面隔离） =====================
 
     @Test
     void adminTraffic_doesNotPolluteMetrics() {

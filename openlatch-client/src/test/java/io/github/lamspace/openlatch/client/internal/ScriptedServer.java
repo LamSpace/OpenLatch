@@ -40,8 +40,7 @@ import java.util.function.Function;
 /**
  * 脚本化测试桩服务器：以真实 TCP + 线路分帧应答 {@link Envelope}，
  * 用 {@link io.github.lamspace.openlatch.client.internal.ConnectionManager}
- * 无法区分的形态驱动客户端 Leader 发现与故障转移分支（§6.3 逐边单测，
- * 变更 s3-leader-discovery-failover 3.4）。
+ * 无法区分的形态驱动客户端 Leader 发现与故障转移分支（逐分支单测）。
  *
  * <p>应答逻辑由 {@link #handler} 提供（请求 → 响应，返回 {@code null} 不回包）；
  * 全部入站请求按序记入 {@link #received()} 供断言。多实例可互指对方地址，

@@ -44,8 +44,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.util.StringUtils.countOccurrencesOf;
 
 /**
- * §7 T3 控制台端到端冒烟（集群三节点档，spec"双形态数据源与集群视角口径"
- * 的页面投影）：同 JVM 拉起 3 台集群服务器（admin-token 已配置）与控制台，
+ * 控制台端到端冒烟（集群三节点档，集群视角口径的页面投影）：
+ * 同 JVM 拉起 3 台集群服务器（admin-token 已配置）与控制台，
  * 断言概览角色分布（恰一 LEADER、二 FOLLOWER）、锁详情等待队列的
  * "仅 Leader 可见"标注（Leader 有位次 / Follower 空区+标注）、节点视图
  * 成员表 Leader 标识。指标端口指向无监听口（单机全局指标口在集群多节点

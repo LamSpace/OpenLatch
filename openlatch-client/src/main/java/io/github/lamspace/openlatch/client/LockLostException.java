@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.client;
 
 /**
- * 锁丢失的原因载体，作为 {@link LockLostListener} 回调参数传递（详设 §6.6）。
+ * 锁丢失的原因载体，作为 {@link LockLostListener} 回调参数传递。
  *
  * <p>丢失来源包括：续租收到明确失效错误（凭证不匹配/未持有/会话失效）、
  * 续租连续超时、断连后的失锁时刻到达或重连成功（旧会话已被服务端清理）。

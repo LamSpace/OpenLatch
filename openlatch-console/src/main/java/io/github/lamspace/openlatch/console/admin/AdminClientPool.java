@@ -31,13 +31,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 节点连接池（Phase 3 T3 design D6，spec"节点连接管理与故障降级"）：
+ * 节点连接池：
  * 配置地址列表 → 每节点一个 {@link AdminClient}（独立连接、独立退避窗），
  * 共享单个 daemon {@link EventLoopGroup}（每连接一问一答的串行流量，
  * 一线程组即可承载全部节点）。
  *
  * <p><b>生命周期</b>：Spring 容器关停时 {@link #destroy()} 收编——先关
- * 各客户端连接、再优雅终止线程组（spec"关闭时优雅释放全部对节点的连接"）。
+ * 各客户端连接、再优雅终止线程组。
  *
  * <p><b>线程安全</b>：客户端表构造后只读；{@link AdminClient} 自身串行化
  * 请求。多 Web 线程并发查询不同/相同节点均安全（同节点相互排队）。
@@ -61,7 +61,7 @@ public final class AdminClientPool implements DisposableBean {
             t.setDaemon(true);
             return t;
         });
-        // 节点连接安全（Phase 3 T4，spec admin-console"部署形态与配置"）：TLS 开启
+        // 节点连接安全：TLS 开启
         // 即构造一次共享 SslContext；PEM 不可用即池构造失败（启动快速失败，不进入
         // 半启动）。业务令牌逐客户端透传（HELLO 携带），与逐消息 admin-token 分离。
         ConsoleConfig.Security sec = config.security();

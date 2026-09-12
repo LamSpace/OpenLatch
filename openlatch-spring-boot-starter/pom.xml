@@ -12,7 +12,7 @@
 
     <artifactId>openlatch-spring-boot-starter</artifactId>
     <name>openlatch-spring-boot-starter</name>
-    <description>OpenLatch Spring Boot 自动装配与 @OpenLatch 声明式锁（详设 §8，M4 交付）</description>
+    <description>OpenLatch Spring Boot 4 自动装配与 @OpenLatch 声明式锁</description>
 
     <dependencies>
         <dependency>

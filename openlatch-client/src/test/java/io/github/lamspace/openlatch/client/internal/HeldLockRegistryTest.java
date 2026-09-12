@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 本地持锁簿记单测（task 5.1）：只记归属不记计数（design.md D4）。
+ * 本地持锁簿记单测：只记归属不记计数。
  */
 class HeldLockRegistryTest {
 

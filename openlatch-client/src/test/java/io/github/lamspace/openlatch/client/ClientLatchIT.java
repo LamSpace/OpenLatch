@@ -36,7 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * CountDownLatch 客户端端到端（P3-06 单机档）：初始化定型、跨客户端
+ * CountDownLatch 客户端端到端（单机档）：初始化定型、跨客户端
  * 倒计数放行（等待-通知-重发闭环）、归零立即通过、限时等待超时、
  * 一次性无重置、await 无续租流量、断连等待者摘除后屏障照常放行。
  */

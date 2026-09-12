@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Semaphore 客户端端到端（P3-04 单机档）：许可计数与互斥、等待-通知-重发
+ * Semaphore 客户端端到端（单机档）：许可计数与互斥、等待-通知-重发
  * 闭环（阻塞 acquire 经 AWAIT_NOTIFY 获授）、重入累加与对称释放、断连归还
  * 许可不泄漏（裸 socket 会话强制断开，服务端会话清理生效）。
  */

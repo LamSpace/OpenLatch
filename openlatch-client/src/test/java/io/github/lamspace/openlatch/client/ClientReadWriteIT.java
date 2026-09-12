@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 读写并发组合矩阵（§10.3，task 8.3）：读者并发、写者互斥、严格 FIFO
+ * 读写并发组合矩阵：读者并发、写者互斥、严格 FIFO
  * 杜绝写者饥饿与读者越位。
  */
 class ClientReadWriteIT {

@@ -45,8 +45,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 种子扇出发现（详设 §6.3"连续 N 次 NOT_LEADER → 强制走一次种子列表发现"，
- * s3 design D4/D6 的降级路径实现体）。
+ * 种子扇出发现：连续 {@code NOT_LEADER} 达阈值后强制走一次种子列表发现的
+ * 降级路径实现体。
  *
  * <p><b>过程</b>：对全部种子<b>并发</b>建短连接 → HELLO(v2) → 依提示定位 Leader：
  * {@code leader_address} 非空直取；为空（服务端未配置地址映射）则补一发
@@ -131,7 +131,7 @@ public final class SeedDiscovery {
             ClientConfig.SeedAddress seed, ClientConfig config, EventLoopGroup group,
             HashedWheelTimer timer, long probeMs) {
         CompletableFuture<ClientConfig.SeedAddress> result = new CompletableFuture<>();
-        // 探针与主连接同安全配置（Phase 3 T4，spec"种子发现探针附令牌"）：TLS
+        // 探针与主连接同安全配置：TLS
         // 开启即加密握手、配置业务令牌即随 HELLO 携带——否则认证开启的服务端会
         // 把无令牌探针当未认证连接断开。PEM 不可用即本次探针失败（不外抛）。
         final SslContext ssl;
@@ -174,7 +174,7 @@ public final class SeedDiscovery {
             }));
             HelloRequest.Builder helloReq = HelloRequest.newBuilder()
                     .setClientProtocolVersion(2).setClientName("openlatch-discovery");
-            // 业务令牌（Phase 3 T4）：与主连接一致，配置即随探针 HELLO 携带。
+            // 业务令牌：与主连接一致，配置即随探针 HELLO 携带。
             if (config.authToken() != null && !config.authToken().isBlank()) {
                 helloReq.setAuthToken(config.authToken());
             }
@@ -203,7 +203,7 @@ public final class SeedDiscovery {
                     }
                     return;
                 }
-                // 地址未配置：CLUSTER_VIEW 取 Leader 自报地址（design D4 降级路径）。
+                // 地址未配置：CLUSTER_VIEW 取 Leader 自报地址（降级路径）。
                 Envelope viewReq = Envelope.newBuilder()
                         .setProtocolVersion(3)
                         .setType(MessageType.CLUSTER_VIEW)

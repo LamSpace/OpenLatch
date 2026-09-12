@@ -35,7 +35,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Phase 3 T1 P3-03 协议层用例：SEMAPHORE 的 v3 门控（低版本会话消息级
+ * 协议层用例：SEMAPHORE 的 v3 门控（低版本会话消息级
  * 拒绝）、许可参数合法性（非 SEMAPHORE 携带 permits&gt;1 / permits_total、
  * 负值拒绝）、建条目总量断言经 core 映射为 {@code INVALID_REQUEST}，
  * 以及合法路径的授予/归还往返。

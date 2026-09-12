@@ -32,9 +32,9 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 
 /**
- * 看门狗：持锁期间的自动续租调度（详设 §6.6）。
+ * 看门狗：持锁期间的自动续租调度。
  *
- * <p><b>续租周期</b>：{@code grantedLeaseMs / 3}（概要设计 §6.3）。续租请求
+ * <p><b>续租周期</b>：{@code grantedLeaseMs / 3}。续租请求
  * 自身的超时取 {@code min(请求超时, 周期)}。
  *
  * <p><b>失败判定</b>：
@@ -46,8 +46,8 @@ import java.util.function.Predicate;
  *   <li>成功 → 刷新本地到期时间并重置失败计数。</li>
  * </ul>
  *
- * <p><b>断连正交化（design.md D5）</b>：条目的归属车道（单连接形态即唯一
- * 连接；S3 多车道按 sessionId 解析）非 ACTIVE 或不可得时跳过本次续租发送
+ * <p><b>断连正交化</b>：条目的归属车道（单连接形态即唯一
+ * 连接；多车道形态按 sessionId 解析）非 ACTIVE 或不可得时跳过本次续租发送
  * 且不计失败次数——断连场景的失锁裁决由 {@code lostAt} 机制独占，
  * 看门狗只裁决"连接正常但服务端不认账"。
  *
@@ -64,13 +64,13 @@ public final class Watchdog {
 
     /** 共享定时器：续租周期任务挂于此。 */
     private final HashedWheelTimer timer;
-    /** 会话 → 多路复用器解析器（S3 多车道：存量锁的续租回其归属车道）。 */
+    /** 会话 → 多路复用器解析器（多车道：存量锁的续租回其归属车道）。 */
     private final Function<Long, RequestMultiplexer> muxResolver;
     /** 持锁簿记：执行前复核条目在册状态。 */
     private final HeldLockRegistry registry;
     /** 每请求超时（毫秒）。 */
     private final long requestTimeoutMs;
-    /** 归属车道可用性判断（按 sessionId）：断连跳过续租（D5）。 */
+    /** 归属车道可用性判断（按 sessionId）：断连跳过续租。 */
     private final Predicate<Long> laneActive;
     /** 失锁回调：停止续租、移除登记后由客户端触发监听器。 */
     private final BiConsumer<HeldLockRegistry.HeldEntry, LockLostException> onLockLost;
@@ -93,7 +93,7 @@ public final class Watchdog {
     }
 
     /**
-     * 创建看门狗（多车道形态，S3 design D6）：条目按其归属会话解析
+     * 创建看门狗（多车道形态）：条目按其归属会话解析
      * 出站多路复用器与可用性。
      *
      * @param timer            共享定时器
@@ -147,7 +147,7 @@ public final class Watchdog {
     }
 
     /**
-     * 续租周期执行：条目已不在册 → 终止；断连 → 跳过不计数（D5）；
+     * 续租周期执行：条目已不在册 → 终止；断连 → 跳过不计数；
      * 否则发送续租请求并在响应处理中决定下一周期。
      *
      * @param entry 持锁条目
@@ -156,7 +156,7 @@ public final class Watchdog {
         if (!stillHeld(entry)) {
             return;
         }
-        // 归属车道解析（S3 多车道）：会话所在连接不可用即跳过不计数（D5 同源语义）。
+        // 归属车道解析（多车道形态）：会话所在连接不可用即跳过不计数（与断连跳过同源语义）。
         RequestMultiplexer mux = muxResolver.apply(entry.sessionId());
         if (mux == null || !laneActive.test(entry.sessionId())) {
             schedule(entry, periodMs(entry));

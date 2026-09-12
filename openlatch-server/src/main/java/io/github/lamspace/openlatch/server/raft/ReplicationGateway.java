@@ -38,18 +38,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 复制网关（详设 §3.2 {@code ReplicationGateway}）：节点内所有复制条目的
- * 唯一提交通道与"提交 → 应用 → 应答"桥（§4.5，design D3/D4/D11/D12）。
+ * 复制网关：节点内所有复制条目的
+ * 唯一提交通道与"提交 → 应用 → 应答"桥。
  *
  * <p><b>提交与完成路径</b>：{@link #submit} 分配 seq、登记 pending 回执
  * future，经内部 RaftClient 池把条目发往当值 Leader；客户端应答的完成点
- * 是<b>本副本应用线程</b>回调 {@link #onApplied}（Ratis 提交后串行应用，
- * design D10）——因此"应答即多数派确认后"。Ratis 传输层回执本身仅用于
+ * 是<b>本副本应用线程</b>回调 {@link #onApplied}（Ratis 提交后串行应用）——
+ * 因此"应答即多数派确认后"。Ratis 传输层回执本身仅用于
  * 发现"条目根本不会被应用"的失败（NOT_LEADER、超时、服务关停），以
- * {@link RetryableCommitException} 完成（spec"在途请求快速失败"）。
+ * {@link RetryableCommitException} 完成（在途请求快速失败）。
  *
- * <p><b>Leader 侧应用副效应</b>（仅当本节点为当值 Leader，design D9）：
- * 授予出队、"需排队"竞态的排队登记与 QUEUED 改写（§4.5/D3）、按
+ * <p><b>Leader 侧应用副效应</b>（仅当本节点为当值 Leader）：
+ * 授予出队、"需排队"竞态的排队登记与 QUEUED 改写、按
  * {@code freed_keys} 推进等待队首并推送 {@code AWAIT_NOTIFY}、会话关闭
  * 摘除。Follower 应用同一批条目但跳过全部副效应——等待队列非复制状态，
  * 副本一致性只由影子表/引擎的迁移维持。
@@ -71,7 +71,7 @@ public final class ReplicationGateway implements ApplyObserver {
     private final RaftSubsystem subsystem;
     /** 语义内核（影子表供预检查/唤醒消费）。 */
     private final LockStateMachineCore kernel;
-    /** Leader 侧等待队列（design D9）。 */
+    /** Leader 侧等待队列。 */
     private final WaitQueue waitQueue;
     /** 连接注册表（AWAIT_NOTIFY 本地投递）。 */
     private final ServerSessionRegistry sessions;
@@ -81,9 +81,9 @@ public final class ReplicationGateway implements ApplyObserver {
     private final AtomicLong seqGen = new AtomicLong();
     /** 本节点当前是否 Leader（应用副效应与任期队列清理的裁决位）。 */
     private volatile boolean leader;
-    /** 到期驱动（P2-09 装配后回挂；null 表示到期复制未启用）。 */
+    /** 到期驱动（装配后回挂；null 表示到期复制未启用）。 */
     private volatile LeaseExpiryDriver expiryDriver;
-    /** 会话协调器（P2-08 装配后回挂；接收应用/角色事件转发）。 */
+    /** 会话协调器（装配后回挂；接收应用/角色事件转发）。 */
     private volatile SessionCoordinator sessionCoordinator;
 
     /**
@@ -104,7 +104,7 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
-     * 回挂到期驱动（装配后期绑定，P2-09）。
+     * 回挂到期驱动（装配后期绑定）。
      *
      * @param driver 到期驱动，可为 {@code null}（摘挂）
      */
@@ -113,7 +113,7 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
-     * 回挂会话协调器（装配后期绑定，P2-08）。
+     * 回挂会话协调器（装配后期绑定）。
      *
      * @param coordinator 协调器，可为 {@code null}（摘挂）
      */
@@ -125,7 +125,7 @@ public final class ReplicationGateway implements ApplyObserver {
      * 提交一条复制条目并返回应用回执 future。
      *
      * <p>条目序号由本网关分配并登记 pending；{@code wall_clock_ms} 取提交
-     * 时刻（Leader 发起时刻，§4.2 诊断与条目时刻语义的来源）。
+     * 时刻（Leader 发起时刻，诊断与条目时刻语义的来源）。
      *
      * @param type    条目类型
      * @param payload 类型对应载荷序列化
@@ -166,7 +166,7 @@ public final class ReplicationGateway implements ApplyObserver {
                         failPending(entry.getSeq(), new RetryableCommitException(
                                 "raft reply failed: " + reply.getException()));
                     }
-                    // reply.isSuccess：应答不取自回执消息——完成点在 onApplied（design D10）。
+                    // reply.isSuccess：应答不取自回执消息——完成点在 onApplied。
                 });
         return f;
     }
@@ -203,7 +203,7 @@ public final class ReplicationGateway implements ApplyObserver {
 
     /**
      * Leadership 变更（状态机事件线程）。失去：未决 future 全部可重试完成；
-     * 当选：清空上一任期等待队列并启动到期驱动首扫（P2-09/D9）。
+     * 当选：清空上一任期等待队列并启动到期驱动首扫。
      *
      * @param isLeader 本节点当前是否 Leader
      */
@@ -239,7 +239,7 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
-     * Leader 侧应用副效应（design D3/D9 的落点）。
+     * Leader 侧应用副效应。
      *
      * @param entry  条目
      * @param result 原始回执
@@ -264,7 +264,7 @@ public final class ReplicationGateway implements ApplyObserver {
             default -> {
             }
         }
-        // 预演失效改写（§4.5/D3）：提交时判定可授予、应用时锁已被占——
+        // 预演失效改写：提交时判定可授予、应用时锁已被占——
         // 原请求愿意排队（wait_ms != 0）则在应用点登记本地队列并回 QUEUED；
         // 立即式保持 DENIED。仅改写本节点在途请求的回执。
         if (result.getStatus() == ApplyStatus.DENIED
@@ -293,7 +293,7 @@ public final class ReplicationGateway implements ApplyObserver {
             }
         }
         // 唤醒推进：任何空出/归还的 key（释放/到期/会话关闭的 freed_keys）。
-        // 许可感知（design D4）：Semaphore 按影子表可用数判定队首是否满足，
+        // 许可感知：Semaphore 按影子表可用数判定队首是否满足，
         // 锁与条目已消失场景等价于"无限量"（队首恒可推进）。
         long now = System.currentTimeMillis();
         for (String key : result.getFreedKeysList()) {
@@ -320,7 +320,7 @@ public final class ReplicationGateway implements ApplyObserver {
                 log.warn("release payload unparsable in wake (seq={})", entry.getSeq());
             }
         }
-        // 屏障归零：全体 awaiter 广播放行（design D5）。
+        // 屏障归零：全体 awaiter 广播放行。
         if (entry.getType() == RaftEntryType.LATCH_COUNT_DOWN_ENTRY
                 && result.getStatus() == ApplyStatus.OK && result.getLatchRemaining() == 0) {
             try {
@@ -349,7 +349,7 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
-     * 推送 AWAIT_NOTIFY（Leader 本地连接投递；跨接入节点转发挂 S3，design D9）。
+     * 推送 AWAIT_NOTIFY（Leader 本地连接投递；跨接入节点转发不在本方法职责）。
      * 应用线程内仅做查表与非阻塞写投递。
      *
      * @param w   待通知的队首等待项
@@ -358,7 +358,7 @@ public final class ReplicationGateway implements ApplyObserver {
     private void pushAwaitNotify(WaitQueue.Waiter w, String key) {
         ServerSession session = sessions.get(w.sessionId());
         if (session == null || !session.channel().isActive()) {
-            return; // 连接已不存在：等清扫路径兜底（与 Phase 1 静默丢弃同语义）
+            return; // 连接已不存在：等清扫路径兜底（与单机静默丢弃同语义）
         }
         Envelope notify = Envelope.newBuilder()
                 .setProtocolVersion(session.protocolVersion())
@@ -391,7 +391,7 @@ public final class ReplicationGateway implements ApplyObserver {
     private record Pending(CompletableFuture<ApplyResult> future, boolean viaSelfLeader) { }
 
     /**
-     * 关停：以可重试错误完成全部未决 future（spec"关停无悬挂请求"）。
+     * 关停：以可重试错误完成全部未决 future（关停无悬挂请求）。
      */
     public void close() {
         for (Long seq : pending.keySet()) {
@@ -405,7 +405,7 @@ public final class ReplicationGateway implements ApplyObserver {
      * @return 等待队列
      */
     /**
-     * 已通知队首超时清扫（Leader 侧周期驱动，Phase 3 T1）：摘除超时未重发
+     * 已通知队首超时清扫（Leader 侧周期驱动）：摘除超时未重发
      * 的队首并推进新队首通知；Semaphore 的新队首须许可足量方可推送，不足
      * 则撤销其已通知标记（{@code deferHead}），由下一轮清扫/下一次归还
      * 重新评估——与单机 {@code SemaphoreEntry} 的队首检查语义等价。
@@ -467,7 +467,7 @@ public final class ReplicationGateway implements ApplyObserver {
 
     /**
      * 可重试提交失败：条目未获得应用回执（未提交/失去 Leadership/关停）。
-     * 调用方 MUST 以可重试错误应答客户端（§6.3 快速失败优先，S3 语义的 S2 承载）。
+     * 调用方 MUST 以可重试错误应答客户端（快速失败优先）。
      */
     public static final class RetryableCommitException extends RuntimeException {
         /**

@@ -12,7 +12,7 @@
 
     <artifactId>openlatch-examples</artifactId>
     <name>openlatch-examples</name>
-    <description>OpenLatch 示例与基准（详设 §9，M4 交付；不发布到 Maven Central）</description>
+    <description>OpenLatch 示例与基准（不发布到 Maven Central）</description>
 
     <dependencies>
         <dependency>

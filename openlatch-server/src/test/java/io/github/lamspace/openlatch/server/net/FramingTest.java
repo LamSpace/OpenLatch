@@ -31,7 +31,7 @@ import static io.github.lamspace.openlatch.server.net.ServerChannelInitializer.M
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 分帧行为（设计说明书 §3.1）：入站半包、粘包、超帧长断连，
+ * 分帧行为：入站半包、粘包、超帧长断连，
  * 以及出站编码与长度前缀装配（编码器 → 前置器的写出序）。
  */
 class FramingTest {
@@ -50,7 +50,7 @@ class FramingTest {
     }
 
     /**
-     * 手拼 §3.1 线格式帧：4 字节大端长度前缀 + Protobuf 序列化 payload，
+     * 手拼线格式帧：4 字节大端长度前缀 + Protobuf 序列化 payload，
      * 与 {@link #newFramingChannel()} 解码器参数（lengthFieldOffset=0、
      * lengthFieldLength=4、initialBytesToStrip=4）对应。
      *

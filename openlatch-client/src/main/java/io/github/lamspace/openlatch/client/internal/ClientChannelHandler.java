@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
 import java.util.function.Consumer;
 
 /**
- * 客户端入站唯一收口（详设 §6.1）：解码后的 {@link Envelope} 全部经
+ * 客户端入站唯一收口：解码后的 {@link Envelope} 全部经
  * 信封下沉点分发（由 {@link ConnectionManager#dispatch} 实现：通知与响应分流）；
  * 通道失效事件转交断连下沉点。
  *

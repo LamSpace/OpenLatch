@@ -42,8 +42,8 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T2 指标断言测试（L2 固定脚本档，spec"服务端指标清单与线路命名"/
- * "请求埋点覆盖单机与集群双路径"/"Gauge 取值语义与采样安全"）：真单机
+ * 指标断言测试（L2 固定脚本档，覆盖服务端指标清单与线路命名、
+ * 请求埋点单机与集群双路径、Gauge 取值语义与采样安全）：真单机
  * 服务器（锁端口 0 + 管理端口 0）执行固定脚本后基线差值逐项核对
  * {@code /metrics}；附"指标开/关应答一致"与并发抓取冒烟两案。
  */
@@ -76,7 +76,7 @@ class MetricsEndpointIT {
     /**
      * 序列键：Prometheus 线名（逻辑名点转下划线，counter 的 {@code .total}
      * 尾翻译为 {@code _total}）+ 稳定化标签。与 {@link MetricsText} 的
-     * 样本键同构（design D2 映射口径）。
+     * 样本键同构。
      *
      * @param logicalName Micrometer 逻辑名（{@link ServerMetrics} 常量）
      * @param labelKv     标签键值对
@@ -146,7 +146,7 @@ class MetricsEndpointIT {
     }
 
     /**
-     * 固定操作脚本（详设 §7 T2"执行固定脚本后逐项核对"）：两条 v3 连接，
+     * 固定操作脚本（执行后逐项核对指标基线差值）：两条 v3 连接，
      * 覆盖获取（授予/排队/立即拒绝）、释放（OK/NOT_HELD）、续租失败
      * （INVALID_TOKEN/NOT_HELD）、Semaphore 授予、Latch 初始化+挂起、
      * 短租约到期强制释放。脚本内不断言协议结果正确性（那是既有套件的

@@ -22,17 +22,17 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 
 /**
- * Leader 提示的单源视图（详设 §3.2 {@code LeaderTracker}，s3 design D3）。
+ * Leader 提示的单源视图。
  *
  * <p><b>职责</b>：把 Raft 层的 Leadership 变更事件折算为「当前 Leader 的
  * nodeId + 接入地址」快照，供 HELLO 应答、{@code NOT_LEADER} 随附提示、
  * {@code CLUSTER_VIEW} 作答三处消费方共用同一数据源——三处报告的 Leader
- * 身份恒一致（spec"单一数据源一致性"）。
+ * 身份恒一致。
  *
  * <p><b>与权威受理判定解耦</b>：本视图仅表达「谁是 Leader」的提示，写请求
  * 能否受理由 {@code ReplicationGateway.isLeaderAuthoritative()} 独立裁决。
  * 提示滞后至多令客户端一次改连落空（以 {@code -1}/{@code ""} 降级并走种子
- * 发现），MUST NOT 使非 Leader 节点误受理其不该受理的写（spec"降级不误受理"）。
+ * 发现），MUST NOT 使非 Leader 节点误受理其不该受理的写。
  *
  * <p><b>线程模型</b>：{@link #onLeaderChanged} 由 {@link LockStateMachine}
  * 的事件线程（Ratis 通知线程）单写；读取（{@link #snapshot()}）发生在各连接
@@ -87,10 +87,10 @@ public final class LeaderTracker {
     }
 
     /**
-     * 依本地视图构造 {@code CLUSTER_VIEW} 载荷（详设 §6.2，任意节点可答，
+     * 依本地视图构造 {@code CLUSTER_VIEW} 载荷（任意节点可答，
      * 只读、不产生日志条目）：成员表取 {@code peers} 配置（已校验的
      * {@code id@host:port} 形态），地址取 {@code client-addresses} 映射
-     * （缺项空串——客户端以各节点自报兜底，design D4），{@code is_leader}
+     * （缺项空串——客户端以各节点自报兜底），{@code is_leader}
      * 按本跟踪器当时快照判定；选举空窗时无任何条目为 leader。
      *
      * @return 集群视图消息

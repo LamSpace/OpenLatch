@@ -58,10 +58,9 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
 /**
- * 管理观察请求处理器（Phase 3 详设 §4.2 T3 / P3-11，spec
- * {@code admin-observability}）。四消息全部本地作答、只读、不产生复制
- * 日志条目——与 T2 {@code ServerMetrics} 同构的"单组件双数据源"形态，
- * 吸取其勘误①"集群路径旁落"教训，从装配第一天就覆盖两种形态。
+ * 管理观察请求处理器。四消息全部本地作答、只读、不产生复制
+ * 日志条目——与 {@code ServerMetrics} 同构的"单组件双数据源"形态，
+ * 从装配第一天就覆盖单机与集群两种形态。
  *
  * <p><b>受理门序</b>（首个不满足者即为结果，全部在管理 handler 入口、
  * 任何状态读取之前）：
@@ -72,7 +71,7 @@ import java.util.function.LongSupplier;
  *       {@code INVALID_REQUEST}；</li>
  *   <li>管理令牌常量时间比对（{@link ConstantTime}，防时序
  *       侧信道）：失败或未配置令牌 → {@code INVALID_REQUEST} + 断连
- *       （不泄露原因，spec"管理令牌认证"）。</li>
+ *       （不泄露原因）。</li>
  * </ol>
  *
  * <p><b>数据源</b>：单机读 {@link CoreEngine} 的明细只读观察面
@@ -86,7 +85,7 @@ import java.util.function.LongSupplier;
  *
  * <p><b>隔离保证</b>：本处理器由 {@code ServerSessionHandler} 在业务
  * 分发与 {@code ServerMetrics} 埋点之前独立早退调用——管理流量零指标
- * 污染（spec"管理流量与业务面隔离"）；仍处单连接在途限额记账内。
+ * 污染；仍处单连接在途限额记账内。
  *
  * <p><b>线程模型</b>：{@link #handle} 在受理连接的 EventLoop 上同步执行
  * （只读观察面均为条目锁/实例锁内的短临界区拷贝，与租约扫描线程、状态机
@@ -98,9 +97,9 @@ public final class AdminRequestHandler {
     /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(AdminRequestHandler.class);
 
-    /** 分页页大小上限（防观察面自身成为放大攻击源，spec"分页、过滤与排序语义"）。 */
+    /** 分页页大小上限（防观察面自身成为放大攻击源）。 */
     public static final int MAX_PAGE_SIZE = 200;
-    /** ADMIN 消息的最低连接协商协议版本（v3 专属语义，wire-protocol"管理消息增量"）。 */
+    /** ADMIN 消息的最低连接协商协议版本（v3 专属语义）。 */
     public static final int MIN_ADMIN_VERSION = 3;
 
     /** 管理令牌配置（未配置即拒绝一切，安全默认）。 */
@@ -176,7 +175,7 @@ public final class AdminRequestHandler {
                 };
             }
         } catch (RuntimeException e) {
-            // 分发兜底与业务路径同纪律：绝不静默悬挂（详设 §4.2 只读观察面）。
+            // 分发兜底与业务路径同纪律：绝不静默悬挂。
             log.warn("admin dispatch failure on request {} (type {})",
                     msg.getRequestId(), msg.getType(), e);
             resp = RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR);
@@ -192,8 +191,7 @@ public final class AdminRequestHandler {
 
     /**
      * 令牌校验：未配置一律拒；载荷形状不符拒；比对用共享的
-     * {@link ConstantTime}（等长补齐常量时间，防时序/长度侧信道，§5.2
-     * 原则的管理通道应用）。
+     * {@link ConstantTime}（等长补齐常量时间，防时序/长度侧信道）。
      *
      * @param msg ADMIN 请求信封
      * @return 校验通过返回 true
@@ -213,7 +211,7 @@ public final class AdminRequestHandler {
         if (!config.isConfigured() || presented == null) {
             return false;
         }
-        // 常量时间原语（Phase 3 T4，spec"常量时间比较"）：与业务令牌共用单一
+        // 常量时间原语：与业务令牌共用单一
         // 实现（等长补齐，长度不等不早退）；评审面收敛单处。
         return ConstantTime.matches(presented, config.token());
     }
@@ -263,7 +261,7 @@ public final class AdminRequestHandler {
 
     /**
      * 集群角色读数：本节点 nodeId 与 {@link LeaderTracker} 快照比对——
-     * 选举空窗如实 {@code UNKNOWN}，MUST NOT 虚报（spec"双形态数据源"）。
+     * 选举空窗如实 {@code UNKNOWN}，MUST NOT 虚报。
      *
      * @return {@code LEADER}/{@code FOLLOWER}/{@code UNKNOWN}
      */
@@ -280,7 +278,7 @@ public final class AdminRequestHandler {
      * 本节点是否当值 Leader（等待队列可见性门控用）：取复制网关的权威
      * 角色判定（应用事件折算），比 {@code LeaderTracker} 提示更贴近
      * "队列是否为本任期真队列"。降级残留队列随下次当选一并清除，
-     * 非 Leader 一律不呈现等待数据（spec"等待队列仅 Leader 可见"）。
+     * 非 Leader 一律不呈现等待数据。
      *
      * @return 集群形态且当值 Leader 返回 true
      */
@@ -475,8 +473,8 @@ public final class AdminRequestHandler {
                 .setStatus(StatusCode.OK);
         for (ServerSession s : connected) {
             long sid = s.sessionId();
-            // 接入节点：逻辑会话 id 高位（nodeId<<32|localSeq，Phase 2 会话
-            // id 编码约定）；单机形态无集群身份恒 0。
+            // 接入节点：逻辑会话 id 高位（nodeId<<32|localSeq 编码约定）；
+            // 单机形态无集群身份恒 0。
             long nodeId = cluster == null ? 0 : sid >>> 32;
             b.addSessions(AdminSessionInfo.newBuilder()
                     .setSessionId(sid)
@@ -539,7 +537,7 @@ public final class AdminRequestHandler {
      * 集群侧持有角色词表映射：影子表不区分写侧/读侧归属（条目定型类型
      * 是唯一依据）——READ 定型条目的持有者报 {@code reader}，
      * Semaphore 报 {@code holder}，其余锁类型报 {@code writer}
-     * （观察近似口径，明细真相在 Leader 引擎，spec 允许弱一致镜像）。
+     * （观察近似口径，明细真相在 Leader 引擎，弱一致镜像呈现）。
      *
      * @param lockTypeValue 条目定型锁类型数值
      * @return 角色词

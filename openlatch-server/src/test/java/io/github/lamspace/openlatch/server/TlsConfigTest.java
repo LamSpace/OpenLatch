@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link TlsConfig} 加载与结构性校验（spec"服务端 TLS 传输层"）：缺省回落
+ * {@link TlsConfig} 加载与结构性校验（服务端 TLS 传输层）：缺省回落
  * 明文栈、键覆盖、启用必填 cert/key、mTLS 必填 trust-store 的快速失败。
  */
 class TlsConfigTest {

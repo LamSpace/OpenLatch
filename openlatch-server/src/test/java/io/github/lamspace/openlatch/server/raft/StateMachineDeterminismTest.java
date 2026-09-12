@@ -22,8 +22,8 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 回放确定性测试（详设 §10"状态机单元"层，P2-06 验证列；PoC
- * {@code DeterminismTest} 转正并扩展，design D2）。
+ * 回放确定性测试（状态机单元层；PoC
+ * {@code DeterminismTest} 转正并扩展）。
  *
  * <p>判据全部落在复制状态摘要（{@link ShadowTable#digest()}）上：同序列
  * 两次应用摘要一致（含到期/续租/会话关闭对时刻的敏感路径）、到期语义
@@ -140,7 +140,7 @@ class StateMachineDeterminismTest {
         }
         assertThat(core.shadow().hasLatch("lat")).isTrue();
         assertThat(core.shadow().latchCount("lat")).isEqualTo(1);
-        // 定型不符与家族误用回 INVALID_REQUEST 码形（P3-07 接正）。
+        // 定型不符与家族误用回 INVALID_REQUEST 码形。
         ApplyResult bad = ApplyResult.parseFrom(core.applyEntry(
                 RaftEntrySamples.latchCountDown(71, "lat", 0, 9, 4_000, 4).toByteArray()));
         assertThat(bad.getStatus()).isEqualTo(ApplyStatus.INVALID_REQUEST);
@@ -172,7 +172,7 @@ class StateMachineDeterminismTest {
         assertThat(digest).isEqualTo(new LockStateMachineCore(new CoreConfig()).digest());
     }
 
-    // 属性测试组数 ≥100（P2-06/2.4 口径）：8 个手工边界 seed + 101..200
+    // 属性测试组数 ≥100（口径）：8 个手工边界 seed + 101..200
     // 连续 seed，每组生成一条随机混排序列并两次回放比对 digest。
     @ParameterizedTest(name = "随机混排序列 seed={0}")
     @MethodSource("randomSequenceSeeds")
@@ -230,7 +230,7 @@ class StateMachineDeterminismTest {
      * Leader 扫描事实一致）。
      *
      * <p>包级可见：{@code StateMachineSnapshotTest} 的快照切割点不变性属性
-     * 测试共用同一序列发生器（S4/P2-15，两测同源防漂移）。
+     * 测试共用同一序列发生器（两测同源防漂移）。
      */
     static List<RaftLogEntry> randomSequence(Random rnd) {
         List<RaftLogEntry> seq = new ArrayList<>();

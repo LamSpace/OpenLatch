@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 单 key 的一次性倒计数屏障状态机（Phase 3 详设 §2.4 / P3-05）。
+ * 单 key 的一次性倒计数屏障状态机。
  *
  * <p><b>状态要素</b>：
  * <ul>
@@ -55,8 +55,8 @@ import java.util.Set;
  * 调用者锁外触发；生命周期方法实现 {@link KeyEntry} 契约。
  *
  * <p><b>一次性语义</b>：归零后 {@code await} 立即通过、{@code countDown}
- * 无操作；不支持重置——新屏障用新 key（参与者散尽即条目回收，回收后
- * 带值请求新建屏障、纯加入被拒，见 design D5）。
+ * 无操作；不支持重置——新屏障用新 key（不存在的 key 仅带值请求可定型
+ * 新建，纯加入被拒）。
  */
 public final class LatchEntry implements KeyEntry {
 
@@ -84,7 +84,7 @@ public final class LatchEntry implements KeyEntry {
     }
 
     /**
-     * 快照重建工厂（详设 §7.1 推广）：以计数快照直接装配，不经迁移规则；
+     * 快照重建工厂：以计数快照直接装配，不经迁移规则；
      * 等待者与参与者集恒空（均为 Leader 本地态，不入复制状态）。
      *
      * @param key   屏障键
@@ -275,7 +275,7 @@ public final class LatchEntry implements KeyEntry {
 
     /**
      * 恒 {@code false}：屏障条目不随操作收尾回收——未归零屏障必须存活等待
-     * 扣减，已归零屏障以条目存续承载一次性护栏（见类注释与 design D5 修订）。
+     * 扣减，已归零屏障以条目存续承载一次性护栏（见类注释）。
      *
      * @return 恒 {@code false}
      */
@@ -303,7 +303,7 @@ public final class LatchEntry implements KeyEntry {
     }
 
     /**
-     * awaiter 队列长度读数（统计观察面，Phase 3 T2；与锁家族统一为
+     * awaiter 队列长度读数（统计观察面；与锁家族统一为
      * "本 key 当前排队等待项数"口径）。须在持有条目锁时调用。
      *
      * @return 当前等待屏障的条目数
@@ -314,7 +314,7 @@ public final class LatchEntry implements KeyEntry {
     }
 
     /**
-     * 明细只读快照（Phase 3 T3，spec"明细只读观察面"）：条目锁内拷贝
+     * 明细只读快照：条目锁内拷贝
      * 定型总量与剩余计数、awaiter 队列（按 FIFO 序，等待项 threadId 恒 0、
      * permits 恒 1——与入队形态一致）与参与会话集。屏障无租约与持有者，
      * 租约三元组与持有表恒零值/空表。纯读，MUST NOT 改变任何状态。

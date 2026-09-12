@@ -39,25 +39,24 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * 进程级杀 Leader 演练（变更 s3-leader-discovery-failover 4.1/4.2，P2-14
- * S3 退出门；详设 §10"故障演练"、§11 验收 1/2 的计时部分）：
+ * 进程级杀 Leader 演练（故障演练档，含恢复计时判据）：
  * {@code kill -9} 三节点集群的当值 Leader，计时"杀 → 客户端首次成功业务"
- * 恢复窗口，并断言 §8 双场景与不变式。
+ * 恢复窗口，并断言双场景与不变式。
  *
  * <p><b>运行门控</b>：{@code @Tag("drill")}，默认构建排除；执行需先
  * {@code mvn -s <settings> -pl openlatch-server -am package} 产出 shaded jar，
  * 再以 {@code mvn verify -Pdrill -pl openlatch-client -Dit.test=LeaderKillDrillIT}
  * 触发（jar 缺失时显式告警跳过，与 {@code ClientProcessKillIT} 同纪律）。
  *
- * <p><b>场景覆盖</b>（详设 §8 行为表，杀 Leader 行）：
+ * <p><b>场景覆盖</b>：
  * <ol>
  *   <li>恢复计时：kill -9 Leader → 存活客户端经重定向/种子发现在 &lt;10s 内
  *       完成一次全新授予（含选举 + 客户端改道）；</li>
- *   <li>home=死主：持锁连接断开 → 失锁回调触发（锁本应随会话清理，§8 行 1）；</li>
+ *   <li>home=死主：持锁连接断开 → 失锁回调触发（锁本应随会话清理）；</li>
  *   <li>杀 Follower：多数派仍满足，Leader 上业务无感（授予持续成功）；</li>
  *   <li>不变式：单驱动线程持锁审计——同键不出现双活持有者；停载后锁表经
  *       租约兜底清空（下一驱动以全新授予成功即证）。双授强检查器随
- *       P2-19 混沌测试横扩（此处以单驱动串行 + token 审计覆盖最小面）。</li>
+ *       混沌测试横扩（此处以单驱动串行 + token 审计覆盖最小面）。</li>
  * </ol>
  *
  * <p>产物：结构化演练报告追加写入仓库根 {@code docs/failover-drill-<日期>.md}
@@ -70,7 +69,7 @@ class LeaderKillDrillIT {
 
     /** 端口就绪/事件等待统一时限（秒）。 */
     private static final long WAIT_SECONDS = 20;
-    /** 恢复预算阈值（详设 §2.4：Leader 故障到恢复服务 < 10s）。 */
+    /** 恢复预算阈值（Leader 故障到恢复服务 < 10s）。 */
     private static final long RECOVERY_BUDGET_MS = 10_000;
 
     /** 节点句柄。 */
@@ -107,7 +106,7 @@ class LeaderKillDrillIT {
             leader.process().destroyForcibly();
             leader.process().waitFor(10, TimeUnit.SECONDS);
 
-            // 恢复（端到端计时）：重试环。按 §6.2 断连快速失败契约，落在死
+            // 恢复（端到端计时）：重试环。按断连快速失败契约，落在死
             // 车道上的尝试会立即失败（调用方重试）；重试直到命中已重连的
             // home/获取车道并被客户端内建重定向与发现机制授予。单次等待
             // 取满内部预算上限（defaultWaitTimeout 20s），绝不抛弃在途请求
@@ -129,10 +128,10 @@ class LeaderKillDrillIT {
                 }
             }
             assertThat(again).as("端到端恢复：授予在观察窗内完成（尝试 %d 次）", attempt).isNotNull();
-            assertThat(recoveryMs).as("端到端恢复 < 10s（详设 §2.4/§11-2）")
+            assertThat(recoveryMs).as("端到端恢复 < 10s")
                     .isLessThan(RECOVERY_BUDGET_MS);
 
-            // 旧锁：home 宕机 → 失锁回调（§8 行 1；宽限期 = 3s 租约）
+            // 旧锁：home 宕机 → 失锁回调（宽限期 = 3s 租约）
             String lostKey = lost.poll(10, TimeUnit.SECONDS);
             boolean holdLostReported = "drill-hold".equals(lostKey);
             assertThat(holdLostReported).as("home=死主：失锁回调触发").isTrue();
@@ -167,7 +166,7 @@ class LeaderKillDrillIT {
 
     /**
      * 场景 B：杀单个 Follower——多数派仍满足（3 容忍 1），Leader 混合负载
-     * 无感（§8 行 3）。独立三节点集群：与场景 A 不可共用（连杀两节点即
+     * 无感。独立三节点集群：与场景 A 不可共用（连杀两节点即
      * 失去多数派）。
      */
     @Test
@@ -214,7 +213,7 @@ class LeaderKillDrillIT {
     }
 
     /**
-     * 场景 C（Phase 3 T1/P3-07）：kill -9 当值 Leader——Semaphore 许可池与
+     * 场景 C：kill -9 当值 Leader——Semaphore 许可池与
      * Latch 计数为复制状态，切换后可见性/扣减/放行全链路在新 Leader 上收敛；
      * 死主车道上的旧客户端经重连改道后归还许可无泄漏。
      */
@@ -384,7 +383,7 @@ class LeaderKillDrillIT {
         if (jar == null) {
             System.err.println("[WARN] LeaderKillDrillIT SKIPPED: openlatch-server executable "
                     + "shade jar not found; run 'mvn -s <settings> -pl openlatch-server -am package' "
-                    + "before '-Pdrill' to make this P2-14 fault-injection case effective.");
+                    + "before '-Pdrill' to make this fault-injection case effective.");
         }
         assumeTrue(jar != null, "openlatch-server shaded jar not built; run package first");
         return jar;
@@ -396,7 +395,7 @@ class LeaderKillDrillIT {
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {
-            Files.writeString(out, "# 杀 Leader 演练报告（s3 P2-14）\n\n- 生成：3 节点本机 shaded jar，"
+            Files.writeString(out, "# 杀 Leader 演练报告\n\n- 生成：3 节点本机 shaded jar，"
                     + "election-timeout 800ms\n\n");
         }
         Files.writeString(out, section, java.nio.file.StandardOpenOption.APPEND);

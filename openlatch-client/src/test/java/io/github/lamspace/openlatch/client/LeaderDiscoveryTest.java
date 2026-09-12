@@ -20,10 +20,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 客户端 Leader 发现与故障转移单元测试（详设 §6.3 逐分支，变更
- * s3-leader-discovery-failover 3.4）：以 {@link ScriptedServer} 真实 TCP 桩
+ * 客户端 Leader 发现与故障转移单元测试（逐分支）：以 {@link ScriptedServer} 真实 TCP 桩
  * 驱动完整 {@link OpenLatchClient}（含 {@code ConnectionManager} 与获取车道
- * 编排），不起真集群。"failover 期间持锁不丢"的转发车道端到端形态归 3.5。
+ * 编排），不起真集群。"failover 期间持锁不丢"的转发车道端到端形态归集群端到端用例。
  */
 @Timeout(value = 40, unit = TimeUnit.SECONDS)
 class LeaderDiscoveryTest {
@@ -137,7 +136,7 @@ class LeaderDiscoveryTest {
             default -> null;
         });
         // A 的 HELLO 报 hint=3 但地址空（服务端未配置 client-addresses）：
-        // 启动不改道（无址）、发现探针走 CLUSTER_VIEW 自报兜底（design D4）。
+        // 启动不改道（无址）、发现探针走 CLUSTER_VIEW 自报兜底。
         ScriptedServer a = new ScriptedServer(req -> switch (req.getType()) {
             case HELLO -> hello(req, 1000, 3, "");
             case LOCK_ACQUIRE -> {

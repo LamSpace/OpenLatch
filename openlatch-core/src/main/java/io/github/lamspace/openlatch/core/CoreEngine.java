@@ -77,7 +77,7 @@ public final class CoreEngine {
     private final Clock clock;
     /** 事件出口，接收队首通知事件（条目锁外触发）。 */
     private final CoreEventListener listener;
-    /** key → 状态条目映射与条目生命周期（Phase 3 T1 后按家族承载锁/Semaphore/Latch 条目）。 */
+    /** key → 状态条目映射与条目生命周期（按家族承载锁/Semaphore/Latch 条目）。 */
     private final LockTable lockTable = new LockTable();
     /** 租约到期堆，供 {@link #expireDue} 扫描。 */
     private final LeaseManager leaseManager = new LeaseManager();
@@ -102,7 +102,7 @@ public final class CoreEngine {
     }
 
     /**
-     * 快照状态重建（详设 §7.1，S4/design D1）：以 {@link CoreStateRestore}
+     * 快照状态重建：以 {@link CoreStateRestore}
      * 一次性注入复制状态全集，恢复后本引擎对继承锁的行为与从未被截断的
      * 原生演化路径一致。仅供快照加载使用——集群状态机在恢复/安装快照时以
      * <b>全新引擎</b>调用本方法一次；非快照恢复路径 MUST NOT 调用。
@@ -124,11 +124,11 @@ public final class CoreEngine {
      *       登记表 {@code putIfAbsent} 语义）；持有者所属会话触及的 key
      *       一并登记，使 {@link #sessionClosed} 对继承持有的清理完整；</li>
      *   <li>到期堆回填：每个继承条目按（key、凭证、到期时刻）offer 堆记录，
-     *       使 {@link #expireDue} 能回收快照继承的租约（spec"到期扫描覆盖
-     *       继承租约"；陈旧校验语义与原生路径相同）；</li>
+     *       使 {@link #expireDue} 能回收快照继承的租约（陈旧校验语义与
+     *       原生路径相同）；</li>
      *   <li>发号水位：租约凭证发号器置为输入的 {@code nextLeaseToken}
-     *       （快照内已发出的最大凭证 +1 起），后续授予既不复用继承凭证
-     *       （spec"发号不复用继承凭证"），也与未截断副本对同一尾部日志
+     *       （快照内已发出的最大凭证 +1 起），后续授予既不复用继承凭证，
+     *       也与未截断副本对同一尾部日志
      *       发出逐笔相同的凭证（跨副本一致依赖此水印）。</li>
      * </ol>
      *
@@ -200,7 +200,7 @@ public final class CoreEngine {
 
     /**
      * 下一枚租约凭证的快照读数（不发号）：授予新持有时将签发 {@code >= }
-     * 本读数的凭证。供快照生成侧读取发号水位（详设 §7.1 / s4 design D10），
+     * 本读数的凭证。供快照生成侧读取发号水位，
      * 与 {@link #restoreFrom} 的水位输入对偶。
      *
      * @return 当前发号器值（首次授予将返回的凭证）
@@ -300,13 +300,13 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
-        // LATCH 不经获取通道（详设 §2.1"走独立通道"）：ACQUIRE 携带 LATCH
+        // LATCH 不经获取通道：ACQUIRE 携带 LATCH
         // 类型属请求形状错误，协议层 v3 门控之后由本守卫兜底。
         if (cmd.lockType() == LockType.LATCH) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         KeyFamily family = familyOf(cmd.lockType());
-        // Semaphore 建条目预检：条目不存在时总量主张必须 > 0（design D1）。
+        // Semaphore 建条目预检：条目不存在时总量主张必须 > 0。
         // 竞态良性：他者抢先建条目后本请求按"既有条目断言"规则处理。
         if (family == KeyFamily.SEMAPHORE && cmd.permitsTotal() <= 0 && lockTable.get(key) == null) {
             return new AcquireResult(Outcome.REJECT_SEMAPHORE_TOTAL, 0, 0, 0);
@@ -318,7 +318,7 @@ public final class CoreEngine {
             KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant, cmd));
             synchronized (e) {
                 if (lockTable.get(key) != e) {
-                    continue; // 条目在等待期间被移除，重试（design.md D4）
+                    continue; // 条目在等待期间被移除，重试
                 }
                 // 家族判定先于会话登记：跨家族请求对条目状态与会话触及集零扰动。
                 if (e.family() != family) {
@@ -331,7 +331,7 @@ public final class CoreEngine {
                     }
                     return new AcquireResult(Outcome.REJECT_SESSION, 0, 0, 0);
                 }
-                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集，详设 §2.3）。
+                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集）。
                 AcquireResult result = switch (e) {
                     case LockEntry le -> le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
                             effectiveLeaseMs, config);
@@ -353,7 +353,7 @@ public final class CoreEngine {
 
     /**
      * 请求锁类型 → 条目家族。锁家族全部类型（REENTRANT/SIMPLE/READ/WRITE，
-     * 及 Phase 3 起的 FAIR 别名）落 {@link KeyFamily#LOCK}；SEMAPHORE/LATCH
+     * 及 FAIR 别名）落 {@link KeyFamily#LOCK}；SEMAPHORE/LATCH
      * 类型接入时在此增行（编译器以 switch 穷尽性强制更新）。
      *
      * @param lockType 请求的锁类型
@@ -370,7 +370,8 @@ public final class CoreEngine {
     /**
      * 按家族创建条目。锁家族条目构造与既有 {@code new LockEntry(k, reentrant)}
      * 逐参数一致；Semaphore 条目以请求的 {@code permitsTotal} 定型许可总量
-     * （建条目预检已保证 &gt; 0）；Latch 家族 P3-05 接入前不可达。
+     * （建条目预检已保证 &gt; 0）；Latch 家族不可达——屏障条目由屏障
+     * 专属命令直接装配，ACQUIRE 携带 LATCH 在入口即拒。
      *
      * @param family    目标家族
      * @param key       锁键
@@ -480,7 +481,7 @@ public final class CoreEngine {
     }
 
     /**
-     * 等待屏障（Phase 3 详设 §2.4 / P3-05）：校验会话与 key 后，
+     * 等待屏障：校验会话与 key 后，
      * 已归零立即通过、挂起排队或拒绝。
      *
      * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 校验 →
@@ -513,7 +514,7 @@ public final class CoreEngine {
             }
             synchronized (e) {
                 if (lockTable.get(key) != e) {
-                    continue; // 条目竞态移除，重试（design.md D4 同机制）
+                    continue; // 条目竞态移除，重试
                 }
                 if (e.family() != KeyFamily.LATCH) {
                     return new LatchAwaitResult(Outcome.REJECT_TYPE_MISMATCH, 0);
@@ -534,7 +535,7 @@ public final class CoreEngine {
     }
 
     /**
-     * 倒计数（Phase 3 详设 §2.4 / P3-05）：条目定位与会话校验同
+     * 倒计数：条目定位与会话校验同
      * {@link #latchAwait}；生效扣减后计数首次归零时对全部等待者广播
      * 通知（锁外经 {@link CoreEventListener} 触发）。归零屏障上的
      * countDown 为无操作（一次性语义）。
@@ -644,7 +645,7 @@ public final class CoreEngine {
     }
 
     /**
-     * 只读统计观察面（Phase 3 T2，spec"只读统计观察面"）：弱一致遍历
+     * 只读统计观察面：弱一致遍历
      * {@link LockTable} 全部条目聚合 held/等待者/队深与登记会话数。
      *
      * <p><b>held 判据</b>：条目锁内读 {@link KeyEntry#leaseToken()}，非零
@@ -689,7 +690,7 @@ public final class CoreEngine {
     }
 
     /**
-     * 明细只读观察面（Phase 3 T3，spec"明细只读观察面"）：弱一致遍历
+     * 明细只读观察面：弱一致遍历
      * {@link LockTable} 全部条目，逐条目在条目锁内产出不可变明细快照
      * （持有者/等待队列/租约/许可/屏障计数），聚合为 {@link CoreInspection}。
      *
@@ -742,7 +743,7 @@ public final class CoreEngine {
         long now = clock.nowMs();
         synchronized (e) {
             // 条目可能在取锁瞬间被回收（isEmpty 移除路径）：回查成员身份，
-            // 与命令路径同一 D4 纪律——非当前值即视作不存在。
+            // 与命令路径同纪律：非当前值即视作不存在。
             if (lockTable.get(key) != e) {
                 return null;
             }

@@ -24,11 +24,11 @@ import org.springframework.context.annotation.Configuration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * P1-27 兼容性冒烟：验证 Java 25 × Spring Boot 4.0.3 的自动装配链路。
+ * 兼容性冒烟：验证 Java 25 × Spring Boot 4.0.3 的自动装配链路。
  *
  * <p>覆盖三段风险路径：{@code AutoConfiguration.imports} 注册文件被解析、
  * 本模块自动装配类被选中并实例化、{@code @Configuration} 类经 CGLIB 增强
- * （Framework 7 字节码栈对 Java 25 的支持点）。定案结论回写详设 §8.4。
+ * （Framework 7 字节码栈对 Java 25 的支持点）。
  */
 class AutoConfigurationSmokeTest {
 

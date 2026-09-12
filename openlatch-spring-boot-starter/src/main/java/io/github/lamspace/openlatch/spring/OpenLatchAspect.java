@@ -49,7 +49,7 @@ import io.github.lamspace.openlatch.client.ServerUnavailableException;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 
 /**
- * {@link OpenLatch} 注解的锁切面（详设 §8.3，M4 定案见 design D7）。
+ * {@link OpenLatch} 注解的锁切面。
  *
  * <p><b>职责与流程</b>：{@code @Around("@annotation(openLatch)")} 拦截标注
  * 方法，依次执行——①SpEL 求值锁键（解析结果按"方法 + 表达式"缓存）；
@@ -58,7 +58,7 @@ import io.github.lamspace.openlatch.protocol.StatusCode;
  * 本切面仅以本地兜底时限等待结果）；③执行业务方法；④finally 语义释放：
  * 释放失败分类处理——锁已丢失（{@code INVALID_TOKEN}/{@code NOT_HELD}/
  * {@code SESSION_EXPIRED}/断连）静默跳过并记 debug 日志（丢失事件已由
- * 客户端锁丢失通道通知，design D3；会话过期仅计入释放侧，获取侧原样
+ * 客户端锁丢失通道通知；会话过期仅计入释放侧，获取侧原样
  * 传播，见使用约束），其余失败若业务已成功则抛出，业务已抛异常则仅记
  * 日志、不掩盖业务结果；释放等待被中断时恢复中断标志并放行、不上抛
  * （锁状态未确认，最坏随租约到期兜底）。
@@ -193,7 +193,7 @@ public class OpenLatchAspect {
     }
 
     /**
-     * 业务执行后的守卫式释放（design D3）：锁已丢失（失效状态码
+     * 业务执行后的守卫式释放：锁已丢失（失效状态码
      * {@code INVALID_TOKEN}/{@code NOT_HELD}/{@code SESSION_EXPIRED} 或断连
      * 不可达）时静默跳过——丢失事件已经客户端 {@code LockLostListener}
      * 通道通知，服务端以租约到期兜底；其余真实失败只在业务成功时抛出，

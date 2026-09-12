@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §10.2 属 M1 的两类协议测试：全消息类型 round-trip 与未知字段容忍。
+ * 两类协议编解码测试：全消息类型 round-trip 与未知字段容忍。
  */
 class ProtocolCodecTest {
 
@@ -251,10 +251,10 @@ class ProtocolCodecTest {
         assertThat(reparsed.getUnknownFields().hasField(999)).isTrue();
     }
 
-    /** 场景：MessageType/LockType/StatusCode 枚举编号与设计说明书 §3.2 逐项核对（抽查关键取值）。 */
+    /** 场景：MessageType/LockType/StatusCode 枚举编号与线格式契约逐项核对（抽查关键取值）。 */
     @Test
     void enumValuesMatchDesignSpecification() {
-        // 字段/枚举取值与设计说明书 §3.2 逐项一致（抽查关键取值）。
+        // 字段/枚举取值与线格式契约逐项一致（抽查关键取值）。
         assertThat(MessageType.HELLO.getNumber()).isEqualTo(1);
         assertThat(MessageType.LOCK_ACQUIRE.getNumber()).isEqualTo(2);
         assertThat(MessageType.LOCK_RELEASE.getNumber()).isEqualTo(3);
@@ -274,7 +274,7 @@ class ProtocolCodecTest {
         assertThat(StatusCode.OVERLOADED.getNumber()).isEqualTo(6);
         assertThat(StatusCode.KEY_EMPTY.getNumber()).isEqualTo(8);
         assertThat(StatusCode.INVALID_REQUEST.getNumber()).isEqualTo(9);
-        // Phase 1 预留、v2 启用：编号不变。
+        // v1 预留、v2 启用：编号不变。
         assertThat(StatusCode.NOT_LEADER.getNumber()).isEqualTo(10);
     }
 

@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 明细只读观察面用例（spec"明细只读观察面"）：预置多家族多持有者状态
+ * 明细只读观察面用例：预置多家族多持有者状态
  * 后逐字段断言快照（角色/计数/位次/时长折算），并钉住"纯读零扰动 + 并发观察
  * 零异常 + 条目内自洽"三条契约。手工时钟，无 sleep。
  */

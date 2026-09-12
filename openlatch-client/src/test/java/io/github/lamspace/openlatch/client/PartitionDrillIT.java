@@ -37,8 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * 网络分区真分区演练（详设 §10"分区隔离用进程组/网络命名空间隔离实现"、
- * §8"网络分区（少数派侧）"行、§11-3 主轨；S4/P2-18/design D7）。
+ * 网络分区真分区演练（分区隔离以进程组/网络命名空间实现，
+ * 针对"网络分区（少数派侧）"场景，作为该判据主轨）。
  *
  * <p><b>拓扑</b>：本机起 Linux 网桥 + 3 个网络命名空间（netns），三节点
  * OpenLatch 各居其一（10.199.0.1/2/3，共享同一桥接 L2）；客户端在默认
@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * 全部流量——节点存活（接入端口 19413 不受影响、可收写请求）但复制面被切，
  * 构成"少数派侧在线节点"而非"进程失联"。
  *
- * <p><b>断言（§11-3 主轨）</b>：
+ * <p><b>断言（主轨判据：少数派不能授予或释放任何锁）</b>：
  * <ol>
  *   <li>分区中多数派（n1/n2）照常服务：可授予、可释放、摘要收敛；</li>
  *   <li>分区中少数派节点 n3 收写的全部请求失败——合法协议序（HELLO 建本地
@@ -56,7 +56,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *       即证当轮 n3→Leader 复制面未被切断；HELLO 成功不构成受理证据）下：
  *       ACQUIRE ×4 判 NOT_LEADER（n3 无从当选）；RELEASE 携多数派真实持有
  *       凭证判非 OK（码形二选一：复制面可达→应用点归属裁决 NOT_HELD；
- *       不可达→转发失败 NOT_LEADER 可重试——皆非授予/释放，§11-3 均成立）；
+ *       不可达→转发失败 NOT_LEADER 可重试——皆非授予/释放，判据均成立）；
  *       同键不双授；</li>
  *   <li>锁存活于分区：Leader 侧以同凭证释放成功（少数派未夺锁、未误释放）；</li>
  *   <li>撤除分区后自动收敛：n3 追平多数派，digest 一致，写入恢复。</li>
@@ -68,8 +68,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p><b>运行门控</b>：需 passwordless sudo 且内核支持 netns/iptables；
  * 不满足时显式跳过并打印触发命令。默认构建排除（{@code @Tag("drill")}）；
- * 主轨已于 {@code phase2-release-closure} 收口期以宿主最小授权真跑通过
- * （2026-09-06），进程内辅轨 {@code MinorityQuorumTest} 保留为零权限回归。
+ * 进程内辅轨 {@code MinorityQuorumTest} 保留为零权限回归。
  * 子进程日志落 {@code target/drill-logs/}，报告追加 {@code docs/partition-drill-<日期>.md}。
  */
 @Tag("drill")
@@ -182,12 +181,11 @@ class PartitionDrillIT {
             release(client, majorityGrant, "partition-live");
 
             // 少数派（n3）收写全部失败（不经 SDK——客户端会沿 hint 改道多数派，
-            // 那是产品正确行为而非"少数派受理"）。判据口径（本 change 任务 4.1
-            // 修正归因，见 observations-not-held-code-shape.md）：HELLO 回 OK 只
+            // 那是产品正确行为而非"少数派受理"）。判据口径（修正归因）：HELLO 回 OK 只
             // 可能出自 SESSION_OPEN 的应用回执道（无本地握手快速道），实测
             // "OK:NOT_HELD" 即证当轮 n3→Leader 复制面未被隔离规则切断，RELEASE
             // 在应用点被判归属不符——若复制面真被切断，该道回 NOT_LEADER（可
-            // 重试）。两形态皆非授予/释放，§11-3 判定不依赖此区分——
+            // 重试）。两形态皆非授予/释放，判定不依赖此区分——
             // ① ACQUIRE 判 NOT_LEADER；② RELEASE 持真凭证判非 OK，且 Leader 侧
             // 同凭证可正常释放（锁不随分区被夺）。
             String[] errs = new String[4];
@@ -583,10 +581,10 @@ class PartitionDrillIT {
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {
-            Files.writeString(out, "# 分区演练报告（s4 P2-18 / §11-3 主轨）\n\n"
+            Files.writeString(out, "# 分区演练报告\n\n"
                     + "- 生成：netns 桥接拓扑，n3 ↔ (n1,n2) raft 面隔离，接入面保留\n"
-                    + "- 判据口径：§11-3「少数派不能授予或释放任何锁」——合法协议序（HELLO 建会话"
-                    + "后直发）下探角色门与转发道；HELLO 本身在少数派可完成本地握手（S3 规格允许"
+                    + "- 判据口径：「少数派不能授予或释放任何锁」——合法协议序（HELLO 建会话"
+                    + "后直发）下探角色门与转发道；HELLO 本身在少数派可完成本地握手（协议允许"
                     + " Follower 握手），不构成受理证据，授予/释放的拒绝判定以下两行为准\n\n");
         }
         Files.writeString(out, "## 本轮\n\n"

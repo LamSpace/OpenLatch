@@ -19,7 +19,7 @@ package io.github.lamspace.openlatch.core;
 import java.util.List;
 
 /**
- * 引擎明细只读观察面的一次性快照（Phase 3 T3，spec"明细只读观察面"）。
+ * 引擎明细只读观察面的一次性快照。
  *
  * <p><b>定位</b>：{@link CoreStats} 聚合读数之外的**明细级**观察面——
  * 按 key 条目携带持有者、等待队列与租约的完整可见状态，是上层管理协议

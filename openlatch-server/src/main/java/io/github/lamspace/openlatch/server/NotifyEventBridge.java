@@ -26,15 +26,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * core 事件出口 → 协议推送（设计说明书 §5.1）：按 {@code sessionId} 反查连接
- * （design.md D2），写回 {@code AWAIT_NOTIFY}（{@code request_id = 0}，
+ * core 事件出口 → 协议推送：按 {@code sessionId} 反查连接，
+ * 写回 {@code AWAIT_NOTIFY}（{@code request_id = 0}，
  * {@code request_id_ref} 指向原获取请求）。
  * <p>
  * <b>线程模型</b>：回调线程不定——释放/会话清理触发的通知来自对应连接的 IO
  * 线程，到期回收与队首清扫触发的通知来自租约扫描线程；注册表反查与
  * {@code writeAndFlush} 均线程安全，写出由 Netty 投递到目标连接的 EventLoop
  * 执行。连接不存在或写出失败时静默丢弃——队列位置由 core 的队首响应超时
- * 机制兜底回收（规格"队首通知推送"）。
+ * 机制兜底回收。
  */
 public final class NotifyEventBridge implements CoreEventListener {
 

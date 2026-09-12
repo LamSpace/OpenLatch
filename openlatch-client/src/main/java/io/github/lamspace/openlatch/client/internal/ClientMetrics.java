@@ -25,7 +25,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 客户端可选指标门面（Phase 3 详设 §3.3，spec"客户端可选监控指标"）。
+ * 客户端可选指标门面。
  *
  * <p><b>启停语义</b>：构造入参注册表为 {@code null} 即禁用形态（默认）——
  * 全部记录方法首行判空短路，零计数、零额外分配路径，客户端行为与不引入
@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit;
  * MUST NOT 改变任何既有行为契约（超时值、重试与同 id 重发、看门狗节奏、
  * 失锁判定）——本类只做旁路观测，无任何返回值参与裁决。
  *
- * <p><b>指标词表</b>（命名与详设 §3.3 逐项对齐；{@code type} 取
+ * <p><b>指标词表</b>（{@code type} 取
  * {@link MessageType} 名，{@code status} 取应答协议状态码名或失败类别
  * {@code TIMEOUT}/{@code UNAVAILABLE}/{@code FAILED}）：
  * <ul>

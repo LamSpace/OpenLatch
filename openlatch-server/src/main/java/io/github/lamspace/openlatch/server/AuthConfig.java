@@ -27,22 +27,21 @@ import java.util.List;
 import java.util.Properties;
 
 /**
- * 业务令牌认证配置（Phase 3 详设 §5.2/§10.4 P3-16，spec"业务令牌认证与默认
- * 兼容守卫"；{@code openlatch.server.auth.*} 键族）。
+ * 业务令牌认证配置（{@code openlatch.server.auth.*} 键族）。
  *
  * <p><b>与 {@link ServerConfig}/{@link TlsConfig}/{@link AdminConfig} 的关系</b>：
  * 同一 Properties 文件的认证子集，独立记录而非扩展既有记录（"同文件独立加载"
- * 先例）。业务令牌与 {@code AdminConfig} 的管理令牌 MUST 相互独立（spec
- * "管理令牌独立性"），两者不互替、不借道。
+ * 先例）。业务令牌与 {@code AdminConfig} 的管理令牌 MUST 相互独立，
+ * 两者不互替、不借道。
  *
  * <p><b>令牌承载通道</b>：业务令牌经 HELLO 的 {@code HelloRequest.auth_token}
- * 携带（Phase 1 预留字段，P3-16 起启用），一次完成于握手；会话生命周期内不做
- * 逐请求鉴权（连接即身份，详设 §5.3）。
+ * 携带，一次完成于握手；会话生命周期内不做
+ * 逐请求鉴权（连接即身份）。
  *
- * <p><b>默认值口径</b>：{@code enabled=false}（默认）= Phase 1 兼容守卫（HELLO
+ * <p><b>默认值口径</b>：{@code enabled=false}（默认）= 兼容守卫（HELLO
  * 携带非空 {@code auth_token} → 拒绝并断连，行为与现状逐字节一致）；
  * {@code enabled=true} 时 MUST 配置 ≥1 个令牌（启动快速失败），校验命中任一
- * 即放行——多令牌支持轮换期双活（spec"轮换期多令牌双活"）。
+ * 即放行——多令牌支持轮换期双活。
  *
  * @param enabled 是否启用业务认证（默认 false = 兼容守卫）
  * @param tokens  业务令牌列表（逗号分隔配置；{@code enabled=true} 时 ≥1；
@@ -50,10 +49,10 @@ import java.util.Properties;
  */
 public record AuthConfig(boolean enabled, List<String> tokens) {
 
-    /** 配置键前缀（详设 §5.2）。 */
+    /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.server.auth.";
 
-    /** 默认认证开关（关闭——Phase 1 兼容守卫）。 */
+    /** 默认认证开关（关闭——兼容守卫）。 */
     public static final boolean DEFAULT_ENABLED = false;
 
     /**
@@ -78,7 +77,7 @@ public record AuthConfig(boolean enabled, List<String> tokens) {
     }
 
     /**
-     * 关闭形态（Phase 1 兼容守卫）——兼容构造重载与库内嵌缺省。
+     * 关闭形态（兼容守卫）——兼容构造重载与库内嵌缺省。
      *
      * @return 关闭认证配置
      */

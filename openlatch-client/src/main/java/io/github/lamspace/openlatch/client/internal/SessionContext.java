@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 当前连接的会话上下文：持有服务端分配的 {@code sessionId} 与本连接的
- * {@code requestId} 分配器（详设 §6.2/§6.4）。
+ * {@code requestId} 分配器。
  *
  * <p>每次（重）连接成功都会创建新实例：{@code sessionId} 必然更换，
  * {@code requestId} 重新从 1 分配；旧实例随旧连接作废，其残留响应按

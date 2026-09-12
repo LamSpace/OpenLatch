@@ -48,25 +48,25 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.IntConsumer;
 
 /**
- * Ratis 状态机适配器（详设 §3.2 {@code LockStateMachine}）：把 Ratis 的
+ * Ratis 状态机适配器：把 Ratis 的
  * 应用与 Leadership 事件翻译到 {@link LockStateMachineCore} 与
  * {@link ApplyObserver}，自身不含任何锁语义。
  *
- * <p><b>契约要点</b>（design D10）：Ratis 仅应用<b>多数派已提交</b>的条目
+ * <p><b>契约要点</b>：Ratis 仅应用<b>多数派已提交</b>的条目
  * （{@code StateMachineUpdater} 以 {@code applied < committedIndex} 推进，
  * Leader 与 Follower 同线程同规则），因此：①客户端在应用回执后应答即天然
  * "提交后应答"；②被截断（未提交）的条目从未进入过本状态机，降级/回滚
  * 无需任何补偿；③应用线程单线程串行，{@link EntryClock} 的 thread-local
  * 条目时刻契约成立。
  *
- * <p><b>快照通道（S4，§7/P2-15~16，design D3/D4/D5）</b>：{@link #takeSnapshot()}
+ * <p><b>快照通道</b>：{@link #takeSnapshot()}
  * 在应用线程（Ratis {@code StateMachineUpdater}，与 apply 同线程）产出
  * applyLock 内的一致性副本（{@link LockStateMachineCore#snapshotState()}），
  * <b>锁外</b>写盘（tmp→原子 rename→MD5 伴随文件）后交还位点——库侧据此
  * 截断日志并按保留数清理旧快照（保留 2 份由装配层配置）。「异步落盘」的
  * 口径即"applyLock 外落盘"：完全异步（先返位点后落盘）会造成截断先于
- * 持久化的崩溃窗口，被 design D4 显式否决；写盘期间 updater 线程的短暂
- * 停为既定代价，耗时由 §10 快照基准度量。安装侧走 Ratis 3.3 的
+ * 持久化的崩溃窗口，故被显式否决；写盘期间 updater 线程的短暂
+ * 停为既定代价，耗时由快照基准度量。安装侧走 Ratis 3.3 的
  * pause→库发布快照文件→{@code StateMachineUpdater.reload}：{@link #pause()}
  * 仅做生命周期迁移（PAUSING→PAUSED），{@link #reinitialize()} 重扫目录取
  * 最新快照文件、经 {@link LockStateMachineCore#installSnapshot} 整体替换
@@ -88,7 +88,7 @@ public final class LockStateMachine extends BaseStateMachine {
     /**
      * Ratis 原生单文件快照存储（snapshot.T_I 命名、latest 引用与保留清理
      * 由库负责）：安装流中库侧把 Leader 下发的快照块直接落到本存储目录，
-     * 本状态机经同一实例读写——不自管磁盘（design D3）。
+     * 本状态机经同一实例读写——不自管磁盘。
      */
     private final SimpleStateMachineStorage storage = new SimpleStateMachineStorage();
     /** 应用/Leadership 观察者，装配期可替换（volatile：应用线程读、装配线程写）。 */
@@ -122,8 +122,8 @@ public final class LockStateMachine extends BaseStateMachine {
 
     /**
      * Ratis 初始化：登记 server/group 与快照存储，随后加载本地最新快照
-     * （§7.3-1：重建锁状态后由库从快照位点起重放日志）。生命周期经
-     * {@code startAndTransition} 推进（NEW→STARTING→RUNNING）——S4 起
+     * （重建锁状态后由库从快照位点起重放日志）。生命周期经
+     * {@code startAndTransition} 推进（NEW→STARTING→RUNNING），
      * {@link #pause()} 依赖 RUNNING 态的合法性（reload 断言 PAUSED）。
      *
      * @param server      承载本状态机的 Raft 服务
@@ -187,9 +187,9 @@ public final class LockStateMachine extends BaseStateMachine {
 
     /**
      * Leader 变更事件：折算为本节点角色后转发观察者（在途回执收尾与
-     * 任期队列清理的触发源，§4.4/§8），并把新 Leader 身份投递
-     * {@link #setLeaderIdentityListener 领导身份监听器}（s3 design D3 的
-     * {@link LeaderTracker} 数据源）：成员 id "n&lt;nodeId&gt;" 折算为数值
+     * 任期队列清理的触发源），并把新 Leader 身份投递
+     * {@link #setLeaderIdentityListener 领导身份监听器}（{@link LeaderTracker}
+     * 数据源）：成员 id "n&lt;nodeId&gt;" 折算为数值
      * nodeId，选举中无 Leader（或无法解析）以 -1 表达。两个转发都同步、
      * 不阻塞（观察者契约）。
      *
@@ -212,7 +212,7 @@ public final class LockStateMachine extends BaseStateMachine {
     }
 
     /**
-     * 装配领导身份监听器（{@link LeaderTracker} 挂点，s3 design D3）。
+     * 装配领导身份监听器（{@link LeaderTracker} 挂点）。
      * 须在 {@code RaftServer} 启动前注册；重复调用以最后一次为准。
      *
      * @param listener 监听器，{@code null} 表示摘除
@@ -240,11 +240,11 @@ public final class LockStateMachine extends BaseStateMachine {
     }
 
     /**
-     * 生成并落盘一份快照（详设 §7.2，S4/P2-15）。由 Ratis 应用线程在
+     * 生成并落盘一份快照。由 Ratis 应用线程在
      * 未快照位点差越过阈值时调用（亦经 {@code RaftSubsystem.triggerSnapshot()}
      * 的运维/测试通道，见其 Javadoc 的线程注记）。
      *
-     * <p><b>流程与语义</b>（design D4）：取已应用位点 → applyLock 内
+     * <p><b>流程与语义</b>：取已应用位点 → applyLock 内
      * {@link LockStateMachineCore#snapshotState()} 一致性副本（含发号水位）→
      * 放锁 → 写临时文件、原子 rename 到库命名 {@code snapshot.T_I}、
      * 计算并存储 MD5 伴随文件（安装端校验依赖）→ 更新库侧 latest 引用。
@@ -265,7 +265,7 @@ public final class LockStateMachine extends BaseStateMachine {
         if (ti == null || ti.getTerm() <= 0 || ti.getIndex() <= 0) {
             return -1L;
         }
-        // 锁内一致性副本（applyLock 内序列化，design D4）——此后副本不可变，
+        // 锁内一致性副本（applyLock 内序列化）——此后副本不可变，
         // 状态照常演化，演化由快照位点之后的日志承载。
         final SnapshotState state = core.snapshotState();
         final File dst = storage.getSnapshotFile(ti.getTerm(), ti.getIndex());
@@ -289,7 +289,7 @@ public final class LockStateMachine extends BaseStateMachine {
     }
 
     /**
-     * 快照安装暂停（Ratis 3.3 安装流第一步，design D5）：库侧写完快照块后、
+     * 快照安装暂停（Ratis 3.3 安装流第一步）：库侧写完快照块后、
      * 原子发布前调用本方法，仅做生命周期迁移（RUNNING→PAUSING→PAUSED）；
      * 应用位点的重置在 {@link #reinitialize()}。
      */

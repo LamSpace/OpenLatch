@@ -15,9 +15,8 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 少数派不可授予的进程内近似用例（详设 §8"网络分区（少数派侧）"行 /
- * §11-3 辅轨，design D7：失联近似的常规回归；真分区主轨见
- * {@code scripts/partition-drill.sh} 演练脚本）。
+ * 少数派不可授予的进程内近似用例（辅轨：失联近似的常规回归；
+ * 真分区主轨见 {@code PartitionDrillIT}）。
  *
  * <p>编排：让主到目标节点 → 停其余两节点（目标成为无多数派可及的单节点
  * Leader）→ 断言少数派侧写请求全部不生效（超时或错误，二者皆"不授予"）
@@ -59,7 +58,7 @@ class MinorityQuorumTest {
             h.stopNodeOtherThan(survivor.id);
 
             // 单节点 Leader 无法达成多数派：ACQUIRE 不产生授予——超时（无应答）
-            // 与错误应答都计为"写失败"（§6.3 快速失败语义的两条合法路径）。
+            // 与错误应答都计为"写失败"（快速失败语义的两条合法路径）。
             long rid = 700;
             for (int attempt = 0; attempt < 3; attempt++) {
                 boolean granted;
@@ -93,7 +92,7 @@ class MinorityQuorumTest {
             h.awaitTrue(h::aliveAgreeWithLeader, 30_000, "复活后三副本收敛");
             // 少数派窗口前已确认授予的锁不丢（已提交条目不因窗口丢失）——
             // 同会话同凭证续租成功为证：无论 survivor 此刻为 Leader 或 Follower，
-            // RENEW 均经转发车道/权威 Leader 复制执行（§4.5 分车道）。
+            // RENEW 均经转发车道/权威 Leader 复制执行。
             Envelope renewResp = c.request(renew(651, "held-before", heldToken));
             assertThat(renewResp.getLeaseRenewResponse().getStatus())
                     .as("leader=%s survivorLeader=%s", h.leader().id, survivor.isLeader())

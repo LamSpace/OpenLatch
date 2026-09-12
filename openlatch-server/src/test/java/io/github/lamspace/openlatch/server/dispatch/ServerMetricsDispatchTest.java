@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T2 单机路径 L1 埋点断言（spec"请求埋点覆盖单机与集群双路径"）：驱动
+ * 单机路径 L1 埋点断言（请求埋点覆盖单机与集群双路径之单机侧）：驱动
  * {@link RequestDispatcher} 消息面，逐项核对计数、耗时 result 折算、
  * gauge 联动读数与"每应答恰好一次"口径；含 LATCH 消息的映射口径与
  * 不埋点构造（null 门面）行为不变。

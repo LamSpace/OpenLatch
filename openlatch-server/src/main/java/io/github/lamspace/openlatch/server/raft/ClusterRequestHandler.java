@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 集群模式写请求处理器（详设 §4.5，design D3/D9）：Phase 1 的"同步函数
+ * 集群模式写请求处理器：单机模式的"同步函数
  * 调用即应答"在这里被替换为"预检查 → 提交 → 应用后应答"三段，本类承载
  * 协议侧的裁决与映射：
  *
@@ -49,15 +49,15 @@ import java.nio.charset.StandardCharsets;
  *   <li><b>预检查（快速失败通道）</b>：类型/键合法性与会话登记校验不过直接
  *       同步错误应答，MUST NOT 写日志；锁被占或队列非空时——可排队请求在
  *       本地 {@link WaitQueue} 登记并即时回 QUEUED，立即式回 DENIED，两者
- *       均不写日志（§4.5"排队不是复制状态"）；</li>
+ *       均不写日志（排队不是复制状态）；</li>
  *   <li><b>授予/释放/续租</b>：构造 {@link RaftEntryType} 条目提交
  *       {@link ReplicationGateway}，应答在完成回调中写回连接所属
- *       EventLoop（design D4）；</li>
+ *       EventLoop；</li>
  *   <li><b>回执 → 协议映射</b>：{@link ApplyStatus} 全表映射（与单机
  *       {@code RequestDispatcher} 的映射表语义逐项对齐，错误码不复用）。
  * </ul>
  *
- * <p><b>Follower 分车道（S3/P2-12，spec"Follower 写请求分车道"）</b>：
+ * <p><b>Follower 分车道</b>：
  * <ul>
  *   <li><b>ACQUIRE（新授予/排队）</b>：排队登记与 {@code AWAIT_NOTIFY} 是
  *       Leader 本地态，Follower 受理无法保证通知送达——角色门命中即同步回
@@ -78,10 +78,10 @@ import java.nio.charset.StandardCharsets;
  * 经 {@code channel.eventLoop().execute} 弹回写回——单连接的请求序由
  * EventLoop 串行保证，跨连接并发经日志全序仲裁。
  *
- * <p><b>指标埋点</b>（Phase 3 T2，详设 §3.4 勘误后与单机路径共用
+ * <p><b>指标埋点</b>（与单机路径共用
  * {@link ServerMetrics}）：每条受理并应答的请求恰记一次，收口于
  * {@link #writeSync}/{@link #respondAsync} 两个写回出口；耗时口径为
- * 受理至应答生成（spec"耗时与到期计数口径"：集群档含 Raft 提交等待）。
+ * 受理至应答生成（集群档含 Raft 提交等待）。
  * {@code metrics} 可为 {@code null}（测试夹具装配），此时零记录。
  */
 public final class ClusterRequestHandler {
@@ -97,7 +97,7 @@ public final class ClusterRequestHandler {
     private final WaitQueue waitQueue;
     /** 语义内核（会话登记预检消费影子表）。 */
     private final LockStateMachineCore kernel;
-    /** Leader 提示单源（NOT_LEADER 应答随附提示，s3 design D3）。 */
+    /** Leader 提示单源（NOT_LEADER 应答随附提示）。 */
     private final LeaderTracker leaderTracker;
     /** 指标词表门面；{@code null} 表示不埋点（测试夹具装配形态）。 */
     private final ServerMetrics metrics;
@@ -142,8 +142,8 @@ public final class ClusterRequestHandler {
      * ACQUIRE 集群路径：预检查通过后提交，应答于应用后写回。
      *
      * <p>判定顺序（同步分支立即写回，异步分支接管在途记账）：
-     * 角色（Follower 即 {@code NOT_LEADER}+提示改连，S3 分车道）→
-     * 载荷与键合法性 → 会话登记 → 排队裁决（§4.5 预演）。
+     * 角色（Follower 即 {@code NOT_LEADER}+提示改连，分车道）→
+     * 载荷与键合法性 → 会话登记 → 排队裁决（预演）。
      *
      * @param session 已握手会话（携带逻辑 sessionId）
      * @param msg     请求信封
@@ -161,13 +161,13 @@ public final class ClusterRequestHandler {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
-        // v3 门控（详设 §6）：与单机分发器同规则——v3 专属类型对低版本会话
+        // v3 门控：与单机分发器同规则——v3 专属类型对低版本会话
         // 消息级拒绝、不断连，先于排队预检与提案（MUST NOT 进入复制日志）。
         if (session.protocolVersion() < 3 && RequestDispatcher.isV3OnlyLockType(req.getLockType())) {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
-        // 许可参数合法性（与单机分发器共用判定，P3-03）：非法不入日志。
+        // 许可参数合法性（与单机分发器共用判定）：非法不入日志。
         StatusCode permitBad = RequestDispatcher.validateAcquirePermits(req);
         if (permitBad != null) {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, permitBad));
@@ -176,18 +176,18 @@ public final class ClusterRequestHandler {
         boolean queueWanted = req.getWaitMs() != 0;
         boolean semaphore = req.getLockType() == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_SEMAPHORE;
         boolean held = kernel.shadow().isHeld(req.getKey());
-        // 重入豁免（Phase 3 T1）：请求归属已在持有集内时不得被 busy 拦截——
+        // 重入豁免：请求归属已在持有集内时不得被 busy 拦截——
         // 与单机引擎"重入先于队列规则"对齐；重入判定读无锁快照（可旧不可错，
         // 误放行由应用路径裁决）。
         boolean reentrantHold = held && kernel.shadow().isHeldBy(
                 session.sessionId(), req.getThreadId(), req.getKey());
-        // 许可感知 busy（design D4）：Semaphore 的"占用"是池不足而非有人持有
+        // 许可感知 busy：Semaphore 的"占用"是池不足而非有人持有
         // （多持有者共存是常态）；条目已回收视同池满量（重发带断言重建）。
         int permits = RequestDispatcher.normalizedPermits(req.getPermits());
         boolean poolShort = kernel.shadow().isSemaphore(req.getKey())
                 && kernel.shadow().permitsAvailable(req.getKey()) < permits;
         // 队首重发且授予条件成立（锁：无人持有；Semaphore：池足量）：自推进
-        // 走复制授予路径（AWAIT_NOTIFY 后重发的 Phase 1 语义等价形态；
+        // 走复制授予路径（AWAIT_NOTIFY 后重发，与直接受理语义等价；
         // onGranted 负责出队）。
         boolean selfPromotion = waitQueue.isHead(
                 session.sessionId(), msg.getRequestId(), req.getKey())
@@ -215,7 +215,7 @@ public final class ClusterRequestHandler {
             return;
         }
         // 可授予预演 → 复制路径。应用结果为准：预演失效时 Leader 在应用点
-        // 补登记并改写回执（gateway.leaderSideEffects，design D3）。
+        // 补登记并改写回执（gateway.leaderSideEffects）。
         ByteString payload = AcquirePayload.newBuilder()
                 .setSessionId(session.sessionId())
                 .setRequestId(msg.getRequestId())
@@ -241,7 +241,7 @@ public final class ClusterRequestHandler {
             writeSync(ctx, session, startNanos, bad);
             return;
         }
-        // 归还数为负属参数非法（与单机分发器同规则，P3-03），不入日志。
+        // 归还数为负属参数非法（与单机分发器同规则），不入日志。
         if (msg.getReleaseRequest().getPermits() < 0) {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
@@ -285,7 +285,7 @@ public final class ClusterRequestHandler {
      * 回 {@code NOT_LEADER} 并随附 {@link LeaderTracker} 当时的提示。
      * 转发车道（RELEASE/RENEW）不设角色门：条目经内部通道抵达当值 Leader，
      * 权威判定在应用点。会话登记预检两车道同规则：连接 sid 于握手完成前已
-     * 在本副本应用（D12），本地判 {@code SESSION_EXPIRED} 与 Leader 判定
+     * 在本副本应用，本地判 {@code SESSION_EXPIRED} 与 Leader 判定
      * 结果一致且省一次转发。返回非 {@code null} 即为应立即写回的同步错误。
      *
      * @param msg          请求信封
@@ -294,9 +294,9 @@ public final class ClusterRequestHandler {
      * @return 需立即写回的错误应答；通过预检为 {@code null}
      */
     /**
-     * LATCH_COUNT_DOWN 集群路径（Phase 3 T1，转发车道）：计数变更属复制状态，
+     * LATCH_COUNT_DOWN 集群路径（转发车道）：计数变更属复制状态，
      * 与 RELEASE 同车道不设角色门——Follower 提交经内部通道由当值 Leader
-     * 复制执行；等待队列不在日志内（design D9 同构）。
+     * 复制执行；等待队列不在日志内。
      *
      * @param session 已握手会话
      * @param msg     请求信封
@@ -328,10 +328,10 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * LATCH_AWAIT 集群路径（Phase 3 T1，ACQUIRE 车道 + Leader 本地裁决）：
+     * LATCH_AWAIT 集群路径（ACQUIRE 车道 + Leader 本地裁决）：
      * await MUST NOT 进日志——但携带 {@code total} 的定型创建属计数变更，
-     * 先经 {@code LATCH_COUNT_DOWN_ENTRY(count=0)} 复制定型（design D1/D6
-     * 精化），提交确认后回到本地裁决；已归零直接放行（幂等重发抵达处），
+     * 先经 {@code LATCH_COUNT_DOWN_ENTRY(count=0)} 复制定型，
+     * 提交确认后回到本地裁决；已归零直接放行（幂等重发抵达处），
      * 未归零在 Leader 内存队列挂起（归零广播经 {@code AWAIT_NOTIFY}）。
      *
      * @param session 已握手会话
@@ -527,7 +527,7 @@ public final class ClusterRequestHandler {
 
     /**
      * 同步写回（预检/排队快速路径）：写完成终结该请求的在途记账；
-     * 写回前经指标出口记录一次（T2）。
+     * 写回前经指标出口记录一次。
      *
      * @param ctx         连接上下文
      * @param session     连接簿记（endRequest 目标）
@@ -541,9 +541,9 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 异步应答弹回连接 EventLoop 写回（design D4；断连后 writeAndFlush 自动丢弃，
+     * 异步应答弹回连接 EventLoop 写回（断连后 writeAndFlush 自动丢弃，
      * 写完成终结在途记账）；指标出口在弹回前记录——耗时样本自受理线程读
-     * 起算、含 Raft 提交等待（spec"耗时与到期计数口径"）。
+     * 起算、含 Raft 提交等待。
      *
      * @param ctx         连接上下文
      * @param session     连接簿记（endRequest 目标）
@@ -558,7 +558,7 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 指标出口（T2）：按应答信封家族计数并记耗时样本；测试夹具装配
+     * 指标出口：按应答信封家族计数并记耗时样本；测试夹具装配
      * （{@code metrics == null}）时零记录。
      *
      * @param resp       应答信封
@@ -571,7 +571,7 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 提交失败的应答拆分（S3/P2-12，不再共享混叠码）：
+     * 提交失败的应答拆分（不再共享混叠码）：
      * {@link ReplicationGateway.RetryableCommitException}（提交失败、降级在途
      * 终结、子系统未就绪等在途可重试原因）以 {@code NOT_LEADER} + 当时提示
      * 应答，客户端按提示改道或退避；其余异常为预期外的内部失败，记 WARN
@@ -594,7 +594,7 @@ public final class ClusterRequestHandler {
      * 随附 Leader 提示的 {@code NOT_LEADER} 应答：按原请求类型选载荷
      * （Acquire/Release/LeaseRenew），{@code leader_node_id} 取
      * {@link LeaderTracker} 单源当时值（选举空窗 -1），{@code leader_address}
-     * 未配置地址映射时为空串（客户端种子发现兜底，design D4）。
+     * 未配置地址映射时为空串（客户端种子发现兜底）。
      *
      * @param msg 原请求信封
      * @return 带提示的拒绝应答

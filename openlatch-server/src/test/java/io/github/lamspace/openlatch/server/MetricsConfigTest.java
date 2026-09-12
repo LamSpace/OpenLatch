@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link MetricsConfig} 加载与校验（spec"指标配置与管理端点生命周期"）：
+ * {@link MetricsConfig} 加载与校验：
  * 缺省回落（启用 + 9412）、文件覆盖、非法值快速失败。
  */
 class MetricsConfigTest {

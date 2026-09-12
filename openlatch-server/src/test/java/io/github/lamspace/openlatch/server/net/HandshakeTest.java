@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §3.2.1 握手规则（design.md D8）：握手前拒绝、版本/令牌校验、重复 HELLO、requestId 回显。
+ * 握手规则：握手前拒绝、版本/令牌校验、重复 HELLO、requestId 回显。
  */
 class HandshakeTest {
 
@@ -67,7 +67,7 @@ class HandshakeTest {
      *
      * @param requestId 请求 id
      * @param version   客户端协议版本
-     * @param authToken 认证令牌（Phase 1 合法值为空串）
+     * @param authToken 认证令牌（v1 合法值为空串）
      * @return 信封
      */
     private static Envelope hello(long requestId, int version, String authToken) {
@@ -114,7 +114,7 @@ class HandshakeTest {
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getType()).isEqualTo(MessageType.HELLO);
         assertThat(resp.getRequestId()).isEqualTo(42);
-        // v1 客户端：应答信封回显请求版本 1（与 Phase 1 同形），自身版本报 2。
+        // v1 客户端：应答信封回显请求版本 1，自身版本报 2。
         assertThat(resp.getProtocolVersion()).isEqualTo(1);
         HelloResponse hr = resp.getHelloResponse();
         assertThat(hr.getStatus()).isEqualTo(StatusCode.OK);
@@ -144,7 +144,7 @@ class HandshakeTest {
 
     @Test
     void v3_hello_accepted_with_version_echo() {
-        // Phase 3 T1：v3 握手进入接受区间，回显请求版本 3。
+        // v3 握手进入接受区间，回显请求版本 3。
         ch.writeInbound(Envelope.newBuilder()
                 .setProtocolVersion(3)
                 .setType(MessageType.HELLO)
@@ -171,7 +171,7 @@ class HandshakeTest {
         assertThat(resp.getRequestId()).isEqualTo(43);
         assertThat(resp.getType()).isEqualTo(MessageType.CLUSTER_VIEW);
         // 单机无集群视图可报：status=INVALID_REQUEST + 空成员表
-        // （spec"单机模式不响应 CLUSTER_VIEW"）
+        // （单机模式不响应 CLUSTER_VIEW）
         assertThat(resp.getClusterView().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);
         assertThat(resp.getClusterView().getNodesCount()).isZero();
         assertThat(ch.isOpen()).isTrue();

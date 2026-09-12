@@ -39,7 +39,7 @@ import java.util.Deque;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §5.4 单连接在途限额的 handler 级端到端断言（变更 phase1-audit-remediation）：
+ * 单连接在途限额的 handler 级端到端断言：
  * 写完成前请求计入在途（endRequest 挂在写完成回调上），超过
  * {@code maxInflightPerConnection} 的请求回 {@code OVERLOADED} 且不计入在途、
  * 不断连。出站写由 {@link HangingWriter} 滞留以模拟"响应尚未写完"。

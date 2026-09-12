@@ -23,9 +23,8 @@ import java.util.function.Function;
 /**
  * key → {@link KeyEntry} 的映射与条目生命周期。用 {@link ConcurrentHashMap} 承载，
  * 条目创建用 {@link #computeIfAbsent}，销毁用条件移除 {@link #remove(String, KeyEntry)}，
- * 避免移除/创建竞态（设计说明书 §4.9.1）。值为 {@link KeyEntry} 抽象——
-Phase 3 T1 后同一张表按家族承载锁/Semaphore/Latch 条目，创建侧的
-工厂由调用方（{@code CoreEngine}）按请求家族选择。
+ * 避免移除/创建竞态。值为 {@link KeyEntry} 抽象——同一张表按家族承载
+ * 锁/Semaphore/Latch 条目，创建侧的工厂由调用方（{@code CoreEngine}）按请求家族选择。
  */
 public final class LockTable {
 

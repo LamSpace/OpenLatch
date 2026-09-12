@@ -27,7 +27,7 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * {@link OLock} 的远程实现：全部语义裁决委托服务端，本地仅做归属簿记与
- * 阻塞桥接（详设 §6.3）。
+ * 阻塞桥接。
  *
  * <p><b>阻塞桥接</b>：{@code lock}/{@code tryLock} 通过获取 future 的限时
  * {@code get} 实现；阻塞上界 = 等待时长 + 请求超时 + 1s 余量，杜绝死等。

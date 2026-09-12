@@ -52,21 +52,20 @@ import java.util.Map;
 
 /**
  * 复制状态机内核：Raft 日志条目 → {@link CoreEngine} 的应用与
- * {@link ShadowTable} 双写核算的唯一入口（详设 §4.2/§4.3；S1 PoC 内核转正，
- * design D1/D2/D9/D12）。
+ * {@link ShadowTable} 双写核算的唯一入口。
  *
  * <p><b>职责与边界</b>：本类只做"条目 → 状态迁移"，不接触网络、不感知角色；
  * 回执（{@link ApplyResult}）是非复制的应答辅助信息，Leader 用它完成客户端
  * 应答（{@code ReplicationGateway}），Follower 应用同一条目产生同样的
  * {@link CoreEngine} 迁移但回执无人消费。锁语义完全下沉 {@link CoreEngine}，
  * 本类是它的集群调用方——集群路径对引擎的每一次可变调用都发生在
- * {@link #apply} 内（design D12 的"引擎状态变更唯一漏斗"不变式）。
+ * {@link #apply} 内（"引擎状态变更唯一漏斗"不变式）。
  *
- * <p><b>时间语义（§4.3）</b>：应用期间经 {@link EntryClock} 注入条目携带时刻，
+ * <p><b>时间语义</b>：应用期间经 {@link EntryClock} 注入条目携带时刻，
  * 授予/续租的到期 = 条目时刻 + 租期，到期条目回放以条目时刻求到期集——
  * 物理时钟不进入任何状态迁移，同一序列在任何副本任何时刻重放结果一致。
  *
- * <p><b>会话映射</b>：逻辑会话 id（{@code (nodeId<<32)|localSeq}，§5.2）在
+ * <p><b>会话映射</b>：逻辑会话 id（{@code (nodeId<<32)|localSeq}）在
  * {@code sidMap} 登记后映射到本副本引擎的内部 sid；引擎随机 sid 不出本节点，
  * 跨副本对齐只经影子表（digest 以逻辑 id 表达）。
  *
@@ -74,17 +73,17 @@ import java.util.Map;
  * 语义仍按幂等设计——SESSION_OPEN 重复登记为无操作，SESSION_CLOSE 对未登记
  * 会话无操作，到期条目由引擎的"凭证+到期时刻"陈旧校验兜底（ABA 安全）。
  *
- * <p><b>快照通道（S4，design D1/D2/D10）</b>：{@link #snapshotState()} 在
+ * <p><b>快照通道</b>：{@link #snapshotState()} 在
  * applyLock 内产出一致性状态（影子表 proto + 引擎发号水位）；
  * {@link #installSnapshot} 以<b>全新引擎</b>经 {@code CoreEngine.restoreFrom}
  * 整体替换状态并重建 {@code sidMap}——回灌重放路线在"快照含历史释放空洞"
- * 下无法复现凭证序列（PoC 已证伪），发号水位使重建副本与未截断副本对同一
+ * 下无法复现凭证序列，发号水位使重建副本与未截断副本对同一
  * 尾部日志发出逐笔相同的凭证（digest 跨快照切割点可比）。引擎替换只发生在
  * applyLock 内、应用/安装线程域，业务投影（{@link ShadowTable#heldEntries()}）
  * 经影子表 {@code load} 的原子替换获得一致视图。
  *
  * <p><b>线程模型</b>：{@link #apply} 仅由状态机应用线程（单线程、条目间无并发，
- * Ratis {@code StateMachineUpdater}，design D10）调用；{@code applyLock} 兜底
+ * Ratis {@code StateMachineUpdater}）调用；{@code applyLock} 兜底
  * 串行并保护影子表一致性快照。构造后 {@link #shadow()}/{@link #digest()} 的
  * 无锁投影读取（{@link ShadowTable#heldEntries()} 等）允许发生在 Leader 业务线程。
  */
@@ -106,7 +105,7 @@ public final class LockStateMachineCore {
     /**
      * 锁语义核心。集群路径的可变入口为 {@link #apply}（条目迁移）与
      * {@link #installSnapshot}（快照整体替换，applyLock 内换入全新引擎）——
-     * 二者之外不得变更引擎状态（design D12 不变式的 S4 扩展）。
+     * 二者之外不得变更引擎状态。
      */
     private CoreEngine engine;
 
@@ -124,7 +123,7 @@ public final class LockStateMachineCore {
     }
 
     /**
-     * 装配一个零状态引擎：集群引擎恒不登记等待项（design D9），
+     * 装配一个零状态引擎：集群引擎恒不登记等待项，
      * {@code notifyHead} 事件源只存在于单机路径，此处收到即说明集群路径
      * 误登记了等待项，记 WARN。{@link #installSnapshot} 换入新引擎时复用。
      *
@@ -233,8 +232,8 @@ public final class LockStateMachineCore {
 
     /**
      * LOCK_ACQUIRE_ENTRY：以 {@code queueIfBusy=false} 调引擎（集群等待队列不
-     * 进引擎，design D9），授予时镜像影子表；需排队时回
-     * {@link ApplyStatus#DENIED}（排队裁决由 Leader 侧在应用回调中完成，§4.5/D3）。
+     * 进引擎），授予时镜像影子表；需排队时回
+     * {@link ApplyStatus#DENIED}（排队裁决由 Leader 侧在应用回调中完成）。
      *
      * @param entry 条目（载荷为 {@link AcquirePayload}）
      * @return 回执：OK（携带凭证/租期/到期）或 DENIED/REJECT_SESSION/INTERNAL_ERROR
@@ -258,7 +257,7 @@ public final class LockStateMachineCore {
         return switch (r.outcome()) {
             case GRANTED -> {
                 long expiresAt = entry.getWallClockMs() + r.grantedLeaseMs();
-                // Semaphore 授予按许可数镜像持有增量；锁家族恒 1（P3-03/P3-07）。
+                // Semaphore 授予按许可数镜像持有增量；锁家族恒 1。
                 int holderDelta = lockType == LockType.SEMAPHORE
                         ? RequestDispatcher.normalizedPermits(req.getPermits()) : 1;
                 shadow.grantDelta(p.getSessionId(), req.getThreadId(), req.getKey(),
@@ -273,7 +272,7 @@ public final class LockStateMachineCore {
             }
             case DENIED -> ApplyResult.newBuilder().setStatus(ApplyStatus.DENIED).build();
             case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
-            // v3 形状拒绝（家族误用/总量断言）：参数非法回执，P3-04 码形接正。
+            // v3 形状拒绝（家族误用/总量断言）：回执 INVALID_REQUEST。
             case REJECT_TYPE_MISMATCH, REJECT_SEMAPHORE_TOTAL, REJECT_LATCH_TOTAL ->
                     ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
             // 引擎集群路径 queueIfBusy=false 且恒无等待项：QUEUED/QUEUE_FULL 不可达，
@@ -309,7 +308,7 @@ public final class LockStateMachineCore {
             case NOT_HELD -> ApplyStatus.NOT_HELD;
             case INVALID_TOKEN -> ApplyStatus.INVALID_TOKEN;
             case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
-            // 超额归还：参数与持有不符，回执 INVALID_REQUEST（P3-07 码形接正）。
+            // 超额归还：参数与持有不符，回执 INVALID_REQUEST。
             case OVER_RELEASE -> ApplyStatus.INVALID_REQUEST;
         };
         ApplyResult.Builder b = ApplyResult.newBuilder().setStatus(st).setFullyReleased(r.fullyReleased());
@@ -357,8 +356,7 @@ public final class LockStateMachineCore {
      * LEASE_EXPIRE_ENTRY：token 守卫通过后（条目 token == 当前持有 且
      * 到期时刻 ≤ 条目时刻），以条目时刻驱动 {@code engine.expireDue()} 并镜像
      * 影子表清扫——释放集由"复制状态 + 条目时刻"唯一确定，跨副本判定恒等。
-     * 守卫不通过（已易主/尚未到期/已不存在）时整条空操作（spec ABA 场景，
-     * §4.3/P2-09）。守卫匹配时 {@code expireDue()} 顺带收敛同一时刻到期的
+     * 守卫不通过（已易主/尚未到期/已不存在）时整条空操作。守卫匹配时 {@code expireDue()} 顺带收敛同一时刻到期的
      * 其他 key（它们各有条目，回放先后互为空操作，终态一致）。
      *
      * @param entry       条目（载荷为 {@link ExpirePayload}，key + 被扫到期凭证）
@@ -369,7 +367,7 @@ public final class LockStateMachineCore {
     private ApplyResult applyExpire(RaftLogEntry entry, long entryTimeMs) throws InvalidProtocolBufferException {
         ExpirePayload p = ExpirePayload.parseFrom(entry.getCommandPayload());
         ShadowTable.HeldRef ref = shadow.heldRef(p.getKey());
-        // 回放守卫（spec"过期条目不误杀新持有者"）：条目 token 与当前持有
+        // 回放守卫（过期条目不误杀新持有者）：条目 token 与当前持有
         // 不匹配、或该 key 在条目时刻尚未到期 → 整条空操作。守卫输入全部是
         // 复制状态 + 条目携带时刻，跨副本判定恒等；匹配时以条目时刻驱动
         // engine.expireDue()（其"凭证+到期时刻"双陈旧校验顺带收敛同刻到期的
@@ -419,7 +417,7 @@ public final class LockStateMachineCore {
      * LATCH_COUNT_DOWN_ENTRY：引擎倒计数（创建/断言/扣减全在引擎内，家族误用与
      * 总量断言拒回 {@link ApplyStatus#INVALID_REQUEST}），OK 时镜像影子表
      * （条目创建与剩余计数回写、参与会话登记）并随回执携带 {@code remaining}
-     * 供 Leader 侧归零广播判定（design D5/D6）。
+     * 供 Leader 侧归零广播判定。
      *
      * @param entry 条目（载荷为 {@link LatchCountDownPayload}）
      * @return 回执
@@ -510,9 +508,9 @@ public final class LockStateMachineCore {
     }
 
     /**
-     * 产出当前复制状态的一致性快照形态（详设 §7.1/§7.2，S4/P2-15）：
+     * 产出当前复制状态的一致性快照形态：
      * applyLock 内取影子表 proto 并嵌入引擎发号水位（
-     * {@code next_lease_token}，design D10——缺它则重建副本对同一尾部日志
+     * {@code next_lease_token}——缺它则重建副本对同一尾部日志
      * 发出与未截断副本不同的凭证，跨副本 digest 永久分叉）。
      *
      * <p><b>并发语义</b>：与 {@link #apply} 互斥于同一 {@code applyLock}，
@@ -530,7 +528,7 @@ public final class LockStateMachineCore {
     }
 
     /**
-     * 安装一份快照并整体替换状态（详设 §7.3，S4/P2-16）：启动加载（本地
+     * 安装一份快照并整体替换状态：启动加载（本地
      * 最新快照）与追赶安装（Leader 流式下发）共用本通道。
      *
      * <p><b>原子性</b>：applyLock 内完成"全新引擎重建（

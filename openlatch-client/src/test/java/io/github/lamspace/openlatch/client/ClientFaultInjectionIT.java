@@ -26,12 +26,12 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 故障注入套件（§10.4，tasks 9.1/9.2/9.4）：持锁中断连、等待中断连、
+ * 故障注入套件：持锁中断连、等待中断连、
  * 半开连接的服务端空闲清理。
  */
 class ClientFaultInjectionIT {
 
-    /** 短租约快扫描服务器配置：持锁断连用例（§10.4 用 1–2s 短租约）。 */
+    /** 短租约快扫描服务器配置：持锁断连用例（1–2s 短租约）。 */
     private static ServerConfig fastExpiry(int port) {
         ServerConfig d = ServerConfig.defaults();
         return new ServerConfig(port, d.workerThreads(), d.idleTimeoutMs(), 200L,

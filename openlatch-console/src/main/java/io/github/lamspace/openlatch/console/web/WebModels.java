@@ -28,8 +28,8 @@ public final class WebModels {
     }
 
     /**
-     * 单节点单查询的尽力而为结果（spec"任一节点故障 MUST NOT 阻断对其余
-     * 节点的呈现"）：失败时 {@code value} 为 {@code null}、错误分类可见。
+     * 单节点单查询的尽力而为结果（任一节点故障 MUST NOT 阻断对其余
+     * 节点的呈现）：失败时 {@code value} 为 {@code null}、错误分类可见。
      *
      * @param display     节点展示名（host:port）
      * @param ok          查询是否成功

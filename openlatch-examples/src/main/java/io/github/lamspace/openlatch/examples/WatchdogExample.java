@@ -25,7 +25,7 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 
 /**
- * 示例 4：看门狗续租与锁丢失回调（详设 §9）。
+ * 示例 4：看门狗续租与锁丢失回调。
  *
  * <p>两段演示，服务器以短租约档位启动（默认 2s）：
  * <ol>
@@ -34,7 +34,7 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
  *   <li><b>人为停止续租</b>：持有期间直接关停服务器进程，断连使续租
  *       中止，客户端按失锁时刻（上次成功续租 + 生效租约）挂定时裁决，
  *       锁丢失回调在数秒内触发——断连期间续租不计数（半开连接下才走
- *       连续续租超时判定，详设 §6.2/§6.6）；若客户端稍后重连成功，
+ *       连续续租超时判定）；若客户端稍后重连成功，
  *       重连瞬间也会裁决旧会话锁已失效。</li>
  * </ol>
  *

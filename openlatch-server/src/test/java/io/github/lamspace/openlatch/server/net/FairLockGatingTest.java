@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Phase 3 T1 v3 门控与 FAIR 别名（协议层）：{@code LOCK_TYPE_FAIR} 仅对
+ * v3 门控与 FAIR 别名（协议层）：{@code LOCK_TYPE_FAIR} 仅对
  * 握手版本 ≥3 的会话开放，v1/v2 会话以 {@code INVALID_REQUEST} 消息级
  * 拒绝且不断连（非安全事件，区别于认证失败断连）；v3 会话上 FAIR 与
  * REENTRANT 按同族重入互认。

@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * §7.1 快照重建入口用例组（core-lock-engine spec"快照状态重建入口"）：
+ * 快照状态重建入口用例组：
  * 手工时钟驱动，验证 {@code restoreFrom} 注入状态后的操作正确性、发号跳界、
  * 到期堆回填与零状态守卫。
  */

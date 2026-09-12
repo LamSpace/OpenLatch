@@ -30,8 +30,7 @@ import io.github.lamspace.openlatch.core.LockType;
  * @param queueIfBusy      无快路径（锁被占用，或虽无持有者但等待队列非空——队首
  *                         已通知、待重发窗口，规则 3 禁止越过在队者）时是否排队。
  *                         {@code false} 对应协议 {@code wait_ms == 0} 的立即式获取，
- *                         无快路径即返回 {@code DENIED}；core 不感知等待时限
- *                         （等待模式折算见详设 §3.2.2）。
+ *                         无快路径即返回 {@code DENIED}；core 不感知等待时限。
  * @param permits          请求许可数（仅 SEMAPHORE 有效，{@code >= 1}；锁家族
  *                         请求不参与判定，缺省 1）
  * @param permitsTotal     Semaphore 许可总量断言：建条目时必填 {@code > 0}
@@ -51,7 +50,7 @@ public record AcquireCommand(
         int permitsTotal) {
 
     /**
-     * 锁家族便捷构造（Phase 1/2 既有调用形态）：许可参数取缺省
+     * 锁家族便捷构造：许可参数取缺省
      * （{@code permits = 1}、{@code permitsTotal = 0}），语义与锁请求一致。
      *
      * @param sessionId        发起请求的会话

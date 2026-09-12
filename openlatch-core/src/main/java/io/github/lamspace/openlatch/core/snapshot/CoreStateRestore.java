@@ -23,12 +23,12 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 快照状态重建的输入值对象（详设 §7.1，S4/design D1）：复制状态全集的
+ * 快照状态重建的输入值对象：复制状态全集的
  * core 原生形态——锁条目（含持有者计数与租约三元组）与会话登记集合。
  *
  * <p><b>定位</b>：本类型是 {@code CoreEngine.restoreFrom} 的唯一合法输入，
  * 刻意使用 core 原生类型（不引用 proto/序列化/网络类型），维持 core
- * "纯 Java、零外部依赖"的模块隔离（core-lock-engine spec"无网络与零依赖"）；
+ * "纯 Java、零外部依赖"的模块隔离；
  * 外部存储格式（如 Raft 快照的 {@code SnapshotState}）到本类型的翻译由
  * 调用方完成。
  *
@@ -87,7 +87,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                         int permitsTotal, long latchTotal, long latchCount) {
 
         /**
-         * 锁家族便捷构造（Phase 1/2 既有形态）：许可与屏障字段取缺省 0。
+         * 锁家族便捷构造：许可与屏障字段取缺省 0。
          *
          * @param key         锁键
          * @param lockType    锁类型
@@ -102,9 +102,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
         }
 
         /**
-         * 构造并校验条目形态自洽性（按家族分支）：锁条目沿用 Phase 1 规则
-         * （租约三元组非正、持有者列表为空、写类条目多持有者、{@code SIMPLE}
-         * 多层持有均拒绝）；Semaphore 条目额外要求总量不小于持有和且持有者
+         * 构造并校验条目形态自洽性（按家族分支）：锁条目在租约三元组非正、
+         * 持有者列表为空、写类条目多持有者、{@code SIMPLE} 多层持有时均拒绝；Semaphore 条目额外要求总量不小于持有和且持有者
          * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
          * 计数须在 {@code [0, total]} 内且 {@code total >= 1}。
          *

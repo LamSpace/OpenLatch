@@ -23,8 +23,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * 传输层 TLS 配置（Phase 3 详设 §5.1/§10.4 T4，spec"服务端 TLS 传输层"；
- * {@code openlatch.server.tls.*} 键族）。
+ * 传输层 TLS 配置（{@code openlatch.server.tls.*} 键族）。
  *
  * <p><b>与 {@link ServerConfig}/{@link MetricsConfig}/{@link AdminConfig} 的
  * 关系</b>：同一 Properties 文件的 TLS 子集，独立记录而非扩展既有记录——
@@ -37,11 +36,11 @@ import java.util.Properties;
  * 为可信任 CA 的 PEM 证书集，仅在 {@code require-client-cert=true}（mTLS）
  * 时必需。本配置只校验路径的<em>形态</em>（非空/配对），文件本身可读性在
  * {@link OpenLatchServer#start()} 构造 {@code SslContext} 时校验（快速失败，
- * 对齐"端口占用启动失败"语义，design D1）。
+ * 对齐"端口占用启动失败"语义）。
  *
  * <p><b>默认值口径</b>：未配置（{@code path} 空白、键缺省）即
- * {@link #disabled()}——明文协议栈，服务端行为与现状逐字节一致（spec"默认
- * 关闭明文照常"）。证书更新以重启生效，无热加载。
+ * {@link #disabled()}——明文协议栈，服务端行为与关闭 TLS 时逐字节一致。
+ * 证书更新以重启生效，无热加载。
  *
  * @param enabled          是否启用 TLS（{@code false} 即明文栈，与现状一致）
  * @param cert             服务端 PEM 证书（链）文件路径；{@code enabled} 时必填
@@ -52,10 +51,10 @@ import java.util.Properties;
 public record TlsConfig(boolean enabled, String cert, String key, String trustStore,
                         boolean requireClientCert) {
 
-    /** 配置键前缀（详设 §5.1）。 */
+    /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.server.tls.";
 
-    /** 默认 TLS 开关（关闭——明文栈，§6 兼容性策略"默认关闭"）。 */
+    /** 默认 TLS 开关（默认关闭——明文栈）。 */
     public static final boolean DEFAULT_ENABLED = false;
     /** 默认 mTLS 开关（关闭——单向 TLS）。 */
     public static final boolean DEFAULT_REQUIRE_CLIENT_CERT = false;
@@ -88,7 +87,7 @@ public record TlsConfig(boolean enabled, String cert, String key, String trustSt
 
     /**
      * 关闭形态（明文栈）——兼容构造重载与库内嵌缺省；与不引入本特性逐字节
-     * 一致（spec"默认关闭明文照常"）。
+     * 一致。
      *
      * @return 关闭 TLS 配置
      */

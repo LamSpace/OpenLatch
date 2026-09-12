@@ -22,7 +22,7 @@ import org.springframework.context.annotation.Bean;
 
 /**
  * starter 集成测试的 Boot 应用：仅"加依赖"（自动装配经 imports 生效）
- * + 一个被注解服务 Bean——验收标准 4 的最小形态。
+ * + 一个被注解服务 Bean——仅加依赖的最小形态。
  */
 @SpringBootConfiguration
 @EnableAutoConfiguration

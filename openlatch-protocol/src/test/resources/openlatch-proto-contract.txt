@@ -1,4 +1,4 @@
-# openlatch.proto 全量契约（v3-T3）：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
+# openlatch.proto 全量契约：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
 # 新增字段/枚举值/消息必须显式追加本文件（评审可见）；既有编号任何变更即构建失败
 enum MessageType
   MESSAGE_TYPE_UNKNOWN 0

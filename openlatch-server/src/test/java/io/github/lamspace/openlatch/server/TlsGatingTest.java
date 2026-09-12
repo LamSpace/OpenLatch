@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 服务端 TLS 门控（Phase 3 详设 §5.1/§10.4 P3-14，spec"服务端 TLS 传输层"）：
+ * 服务端 TLS 门控（服务端 TLS 传输层）：
  * 明文连接被拒、正确证书通过、mTLS 客户端证书强制、握手超时断开、坏配置
  * 启动快速失败。证书夹具为 {@code src/test/resources/tls/} 的预生成 PEM。
  */

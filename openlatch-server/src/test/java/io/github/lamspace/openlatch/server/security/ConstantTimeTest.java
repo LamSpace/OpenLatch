@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link ConstantTime} 语义（spec"常量时间比较"）：等值/不等/长度差异不早退、
+ * {@link ConstantTime} 语义（常量时间比较）：等值/不等/长度差异不早退、
  * null 一律拒绝。常量时间的结构保证（等长补齐后 {@code MessageDigest.isEqual}）
  * 属代码评审项，不做运行时计时断言。
  */

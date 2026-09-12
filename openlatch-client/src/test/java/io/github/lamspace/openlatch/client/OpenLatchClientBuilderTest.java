@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * builder 构建与 §6.7 默认值表断言（tasks 1.2/1.4）。
+ * builder 构建与默认值表断言。
  */
 class OpenLatchClientBuilderTest {
 
@@ -43,7 +43,7 @@ class OpenLatchClientBuilderTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    /** 仅指定地址时，其余参数取 §6.7 默认值。 */
+    /** 仅指定地址时，其余参数取默认值。 */
     @Test
     void defaultsMatchSpec() {
         try (OpenLatchClient client = OpenLatchClient.builder().address("127.0.0.1:9410").build()) {

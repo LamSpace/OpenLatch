@@ -23,9 +23,9 @@ import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
  * 条目应用观察接口：{@link LockStateMachine} 在每条复制条目应用完成后
  * （含本节点作为 Follower 的回放）回调消费方，承载两类 Leader 侧职责——
  * 在途请求回执完成（{@code ReplicationGateway}）与等待队列/到期驱动联动
- * （详设 §4.5 应用结果收口，design D3/D9）。
+ * （应用结果收口）。
  *
- * <p><b>回调线程</b>：状态机应用线程（单线程、条目间无并发，design D10）。
+ * <p><b>回调线程</b>：状态机应用线程（单线程、条目间无并发）。
  * 实现 MUST NOT 阻塞（会停滞整条复制流水线）；涉及客户端 I/O 的动作
  * 须立即转投到目标连接所属 EventLoop（{@code channel.eventLoop().execute}）。
  *
@@ -47,9 +47,8 @@ public interface ApplyObserver {
     /**
      * Leadership 变更通知。
      *
-     * <p>失去 Leadership 时实现须让全部在途回执以可重试错误完成（§8 切换窗口
-     * 快速失败）；重新当选时清空上一任期遗留的等待队列（任期作用域 FIFO，
-     * §4.4/design D9）。
+     * <p>失去 Leadership 时实现须让全部在途回执以可重试错误完成（切换窗口
+     * 快速失败）；重新当选时清空上一任期遗留的等待队列（任期作用域 FIFO）。
      *
      * @param leader 本节点当前是否为 Leader
      */

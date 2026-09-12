@@ -19,9 +19,8 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 3 节点复制集成测试（详设 §10"复制集成"+ §13.2 P2-07/08/09/10 验证列，
- * spec"Leader 写请求路径""会话集群登记""租约到期 Leader 驱动复制"
- * "多数派可用性"各场景）。
+ * 3 节点复制集成测试（Leader 写请求路径、会话集群登记、租约到期
+ * Leader 驱动复制、多数派可用性各场景）。
  *
  * <p>基座 {@link ClusterHarness}：真实 Raft 子系统（gRPC 本机端口）×3，
  * 接入层 EmbeddedChannel 直驱——异步桥全程为真。每用例独立集群
@@ -56,7 +55,7 @@ class ClusterReplicationTest {
                 .build();
     }
 
-    // ---------- 授予路径（P2-07/3.6） ----------
+    // ---------- 授予路径 ----------
 
     @Test
     void grantReplicatedToAllAndSurvivesFollowerRestart() throws IOException {
@@ -103,7 +102,7 @@ class ClusterReplicationTest {
         }
     }
 
-    // ---------- 排队路径不写日志（P2-07/3.6，§4.5 硬断言） ----------
+    // ---------- 排队路径不写日志（硬断言） ----------
 
     @Test
     void queuedPathDoesNotWriteLog() throws Exception {
@@ -123,7 +122,7 @@ class ClusterReplicationTest {
             Envelope q = c2.request(acquire(4, "qk", LockType.LOCK_TYPE_REENTRANT, -1, 30_000));
             assertThat(q.getAcquireResponse().getStatus()).isEqualTo(StatusCode.QUEUED);
             assertThat(q.getAcquireResponse().getQueuePosition()).isEqualTo(1);
-            assertThat(leader.lastApplied()).isEqualTo(before); // QUEUED 零日志（§4.5）
+            assertThat(leader.lastApplied()).isEqualTo(before); // QUEUED 零日志
 
             Envelope d = c2.request(acquire(5, "qk", LockType.LOCK_TYPE_REENTRANT, 0, 30_000));
             assertThat(d.getAcquireResponse().getStatus()).isEqualTo(StatusCode.DENIED);
@@ -140,7 +139,7 @@ class ClusterReplicationTest {
             ClusterHarness.TestConn c2 = h.connect(leader);
             c2.hello(2);
             // 同键双发不等回执：两次预检都见空闲 → 双双进日志 → 应用裁决
-            // 一个 OK、一个改写为 QUEUED（D3），互斥不变式由副本一致收敛。
+            // 一个 OK、一个改写为 QUEUED，互斥不变式由副本一致收敛。
             c1.session.tryBeginRequest(1024);
             c2.session.tryBeginRequest(1024);
             leader.runtime.requestHandler().handleAcquire(c1.session, acquire(3, "ck",
@@ -166,14 +165,14 @@ class ClusterReplicationTest {
             ClusterHarness.Node follower = h.nodes().stream()
                     .filter(x -> x.alive() && !x.isLeader()).findFirst().orElseThrow();
             ClusterHarness.TestConn c = h.connect(follower);
-            Envelope hello = c.hello(1); // SESSION_OPEN 经 ratis-client 寻主：任意节点可握手（D11）
+            Envelope hello = c.hello(1); // SESSION_OPEN 经 ratis-client 寻主：任意节点可握手
             assertThat(hello.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
             Envelope resp = c.request(acquire(2, "fk", LockType.LOCK_TYPE_REENTRANT, -1, 30_000));
             assertThat(resp.getAcquireResponse().getStatus()).isEqualTo(StatusCode.NOT_LEADER);
         }
     }
 
-    // ---------- 会话集群化（P2-08/4.5） ----------
+    // ---------- 会话集群化 ----------
 
     @Test
     void sessionRegistryReplicatedAndDisconnectCleansUp() throws IOException {
@@ -184,7 +183,7 @@ class ClusterReplicationTest {
             ClusterHarness.TestConn onFollower = h.connect(follower);
             Envelope hello = onFollower.hello(1);
             long sid = hello.getHelloResponse().getSessionId();
-            assertThat(sid >>> 32).isEqualTo(follower.id); // nodeId 高位编码（§5.2 规则 1）
+            assertThat(sid >>> 32).isEqualTo(follower.id); // nodeId 高位编码
             h.awaitTrue(() -> leader.runtime.core().shadow().hasSession(sid), 10_000,
                     "SESSION_OPEN 复制至 Leader");
 
@@ -193,7 +192,7 @@ class ClusterReplicationTest {
             Envelope g = writer.request(acquire(3, "sk", LockType.LOCK_TYPE_REENTRANT, -1, 30_000));
             assertThat(g.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
 
-            onFollower.disconnect(); // 断连传播：SESSION_CLOSE 条目（§5.2 规则 3）
+            onFollower.disconnect(); // 断连传播：SESSION_CLOSE 条目
             h.awaitTrue(() -> !leader.runtime.core().shadow().hasSession(sid), 10_000,
                     "断连会话从复制状态摘除");
             h.awaitTrue(h::aliveAgreeWithLeader, 10_000, "断连清理后副本一致");
@@ -250,7 +249,7 @@ class ClusterReplicationTest {
         }
     }
 
-    // ---------- 租约到期复制（P2-09/5.3） ----------
+    // ---------- 租约到期复制 ----------
 
     @Test
     void leaseExpiresViaLeaderDriverOnAllReplicas() throws IOException {
@@ -323,7 +322,7 @@ class ClusterReplicationTest {
         }
     }
 
-    // ---------- 续租（P2-07 应答=应用结果） ----------
+    // ---------- 续租（应答=应用结果） ----------
 
     @Test
     void renewReplicatesExpiryAcrossReplicas() throws Exception {

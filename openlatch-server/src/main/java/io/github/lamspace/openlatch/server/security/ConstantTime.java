@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 
 /**
- * 令牌常量时间比较原语（Phase 3 详设 §5.2/§10.4 P3-16，spec"常量时间比较"）：
+ * 令牌常量时间比较原语：
  * 业务令牌与管理令牌共用的单一比较实现，保证两处语义永久一致。
  *
  * <p><b>长度侧信道</b>：{@link MessageDigest#isEqual} 仅对<em>等长</em>输入

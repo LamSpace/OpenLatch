@@ -28,7 +28,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 认证反例（spec"错误令牌明确降级"）：控制台令牌与服务端不符时
+ * 认证反例（错误令牌明确降级）：控制台令牌与服务端不符时
  * 全部页面降级为"管理认证失败"横幅、HTTP 仍 200、不泄露比对细节，
  * 且退避窗内重复刷新不产生重连风暴（页面连续可得）。
  */

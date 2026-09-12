@@ -25,9 +25,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * 本地持锁簿记（详设 §6.1/§6.3）。
+ * 本地持锁簿记。
  *
- * <p><b>核心约束（design.md D4）：只记归属、不记重入计数。</b>
+ * <p><b>核心约束：只记归属、不记重入计数。</b>
  * 重入计数的唯一事实源在服务端；本表以 {@code (key, threadId)} 为键记录
  * "哪个线程持有什么锁、凭据与到期信息"。同线程重入获取时服务端返回同凭据
  * 的授予，本表登记命中既有条目后不做任何变更；每次解锁都发送释放请求，
@@ -180,7 +180,7 @@ public final class HeldLockRegistry {
         }
 
         /**
-         * 失锁时刻：上次成功续租 + 实际生效租约（详设 §6.2）。
+         * 失锁时刻：上次成功续租 + 实际生效租约。
          *
          * @return 失锁时刻（epoch 毫秒）
          */
@@ -252,7 +252,7 @@ public final class HeldLockRegistry {
 
     /**
      * 登记持锁：同 {@code (key, threadId)} 已存在时（重入）返回既有条目且不覆盖，
-     * 避免双账本漂移（详设 §6.3）。
+     * 避免双账本漂移。
      *
      * @param key            锁键
      * @param threadId       持有线程标识
@@ -307,8 +307,7 @@ public final class HeldLockRegistry {
 
     /**
      * 该锁键是否仍有任一线程的本地持有条目。锁完全释放（计数归零）后
-     * 判否，供客户端丢弃该键的附属登记（如锁丢失监听器，详设 §6.3、
-     * 变更 phase1-audit-remediation design D4）。
+     * 判否，供客户端丢弃该键的附属登记（如锁丢失监听器）。
      *
      * @param key 锁键
      * @return 仍存在任一持有条目返回 {@code true}

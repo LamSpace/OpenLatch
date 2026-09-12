@@ -48,8 +48,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * P1-30 starter 集成测试（§10.3 starter 部分，design D9）：
- * 进程内真实服务器 + 真实 Boot 上下文（验收标准 4 形态），覆盖
+ * starter 集成测试：
+ * 进程内真实服务器 + 真实 Boot 上下文（仅加依赖的最小形态），覆盖
  * 并发互斥、SpEL 参数隔离、获取失败抛异常、READ/WRITE 矩阵。
  */
 @SpringBootTest(classes = StarterITApp.class,
@@ -99,7 +99,7 @@ class OpenLatchStarterIT {
     }
 
     /**
-     * 连接就绪门闩：异步首连完成后用例才开始（design D9，不 sleep）。
+     * 连接就绪门闩：异步首连完成后用例才开始（不 sleep）。
      */
     @BeforeAll
     void awaitConnection() throws Exception {

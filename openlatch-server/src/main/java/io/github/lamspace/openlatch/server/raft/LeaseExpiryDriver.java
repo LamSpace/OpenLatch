@@ -34,19 +34,19 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 租约到期驱动（详设 §4.3.1/P2-09）：到期判断只发生在 Leader——周期扫描
+ * 租约到期驱动：到期判断只发生在 Leader——周期扫描
  * 影子表投影中已到期（且未被在途条目覆盖）的持锁，逐条提交
  * {@code LEASE_EXPIRE_ENTRY(key, leaseToken)}；实际释放由全副本在条目
  * 应用时完成（回放守卫见 {@link LockStateMachineCore}）。
  *
  * <p><b>为什么以影子表为输入</b>：集群模式下 {@code CoreEngine.expireDue()}
- * 只允许在应用线程、条目时刻下被调用（design D12"引擎唯一漏斗"）——
+ * 只允许在应用线程、条目时刻下被调用（"引擎唯一漏斗"不变式）——
  * 扫描若直驱引擎会引入"Leader 本地提前释放"的非复制迁移。影子表投影
  * 与引擎堆由同一应用序列双写（到期集恒等），是合法的非侵入观察面。
  *
  * <p><b>在途抑制</b>：同一 key 在到期条目完成应用（或被判定）之前不重复
  * 提交（{@link #onEntryApplied} 解除）；提交失败同样解除，下个扫描周期
- * 自然重试。切换 Leader 时抑制集整体作废（design D5 的 NOOP 探针同此
+ * 自然重试。切换 Leader 时抑制集整体作废（NOOP 探针同此
  * 生命周期，由 SessionCoordinator 另行管理）。
  *
  * <p><b>线程模型</b>：单守护调度线程执行扫描（周期
@@ -55,7 +55,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p><b>failover 语义</b>：新 Leader 当选即触发首扫（{@link #onLeadershipGained()}），
  * 已复制的到期时刻按其物理时钟续驱——到期误差 ≤ 一个扫描周期 + 切换耗时
- * （详设 §12 风险 2 的可接受声明）。
+ * （设计上可接受的误差上界）。
  */
 public final class LeaseExpiryDriver implements AutoCloseable {
 
@@ -70,7 +70,7 @@ public final class LeaseExpiryDriver implements AutoCloseable {
     private final ReplicationGateway gateway;
     /** 扫描周期（毫秒）。 */
     private final long tickMs;
-    /** 指标门面（到期计数出口，T2）；{@code null} 表示不埋点。 */
+    /** 指标门面（到期计数出口）；{@code null} 表示不埋点。 */
     private final ServerMetrics metrics;
     /** 在途抑制集：key → 已提交未落地的条目 token。 */
     private final Map<String, Long> inflight = new ConcurrentHashMap<>();
@@ -132,8 +132,8 @@ public final class LeaseExpiryDriver implements AutoCloseable {
                 return;
             }
             long now = System.currentTimeMillis();
-            // Leader 侧等待队列的"已通知队首超时清扫"（Phase 3 T1 接上生产
-            // 调用边：通知丢失/等待者放弃后队列须自行推进，许可感知回退臂
+            // Leader 侧等待队列的"已通知队首超时清扫"（通知丢失/等待者放弃后
+            // 队列须自行推进，许可感知回退臂
             // 见 ReplicationGateway#sweepWaitQueue）。
             gateway.sweepWaitQueue(now);
             for (Map.Entry<String, ShadowTable.HeldRef> en : kernel.shadow().heldEntries().entrySet()) {
@@ -188,8 +188,8 @@ public final class LeaseExpiryDriver implements AutoCloseable {
 
     /**
      * 条目应用通知：到期条目落地（无论守卫是否释放）即解除该 key 的在途抑制；
-     * 并按回执实际释放量为 {@code lease.expired.total} 计数（T2，
-     * spec"耗时与到期计数口径"——本回调每副本各执行一次，计数为本地观察值；
+     * 并按回执实际释放量为 {@code lease.expired.total} 计数
+     * （本回调每副本各执行一次，计数为本地观察值；
      * 守卫空操作的回执 {@code freed_keys} 为空即零计，在途重复提交因
      * token 失配走守卫同样零计）。
      *

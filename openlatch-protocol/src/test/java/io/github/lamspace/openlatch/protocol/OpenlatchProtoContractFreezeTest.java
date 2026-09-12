@@ -18,13 +18,12 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * openlatch.proto 编号契约冻结测试（spec wire-protocol"v1 基线冻结"，
- * 变更 s3-leader-discovery-failover D2）。
+ * openlatch.proto 编号契约冻结测试（v1 基线冻结）。
  *
  * <p>线路协议字段号与枚举值是跨版本兼容性契约：变更、删除或复用既有编号
  * 会让存量客户端/服务端静默错位。双层钉死：
  * <ul>
- *   <li>{@code /openlatch-proto-v1-baseline.txt}：Phase 1 基线清单，每一行
+ *   <li>{@code /openlatch-proto-v1-baseline.txt}：v1 基线清单，每一行
  *       MUST 原样出现在当前契约中（捕获编号变更/删除/改名）；基线文件本身
  *       永久冻结；</li>
  *   <li>{@code /openlatch-proto-contract.txt}：当前全量清单逐行比对（对齐
@@ -36,7 +35,7 @@ class OpenlatchProtoContractFreezeTest {
 
     /** 当前全量契约 golden（每行 "kind name number" 形态，# 注释与空行忽略）。 */
     private static final String FULL_CONTRACT = "/openlatch-proto-contract.txt";
-    /** Phase 1 基线 golden（全量契约的不可变子集）。 */
+    /** v1 基线 golden（全量契约的不可变子集）。 */
     private static final String V1_BASELINE = "/openlatch-proto-v1-baseline.txt";
 
     @Test
@@ -49,7 +48,7 @@ class OpenlatchProtoContractFreezeTest {
         List<String> contract = dump();
         for (String baseline : readLines(V1_BASELINE)) {
             assertThat(contract)
-                    .as("Phase 1 基线项 %s 被变更、删除或改名", baseline)
+                    .as("v1 基线项 %s 被变更、删除或改名", baseline)
                     .contains(baseline);
         }
     }

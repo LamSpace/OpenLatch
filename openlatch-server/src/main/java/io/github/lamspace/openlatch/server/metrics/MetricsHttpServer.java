@@ -45,7 +45,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 管理端口 HTTP 服务（Phase 3 详设 §3.1，spec"管理端点仅两路径"）：在独立
+ * 管理端口 HTTP 服务：在独立
  * 端口上以 Netty HTTP 暴露 {@code GET /metrics}（Prometheus 文本全量快照）与
  * {@code GET /healthz}（存活探针），其余路径一律 404。不引入 Web 框架。
  *

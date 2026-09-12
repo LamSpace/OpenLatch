@@ -26,8 +26,8 @@ package io.github.lamspace.openlatch.core;
  * <ul>
  *   <li>{@link #LOCK}——互斥/读写锁家族（{@link LockType} 的
  *       REENTRANT/SIMPLE/READ/WRITE/FAIR 全部落此家族，由 {@code LockEntry} 承载）；</li>
- *   <li>{@link #SEMAPHORE}——许可门闸家族（{@code SemaphoreEntry} 承载，Phase 3 T1 引入）；</li>
- *   <li>{@link #LATCH}——倒计数屏障家族（{@code LatchEntry} 承载，Phase 3 T1 引入）。</li>
+ *   <li>{@link #SEMAPHORE}——许可门闸家族（{@code SemaphoreEntry} 承载）；</li>
+ *   <li>{@link #LATCH}——倒计数屏障家族（{@code LatchEntry} 承载）。</li>
  * </ul>
  *
  * <p><b>判定归属</b>：{@link LockType} 到家族的映射由 core 门面
@@ -39,9 +39,9 @@ public enum KeyFamily {
     /** 互斥/读写锁家族（{@code LockEntry}）。 */
     LOCK,
 
-    /** 许可门闸家族（{@code SemaphoreEntry}，Phase 3 T1）。 */
+    /** 许可门闸家族（{@code SemaphoreEntry}）。 */
     SEMAPHORE,
 
-    /** 倒计数屏障家族（{@code LatchEntry}，Phase 3 T1）。 */
+    /** 倒计数屏障家族（{@code LatchEntry}）。 */
     LATCH
 }

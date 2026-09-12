@@ -20,13 +20,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * JUC 风格的同步锁句柄（详设 §6.3）。
+ * JUC 风格的同步锁句柄。
  *
  * <p><b>语义约定</b>：
  * <ul>
  *   <li>{@link #lock()} 等价于以等待总超时兜底的限时获取；到时未授予以
- *       {@link LockAcquisitionTimeoutException} 结束——<b>不存在无限阻塞路径</b>
- *       （概要设计 §4.2）；</li>
+ *       {@link LockAcquisitionTimeoutException} 结束——<b>不存在无限阻塞路径</b>；</li>
  *   <li>重入计数由服务端维护：客户端每次 {@link #unlock()} 发送一次释放请求，
  *       服务端计数归零时锁才真正释放；</li>
  *   <li>{@link #unlock()} 仅持锁线程可调，非持锁线程调用抛
@@ -38,7 +37,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p><b>租约与续租</b>：锁在服务端以租约存续；授予后由客户端看门狗以
  * {@code grantedLeaseMs/3} 周期自动续租，连续 2 次续租超时判定失锁；
- * 断连时按失锁时刻定时裁决（详设 §6.2/§6.6）。{@code lock()} 的持有语义
+ * 断连时按失锁时刻定时裁决。{@code lock()} 的持有语义
  * 以客户端进程存活与连接可恢复为前提——不存在 JUC 式的无限持有，
  * 租约最终到期即由服务端回收。
  *
@@ -107,7 +106,7 @@ public interface OLock {
     /**
      * 登记单锁维度的锁丢失监听。监听器按锁键归属：该键锁完全释放
      * （服务端计数归零且本地无人重持）后登记被丢弃，之后重新获取并
-     * 丢锁时旧监听器不触发，需重新注册（详设 §6.3，design D4）。
+     * 丢锁时旧监听器不触发，需重新注册。
      *
      * @param listener 监听器
      */

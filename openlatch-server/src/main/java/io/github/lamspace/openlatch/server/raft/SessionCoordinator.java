@@ -42,31 +42,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 会话集群协调器（详设 §5.2，P2-08）：会话的集群登记、断连传播与接入
+ * 会话集群协调器：会话的集群登记、断连传播与接入
  * 节点失联批量清理。
  *
- * <p><b>会话 id 组合（§5.2 规则 1）</b>：接入节点 HELLO 时分配
+ * <p><b>会话 id 组合</b>：接入节点 HELLO 时分配
  * {@code sessionId = (nodeId << 32) | localSeq}，nodeId 高位保证全局唯一
  * 且自描述归属（失联批量清理直接按高位路由，无需额外注册表）。
  *
- * <p><b>HELLO 语义（design D12）</b>：先提交 {@code SESSION_OPEN} 并等待
+ * <p><b>HELLO 语义</b>：先提交 {@code SESSION_OPEN} 并等待
  * 应用回执（即多数派确认）再回 {@code HelloResponse}——握手成功即保证
  * 该会话已进入复制状态，客户端随后写请求不会因"未登记"被竞态拒绝。
  * 提交通道经内部 RaftClient 池自动寻主，HELLO 落在任意节点皆可成立。
  *
- * <p><b>断连传播（§5.2 规则 3）</b>：接入节点检测到断开提交
+ * <p><b>断连传播</b>：接入节点检测到断开提交
  * {@code SESSION_CLOSE}；失败按固定退避重试（副本侧幂等，重复提交无害），
  * 最终兜底是节点失联批量清理与租约到期。
  *
- * <p><b>失联批量清理（§5.2 规则 4，design D5 + S4 加固）</b>：Leader 以
+ * <p><b>失联批量清理</b>：Leader 以
  * {@code election-timeout-ms} 为周期提交 NOOP 探针（兼作租约活性位点），
  * 同周期轮询 {@code Division.getCommitInfos()} 的 per-peer commitIndex：
  * 某 peer 连续 {@value #STALL_TOLERANCE} 个周期<b>零推进</b>且未越过 Leader
  * 位点即判失联，对复制状态中归属该节点的全部会话逐条补发
- * {@code SESSION_CLOSE}。S4 加固的判据说明：仅"未越过 Leader 位点"不够——
+ * {@code SESSION_CLOSE}。判据说明：仅"未越过 Leader 位点"不够——
  * commitInfo 缓存滞后（选举/修复窗口内可达一个刷新周期）而 Leader 位点随
  * 探针持续前移，会让<b>正在回放的存活副本</b>被误判失联、误清其存活会话
- * （违 §11-2"存活会话锁不丢"）；真失联节点的定义性特征正是零推进。
+ * （违"存活会话锁不丢"不变式）；真失联节点的定义性特征正是零推进。
  * 滞后上界 ≈ 4×选举超时；成员被移除时不经此判定，由
  * {@code onMemberRemoved} 显式触发同一车道。
  *
@@ -79,7 +79,7 @@ public final class SessionCoordinator {
     /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(SessionCoordinator.class);
 
-    /** 失联判定的连续停滞周期容忍数（design D5 防抖，M=3）。 */
+    /** 失联判定的连续停滞周期容忍数（防抖）。 */
     static final int STALL_TOLERANCE = 3;
 
     /** SESSION_CLOSE 重试间隔（毫秒）。 */
@@ -101,7 +101,7 @@ public final class SessionCoordinator {
     private final long probeIntervalMs;
     /** 默认租约（HelloResponse 携带，供客户端看门狗参考）。 */
     private final long defaultLeaseMs;
-    /** Leader 提示单源（HELLO 应答的 leader_hint/leader_address 来源，design D3）。 */
+    /** Leader 提示单源（HELLO 应答的 leader_hint/leader_address 来源）。 */
     private final LeaderTracker leaderTracker;
 
     /** 本节点 localSeq 发号器（低 32 位，从 1 起）。 */
@@ -110,7 +110,7 @@ public final class SessionCoordinator {
     private final Map<Long, AtomicInteger> closeRetries = new ConcurrentHashMap<>();
     /** per-peer 停滞计数：peerId → 连续"零推进且未越位"周期数。 */
     private final Map<String, Integer> stallCounts = new ConcurrentHashMap<>();
-    /** peer 上次观测 commitIndex（零推进判据的记忆位，S4 加固）。 */
+    /** peer 上次观测 commitIndex（零推进判据的记忆位）。 */
     private final Map<String, Long> lastPeerCommit = new ConcurrentHashMap<>();
     /** 已判失联并触发批量清理的节点 id（防重复扫描提交）。 */
     private final Set<Integer> cleanedNodes = ConcurrentHashMap.newKeySet();
@@ -339,7 +339,7 @@ public final class SessionCoordinator {
                 stallCounts.remove(pe.getKey());
                 continue;
             }
-            // 零推进判据（S4 加固）：滞后但在推进（选举/回放修复中）的存活
+            // 零推进判据：滞后但在推进（选举/回放修复中）的存活
             // 副本不判失联；真失联节点的定义特征即 commitIndex 完全不动。
             if (prev != null && commit > prev) {
                 stallCounts.remove(pe.getKey());
@@ -353,9 +353,9 @@ public final class SessionCoordinator {
     }
 
     /**
-     * 成员移除的显式失联清理（详设 §7.4，S4/P2-17）：被移除节点即刻从
+     * 成员移除的显式失联清理：被移除节点即刻从
      * commitInfos 消失，基于停滞计数的失联判定对其永不可见——出组时必须
-     * 显式走同一批量清理车道（§5.2 规则 4 语义：每会话一条 SESSION_CLOSE
+     * 显式走同一批量清理车道（每会话一条 SESSION_CLOSE
      * 经日志落地，各副本一致收敛）。
      *
      * <p>幂等：与探针判定路径共用 {@code cleanedNodes} 去重（先失联清理过
@@ -373,7 +373,7 @@ public final class SessionCoordinator {
 
     /**
      * peer 判失联：对复制状态中归属该节点的每个会话补发 SESSION_CLOSE
-     * （每会话一条条目，§5.2 规则 4）。同一节点只触发一轮（cleanedNodes
+     * （每会话一条条目）。同一节点只触发一轮（cleanedNodes
      * 去重；对端恢复后其后续会话由新 HELLO 重建）。
      *
      * @param peerId 失联 peer 的 Raft 成员 id（"n&lt;nodeId&gt;"）

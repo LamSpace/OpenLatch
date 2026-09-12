@@ -28,7 +28,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §7 T3 指标区独立降级用例（spec"指标区独立降级"）：锁通道正常而
+ * 指标区独立降级用例：锁通道正常而
  * {@code /metrics} 不可达（指标端口指向未监听端口，等价节点
  * {@code metrics.enabled=false}）时，概览数字照常呈现、曲线区单独标注
  * 不可用、MUST NOT 整页错误或以零值冒充。

@@ -31,17 +31,17 @@ import io.netty.handler.timeout.IdleStateHandler;
 import java.util.concurrent.TimeUnit;
 
 /**
- * pipeline 装配（设计说明书 §5.2；Phase 3 详设 §5.1 T4 增 TLS 首位置）：
+ * pipeline 装配（TLS 为可选首位置）：
  * <pre>
  * 入站: [SslHandler(可选)] → LengthFieldBasedFrameDecoder(1MiB) → ProtobufDecoder
  *         → EnvelopeCodecHandler → IdleStateHandler(read) → ServerSessionHandler
  * 出站: ProtobufEncoder → LengthFieldPrepender(4) [→ SslHandler]
  * </pre>
  *
- * <p><b>TLS 语义（spec"服务端 TLS 传输层"）</b>：注入非空 {@link SslContext}
+ * <p><b>TLS 语义</b>：注入非空 {@link SslContext}
  * 时，每个新连接在 pipeline 首位装配 {@link SslHandler}——TLS 握手于
  * {@code channelActive} 自动开始，出站字节全部经加密。握手超时钉
- * {@value #TLS_HANDSHAKE_TIMEOUT_MS} 毫秒（设计 §5.1：开启后拒绝明文/未完成
+ * {@value #TLS_HANDSHAKE_TIMEOUT_MS} 毫秒（开启后拒绝明文/未完成
  * 握手的连接，不悬挂至读空闲时限）：静默连接由握手超时断开、明文协议字节由
  * SslHandler 解码失败（{@code NotSslRecordException}）触发——异常沿入站方向
  * 后传至 {@link EnvelopeCodecHandler} 的 {@code exceptionCaught} 断连路径，
@@ -50,10 +50,10 @@ import java.util.concurrent.TimeUnit;
  */
 public final class ServerChannelInitializer extends ChannelInitializer<SocketChannel> {
 
-    /** 最大帧长 1 MiB，超限断连（设计说明书 §3.1）。 */
+    /** 最大帧长 1 MiB，超限断连。 */
     public static final int MAX_FRAME_LENGTH = 1024 * 1024;
 
-    /** TLS 握手超时（毫秒）：开启 TLS 后未完成握手即断开（详设 §5.1 默认 5s）。 */
+    /** TLS 握手超时（毫秒）：开启 TLS 后未完成握手即断开（默认 5s）。 */
     private static final long TLS_HANDSHAKE_TIMEOUT_MS = 5_000L;
 
     /** 连接读空闲超时（毫秒）。 */
@@ -79,7 +79,7 @@ public final class ServerChannelInitializer extends ChannelInitializer<SocketCha
     }
 
     /**
-     * 构造 pipeline 装配器（Phase 3 T4）：{@code sslContext} 非空时开启 TLS。
+     * 构造 pipeline 装配器：{@code sslContext} 非空时开启 TLS。
      *
      * @param idleTimeoutMs  连接读空闲超时（毫秒）
      * @param sessionHandler 共享的会话业务处理器

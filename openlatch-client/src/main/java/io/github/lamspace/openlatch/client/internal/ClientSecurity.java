@@ -23,8 +23,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 
 /**
- * 客户端安全装配工具（Phase 3 详设 §5.1/§5.2，spec"客户端 TLS 与认证消费"）：
- * 由 {@link ClientConfig} 构造客户端 {@link SslContext}——PEM 直供、与
+ * 客户端安全装配工具：由 {@link ClientConfig} 构造客户端 {@link SslContext}——PEM 直供、与
  * 服务端/测试同一条加载路径。连接状态机与种子发现探针共用一个装配源，保证
  * "主连接 / 探针 / 重连"的每一次连接尝试以同一 TLS 配置执行（无绕过路径）。
  */

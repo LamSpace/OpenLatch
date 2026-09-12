@@ -40,7 +40,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 连接级业务入口：握手门闩（design.md D8）、请求分发、断连清理。
+ * 连接级业务入口：握手门闩、请求分发、断连清理。
  * 共享实例（{@code @Sharable}，无可变实例状态），每连接状态存于
  * Channel 属性 {@link ServerSession#KEY}。
  *
@@ -55,8 +55,8 @@ import org.slf4j.LoggerFactory;
  * 未握手 ──合法 HELLO──▶ 已握手（业务阶段）──断连/空闲──▶ 清理
  *   │  畸形/提前业务请求：回 INVALID_REQUEST，不断连，
  *   │  连接仍可补发合法 HELLO（门闩语义）
- *   └─ 版本不在支持区间 [1,3] 或认证未通过（Phase 3 T4：开启命中失败 /
- *      关闭 Phase 1 守卫"auth_token 非空"）：回 INVALID_REQUEST 并断连
+ *   └─ 版本不在支持区间 [1,3] 或认证未通过（认证开启时命中失败、
+ *      关闭时"auth_token 非空"守卫）：回 INVALID_REQUEST 并断连
  * </pre>
  *
  * <p><b>业务阶段处理矩阵</b>：
@@ -65,7 +65,7 @@ import org.slf4j.LoggerFactory;
  *   <li>在途请求超过 {@code maxInflightPerConnection}：回 {@code OVERLOADED}，
  *       不计入在途；</li>
  *   <li>{@code PING}：不回复（活动信号已被空闲检测计入）；</li>
- *   <li>{@code ADMIN_*}（Phase 3 T3 管理观察）：独立早退交
+ *   <li>{@code ADMIN_*}（管理观察）：独立早退交
  *       {@link io.github.lamspace.openlatch.server.admin.AdminRequestHandler}
  *       受理（令牌校验 + 本节点只读观察），MUST NOT 进入业务分发与指标
  *       埋点；未注入处理器时按"未配置令牌"形态一律拒绝并断连；</li>
@@ -99,9 +99,9 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     private final RequestDispatcher dispatcher;
     /** 集群运行时（非空即集群模式：HELLO/写请求/断连全部改走复制路径）。 */
     private final ClusterRuntime cluster;
-    /** 管理观察处理器（Phase 3 T3；恒非空——兼容构造回落"未配置令牌"形态）。 */
+    /** 管理观察处理器（恒非空——兼容构造回落"未配置令牌"形态）。 */
     private final AdminRequestHandler adminHandler;
-    /** 业务令牌认证配置（Phase 3 T4 P3-16；兼容构造回落 {@link AuthConfig#unconfigured()}）。 */
+    /** 业务令牌认证配置（兼容构造回落 {@link AuthConfig#unconfigured()}）。 */
     private final AuthConfig authConfig;
 
     /**
@@ -137,7 +137,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
 
     /**
      * 构造会话处理器（全装配形态，不含业务认证）：业务认证取
-     * {@link AuthConfig#unconfigured()}（Phase 1 兼容守卫）。
+     * {@link AuthConfig#unconfigured()}（兼容守卫）。
      *
      * @param core          锁语义核心（集群模式传 {@code null}）
      * @param config        服务器配置（限额）
@@ -154,10 +154,10 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     }
 
     /**
-     * 构造会话处理器（全装配形态，Phase 3 T4 P3-16）：注入管理观察处理器与
+     * 构造会话处理器（全装配形态）：注入管理观察处理器与
      * 业务令牌认证配置——{@code ADMIN_*} 在业务分发之前独立早退；HELLO 认证
-     * 由 {@code authConfig} 门控（spec"业务令牌认证与默认兼容守卫"：开启校验
-     * 命中任一令牌，关闭维持 Phase 1"非空即拒"守卫）。
+     * 由 {@code authConfig} 门控：开启校验命中任一令牌，
+     * 关闭维持"非空即拒"兼容守卫。
      *
      * @param core          锁语义核心（集群模式传 {@code null}）
      * @param config        服务器配置（限额）
@@ -200,7 +200,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
      * 入站信封裁决（处理矩阵见类注释）：未握手交握手门闩；重复 {@code HELLO}
      * 拒绝不断连；在途超限直接回 {@code OVERLOADED}——计数未递增故不产生
      * {@code endRequest}；{@code ADMIN_*} 在限额记账后、业务分发之前交管理
-     * 处理器独立早退（Phase 3 T3，不进指标埋点，在途记账由其写完成处终结）；
+     * 处理器独立早退（不进指标埋点，在途记账由其写完成处终结）；
      * 其余同步分发：PING 丢弃并立即终结在途记账，响应
      * 写回在写完成 listener 中 {@code endRequest}（写完成前请求持续计入在途，
      * 这是 {@code OVERLOADED} 可达的来源之一）。在所属连接 EventLoop 上执行，
@@ -217,23 +217,23 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             return;
         }
         if (msg.getType() == MessageType.HELLO) {
-            // 重复 HELLO：拒绝但保持原会话（规格"会话握手"）。
+            // 重复 HELLO：拒绝但保持原会话。
             ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
             return;
         }
-        // 自我保护限额（设计说明书 §5.4，design.md D4）。
+        // 自我保护限额。
         if (!session.tryBeginRequest(config.maxInflightPerConnection())) {
             ctx.writeAndFlush(RequestDispatcher.errorResponse(msg, StatusCode.OVERLOADED));
             return;
         }
         if (AdminRequestHandler.isAdminType(msg.getType())) {
-            // 管理观察独立早退（Phase 3 T3）：不进业务分发、不进指标埋点；
+            // 管理观察独立早退：不进业务分发、不进指标埋点；
             // 在途记账由处理器在写完成处终结（与业务路径同一收口纪律）。
             adminHandler.handle(ctx, session, msg);
             return;
         }
         if (cluster != null) {
-            // 集群路径：应答异步于应用回执（design D4），endRequest 由
+            // 集群路径：应答异步于应用回执，endRequest 由
             // ClusterRequestHandler 在写完成处终结；PING 仍即时终结记账。
             switch (msg.getType()) {
                 case LOCK_ACQUIRE -> cluster.requestHandler()
@@ -269,7 +269,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
         try {
             resp = dispatcher.dispatch(session, msg);
         } catch (RuntimeException e) {
-            // 分发兜底（design D1）：未预期异常回 INTERNAL_ERROR 并记 WARN 带堆栈，
+            // 分发兜底：未预期异常回 INTERNAL_ERROR 并记 WARN 带堆栈，
             // 绝不让异常沉到 pipeline 尾部造成不回包、不断连的静默悬挂。
             log.warn("dispatch failure on request {} (type {})", msg.getRequestId(), msg.getType(), e);
             resp = RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR);
@@ -291,7 +291,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
      */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        // 断连清理（design.md D3）：先摘注册表（通知不再路由到此连接），后清会话。
+        // 断连清理：先摘注册表（通知不再路由到此连接），后清会话。
         // markClosed 保证 channelInactive 与空闲断连等重复路径只清理一次。
         ServerSession session = ctx.channel().attr(ServerSession.KEY).get();
         if (session != null && session.markClosed()) {
@@ -300,7 +300,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             if (session.isHandshaken()) {
                 if (cluster != null) {
                     // 集群路径：断连清理经 SESSION_CLOSE 条目传播到全副本
-                    // （§5.2 规则 3，含失败退避重试）。
+                    // （含失败退避重试）。
                     cluster.sessionCoordinator().submitClose(sessionId);
                 } else {
                     core.sessionClosed(sessionId);
@@ -331,8 +331,8 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
     /**
      * 握手门闩：未握手连接上的首条消息在此裁决。非 {@code HELLO} 或
      * 畸形 {@code HELLO}（无 payload）回 {@code INVALID_REQUEST} 但不断连；
-     * 客户端协议版本不在支持区间 [1,3] 或认证未通过（Phase 3 T4：认证开启
-     * 命中失败 / 关闭维持 Phase 1"非空即拒"守卫）回 {@code INVALID_REQUEST}
+     * 客户端协议版本不在支持区间 [1,3] 或认证未通过（认证开启
+     * 命中失败 / 关闭维持"非空即拒"兼容守卫）回 {@code INVALID_REQUEST}
      * 并断连；认证判定发生在 cluster / {@code CoreEngine.sessionOpened} 分叉
      * 之前（单机与集群同一门闩，未认证 HELLO 零状态副作用）。合法 HELLO 则经
      * {@code CoreEngine.sessionOpened} 分配会话、激活连接簿记（记录协商
@@ -349,22 +349,22 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
             return;
         }
         HelloRequest hello = msg.getHelloRequest();
-        // 业务令牌认证门控（Phase 3 T4 P3-16，spec"业务令牌认证与默认兼容守卫"）：
-        // 开启 = 校验命中任一配置令牌（失败统一拒、不泄露原因）；关闭（默认）=
-        // Phase 1 兼容守卫（非空 auth_token 即拒）。判定在 cluster/sessionOpened
+        // 业务令牌认证门控：开启 = 校验命中任一配置令牌（失败统一拒、
+        // 不泄露原因）；关闭（默认）= 兼容守卫，HELLO 非空 auth_token 即拒。
+        // 判定在 cluster/sessionOpened
         // 分叉之前——单机与集群同一门闩，未认证 HELLO 零状态副作用。
         boolean authRejected = authConfig.isEnabled()
                 ? !authConfig.accepts(hello.getAuthToken())
                 : !hello.getAuthToken().isEmpty();
         if (!OpenLatchServer.isClientVersionSupported(hello.getClientProtocolVersion())
                 || authRejected) {
-            // 版本越界或认证未通过：拒绝并断连（不做隐式兼容，设计说明书 §3.2.1）。
+            // 版本越界或认证未通过：拒绝并断连（不做隐式兼容）。
             ctx.writeAndFlush(helloResponse(msg, StatusCode.INVALID_REQUEST, 0));
             ctx.close();
             return;
         }
         if (cluster != null) {
-            // 集群路径：SESSION_OPEN 经共识确认后回响应（design D12）。
+            // 集群路径：SESSION_OPEN 经共识确认后回响应。
             cluster.sessionCoordinator().handleHello(ctx, session, msg);
             return;
         }
@@ -376,7 +376,7 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
 
     /**
      * 构造握手响应信封：回显请求的 {@code requestId} 与请求的
-     * {@code protocol_version}（v1 客户端因此看到与 Phase 1 同形的响应）；
+     * {@code protocol_version}（v1 客户端因此看到与自身请求同形的响应）；
      * 恒携带 {@code server_protocol_version}（服务端自身版本）与
      * {@code default_lease_ms}（供客户端参考，与结果码无关）；失败路径
      * （{@code INVALID_REQUEST}，含版本越界断连）sessionId 为 0。

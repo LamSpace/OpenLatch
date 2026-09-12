@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §10.1/10.3 并发不变量校验。本文件仅断言两条不变量：互斥成立（临界区同时至多一个持有者）
+ * 并发不变量校验。本文件仅断言两条不变量：互斥成立（临界区同时至多一个持有者）
  * 与授予无丢失（排队请求者最终全部被授予）；无重复入队与无孤儿等待者两条不变量的真实覆盖
  * 在 {@link CoreEngineSessionIdempotencyLimitTest#duplicateAcquireDoesNotEnqueueTwice()}。
  *

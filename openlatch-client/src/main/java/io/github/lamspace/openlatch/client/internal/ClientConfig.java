@@ -20,19 +20,19 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * 客户端配置（不可变，详设 §6.7 默认值表；v2 增种子列表，详设 §6.3）。
+ * 客户端配置（不可变）。
  *
  * <p>由 {@link io.github.lamspace.openlatch.client.OpenLatchClient.Builder} 校验并构建，
  * 构建后各组件只读共享，无任何可变状态。所有超时类参数必须为正数时长；
  * 重连退避上限不得小于初始退避；工作线程数至少为 1。校验在 Builder 中完成，
  * 本 record 不做重复校验。
  *
- * <p><b>种子语义（S3）</b>：{@code host/port} 即种子列表首项（Phase 1 单地址入口的
+ * <p><b>种子语义</b>：{@code host/port} 即种子列表首项（单地址入口的
  * 兼容形态）；{@code seeds} 为全部已解析种子地址（首项与 host/port 一致），
  * 断连重连先试原地址、失败后按序轮询本表；集群 Leader 改连提示地址不在表内时，
  * 强制发现亦以本表为扇出集合。
  *
- * <p><b>安全配置（Phase 3 详设 §5.1/§5.2，spec"客户端 TLS 与认证消费"）</b>：
+ * <p><b>安全配置</b>：
  * {@code tlsEnabled=true} 时，客户端对每一次连接尝试（主连接、种子发现探针、
  * 断连重连）以 PEM 文件（{@code tlsTrustStore} 可信任 CA；mTLS 时
  * {@code tlsClientCert}/{@code tlsClientKey}）执行 TLS 握手；{@code authToken}
@@ -71,8 +71,8 @@ public record ClientConfig(
         String authToken) {
 
     /**
-     * 兼容构造：种子列表 + 全部安全项默认关闭的形态（旧 9 参签名，S3 前
-     * 的内部构造与测试调用点）。
+     * 兼容构造：种子列表 + 全部安全项默认关闭的形态（旧 9 参签名的
+     * 内部构造与测试调用点）。
      *
      * @param host                  服务器主机
      * @param port                  服务器端口
@@ -93,7 +93,7 @@ public record ClientConfig(
     }
 
     /**
-     * 兼容构造：Phase 1 的 8 参形态（单地址 = 一元种子表，安全项默认关闭）。
+     * 兼容构造：8 参形态（单地址 = 一元种子表，安全项默认关闭）。
      *
      * @param host                  服务器主机
      * @param port                  服务器端口

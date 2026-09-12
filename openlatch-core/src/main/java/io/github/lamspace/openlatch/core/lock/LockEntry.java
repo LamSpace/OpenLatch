@@ -50,7 +50,7 @@ import java.util.function.LongSupplier;
  *   <li>等待队列：{@code waiters}，FIFO；队首可能处于"已通知、待重发"状态。</li>
  * </ul>
  *
- * <p><b>并发模型</b>（设计说明书 §4.9）：条目内所有状态迁移都在
+ * <p><b>并发模型</b>：条目内所有状态迁移都在
  * {@code synchronized(this)} 内完成，任何调用路径最多持有一个条目锁。
  * {@link #acquire}/{@link #release} 等方法自带同步；外层调用者
  * （{@code CoreEngine}）再以 {@code synchronized(entry)} 包裹以原子完成
@@ -103,7 +103,7 @@ public final class LockEntry implements KeyEntry {
     }
 
     /**
-     * 快照重建工厂（详设 §7.1，仅供 {@code CoreEngine.restoreFrom} 在加载快照时
+     * 快照重建工厂（仅供 {@code CoreEngine.restoreFrom} 在加载快照时
      * 构造"已持有"状态的条目）：以传入的持有与租约快照直接装配条目初态，
      * 不经任何状态迁移规则——凭证、到期时刻、持有计数按快照原值落地。
      *
@@ -136,8 +136,8 @@ public final class LockEntry implements KeyEntry {
     }
 
     /**
-     * 状态迁移：按下列规则顺序授予、排队或拒绝（设计说明书 §4.3 规则集，
-     * 首个命中者即为结果）：
+     * 状态迁移：按下列规则顺序授予、排队或拒绝（首个命中者
+     * 即为结果）：
      * <ol>
      *   <li><b>写侧重入</b>：同归属已持有写侧且条目可重入——重入计数加一，
      *       同一凭证，租约按本次请求值整段刷新（{@code now + effectiveLeaseMs}，
@@ -161,7 +161,7 @@ public final class LockEntry implements KeyEntry {
      * </ol>
      *
      * <p>一切授予路径（新持有、重入、加入已有读者）的租约均以
-     * {@code effectiveLeaseMs} 整段刷新，口径统一（design D2：请求值 0 取
+     * {@code effectiveLeaseMs} 整段刷新，口径统一（请求值 0 取
      * 默认、非 0 钳制到 [min,max]）；重入与加入已有读者不消费凭证供应器。
      * 会话有效性与条目存活校验由 {@code CoreEngine} 在本方法之外完成。
      *
@@ -179,7 +179,7 @@ public final class LockEntry implements KeyEntry {
 
         // 规则 4：写侧重入（可重入类型）—— 计数 +1，租约按本次请求值整段刷新，同 token。
         // 口径与读侧重入、加入已有读者群一致：effectiveLeaseMs 已由 CoreEngine 按
-        // 请求值钳制（0 取默认），重入者由此获得延长/缩短租约的通道（design D2）。
+        // 请求值钳制（0 取默认），重入者由此获得延长/缩短租约的通道。
         if (!isRead && writer != null && writer.equals(owner) && reentrant) {
             writeCount++;
             leaseMs = effectiveLeaseMs;
@@ -232,7 +232,7 @@ public final class LockEntry implements KeyEntry {
             return new AcquireResult(Outcome.DENIED, 0, 0, 0);
         }
 
-        // 幂等去重：同 (sessionId, requestId) 已在队 → 返回当前位次，不二次入队（§4.8）。
+        // 幂等去重：同 (sessionId, requestId) 已在队 → 返回当前位次，不二次入队。
         int position = 0;
         for (Waiter w : waiters) {
             position++;
@@ -536,7 +536,7 @@ public final class LockEntry implements KeyEntry {
     }
 
     /**
-     * 等待队列长度读数（统计观察面，Phase 3 T2）。须在持有条目锁时调用。
+     * 等待队列长度读数（统计观察面）。须在持有条目锁时调用。
      *
      * @return 当前排队等待项数
      */
@@ -546,7 +546,7 @@ public final class LockEntry implements KeyEntry {
     }
 
     /**
-     * 明细只读快照（Phase 3 T3，spec"明细只读观察面"）：条目锁内拷贝
+     * 明细只读快照：条目锁内拷贝
      * 持有者（写侧在前、读者依表序）、等待队列（按 FIFO 序，位次即列表
      * 下标隐含）与租约三元组，并以 {@code now} 折算已等待时长与剩余租约。
      * 纯读，MUST NOT 改变任何状态；锁家族的许可/屏障字段取零值。

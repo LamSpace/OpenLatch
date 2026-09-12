@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** §10.1 读写、FIFO 公平、队首响应超时用例组。 */
+/** 读写、FIFO 公平、队首响应超时用例组。 */
 class CoreEngineReadWriteFairnessTest {
 
     /** 手工时钟：用例以相对推进驱动到期/超时判定，无 sleep。 */
@@ -189,7 +189,7 @@ class CoreEngineReadWriteFairnessTest {
         assertThat(rel2.fullyReleased()).isTrue();
     }
 
-    /** WRITE 类型两写者互斥（§10.1 读写组补强）：后到写者排队，立即式则 DENIED。 */
+    /** WRITE 类型两写者互斥（读写组补强）：后到写者排队，立即式则 DENIED。 */
     @Test
     void twoWritersMutuallyExclude() {
         long w1 = engine.sessionOpened();
@@ -207,7 +207,7 @@ class CoreEngineReadWriteFairnessTest {
         assertThat(denied.outcome()).isEqualTo(Outcome.DENIED);
     }
 
-    /** 读侧重入按请求租约值整段刷新，与写侧口径一致（design D2）。 */
+    /** 读侧重入按请求租约值整段刷新，与写侧口径一致。 */
     @Test
     void readReentrantRefreshesLeaseWithRequestedValue() {
         long a = engine.sessionOpened();
@@ -225,7 +225,7 @@ class CoreEngineReadWriteFairnessTest {
         assertThat(engine.expireDue()).isEqualTo(1); // t=20s 到期：刷新生效
     }
 
-    /** 新读者加入既有读者群：共享租约按请求值刷新，最后加入者决定全体到期（design D2 推论）。 */
+    /** 新读者加入既有读者群：共享租约按请求值刷新，最后加入者决定全体到期（整段刷新的推论）。 */
     @Test
     void readerJoinRefreshesSharedLeaseWithRequestedValue() {
         long a = engine.sessionOpened();

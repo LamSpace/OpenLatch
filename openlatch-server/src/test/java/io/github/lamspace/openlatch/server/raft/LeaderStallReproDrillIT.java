@@ -34,13 +34,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * leader 复制停摆最小复现采样器（phase2-leader-stall-followup 任务 1.1，design D1）：
+ * leader 复制停摆最小复现采样器：
  * in-JVM 三节点在「旧 leader 带脏条目重启归群」语境下按 K 轮采样停摆命中率，
- * 为根因定位（1.2）与修复路径验收（2A 复跑归零 / 2B 复跑全自愈）提供复现基座。
+ * 为根因定位与修复路径验收（复跑归零 / 复跑全自愈）提供复现基座。
  *
- * <p><b>单轮构造</b>（前件与收口缺陷档案
- * {@code archive/2026-09-06-phase2-release-closure/defects/leader-replication-stall-ratis-3.3.0.md}
- * 对齐，进程内等价复写「先主后从」滚动重启的首拍）：
+ * <p><b>单轮构造</b>（前件与收口缺陷档案对齐，进程内等价复写
+ * 「先主后从」滚动重启的首拍）：
  * <ol>
  *   <li>{@link ClusterHarness#start(int, long) ClusterHarness.start}(3, 800ms)——真实
  *       {@code RaftSubsystem}+gRPC 三节点，选举超时与进程级演练同拍；探针恒开
@@ -49,12 +48,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>停当值 Leader 前提交在途 NOOP（脏尾：仅落本机日志、未达多数派的
  *       本任期条目），随后 {@code stopNode}——SIGKILL 语义：Ratis 3.3.0
  *       {@code RaftServerImpl.close()} 仅停角色，<b>不做</b>让位/清理日志，
- *       数据目录保留（源码对账见 1.2 档案）；</li>
+ *       数据目录保留（源码对账）；</li>
  *   <li>后台写载持续打流（等价滚动演练的驱动线程，产面错误率与档案
  *       5%–28% 同量纲可比）；停主后以 400–1600ms 随机延迟 {@code restartNode}
- *       ——归群<b>与选举窗口重叠</b>（档案互拒链语境：存活侧同刻超时互斥
+ *       ——归群<b>与选举窗口重叠</b>（互拒链语境：存活侧同刻超时互斥
  *       拉票、归来旧主以更高任期/最长日志当选随即陷入停滞）。实测教训：
- *       "先等新 leader ready 再归群"会结构性排除停摆形态（v1 12/12
+ *       "先等新 leader ready 再归群"会结构性排除停摆形态（该形态下 12/12
  *       RECOVERED——选举先收敛则 NOOP 已由双节点多数派提交，归群无法冻结
  *       不需要它的多数派），故本步不设就绪门；</li>
  *   <li>宽限期后开采样窗：250ms 周期采样当值 Leader 的
@@ -62,7 +61,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       （生产探车道 {@code gateway().submit(NOOP)}）。</li>
  * </ol>
  *
- * <p><b>停摆判定</b>（design D1，与档案症状同形）：窗口内当值 Leader 身份
+ * <p><b>停摆判定</b>（与缺陷档案症状同形）：窗口内当值 Leader 身份
  * （节点 id + 任期）恒定、探针<b>零</b>成功（NOT_READY＝库内
  * {@code LeaderNotReadyException} 回执即 {@code startupLogEntry} 永不应用；
  * IN_FLIGHT＝ready 但提交冻结的无回执形态）、窗口首尾 commitIndex 零推进
@@ -70,8 +69,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Leader 身份切换/持续缺位判 CHURN（另一形态，单独计数不入命中率分子）。
  *
  * <p><b>本用例是采样仪器而非验收门禁</b>：不断言命中率&gt;0——停摆是概率
- * 双稳态（档案：热机 4/4、冷机 1/5），命中判定由任务验收在档案侧完成
- * （1.1 verify「命中率 &gt;0 且显著」；2A/2B 的「复跑归零/全自愈」同理）。
+ * 双稳态（实测：热机 4/4、冷机 1/5），命中判定在演练档案侧完成
+ * （「命中率 &gt;0 且显著」与「复跑归零/全自愈」同理）。
  * 仅当全部轮次 ABORTED（构造不可得：端口/环境漂移）时用例失败。
  *
  * <p><b>门控</b>：{@code @Tag("drill")}，默认构建排除（failsafe
@@ -87,7 +86,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(value = 30, unit = TimeUnit.MINUTES)
 class LeaderStallReproDrillIT {
 
-    /** 默认采样轮数 K（design D1"循环采样 K 轮"；{@code -Ddrill.stall.rounds} 覆盖）。 */
+    /** 默认采样轮数 K（循环采样 K 轮；{@code -Ddrill.stall.rounds} 覆盖）。 */
     private static final int DEFAULT_ROUNDS = 8;
     /** 选举超时（毫秒）：与进程级演练（LeaderKill/RollingRestart）同拍。 */
     private static final long ELECTION_MS = 800;
@@ -101,7 +100,7 @@ class LeaderStallReproDrillIT {
     private static final long RACE_MAX_MS = 1_600;
     /** 后台写载投条周期（毫秒）：等价滚动演练驱动线程节奏。 */
     private static final long LOAD_INTERVAL_MS = 100;
-    /** 归群后宽限期（毫秒）：旧主重启装配 + 可能触发的重选窗口豁免（D2 防误伤同构）。 */
+    /** 归群后宽限期（毫秒）：旧主重启装配 + 可能触发的重选窗口豁免（防误伤）。 */
     private static final long GRACE_MS = 3_000;
     /** 采样窗长（毫秒）：档案症状为 200+ 秒不自愈，窗内持续冻结即判 STALL。 */
     private static final long WINDOW_MS = 20_000;
@@ -509,12 +508,12 @@ class LeaderStallReproDrillIT {
                 + LocalDate.now() + ".md");
         Files.createDirectories(reportPath.getParent());
         if (!Files.exists(reportPath)) {
-            Files.writeString(reportPath, "# leader 复制停摆复现采样档案（phase2-leader-stall-followup 任务 1.1）\n\n");
+            Files.writeString(reportPath, "# leader 复制停摆复现采样档案\n\n");
         }
         Files.writeString(reportPath, "## Run "
                 + LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
                 + "（K=" + rounds + "，构造：稳态写流→脏尾停主→写载+竞速归群）\n\n"
-                + "- 构造：design D1 in-JVM 3 节点（真实 RaftSubsystem+gRPC，election-timeout "
+                + "- 构造：in-JVM 3 节点（真实 RaftSubsystem+gRPC，election-timeout "
                 + ELECTION_MS + "ms，探针恒开）——稳态写流建立水位→在途 NOOP 脏尾→"
                 + "SIGKILL 语义停当值 Leader→后台写载打流 + " + RACE_MIN_MS + "–" + RACE_MAX_MS
                 + "ms 随机延迟归群（与选举窗重叠、不设就绪门）→宽限 " + GRACE_MS

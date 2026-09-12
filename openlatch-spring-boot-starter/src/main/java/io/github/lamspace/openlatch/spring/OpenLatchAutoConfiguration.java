@@ -26,7 +26,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * OpenLatch 自动装配入口（详设 §8.1）。
+ * OpenLatch 自动装配入口。
  *
  * <p><b>职责</b>：经 {@code META-INF/spring/…AutoConfiguration.imports} 注册；
  * 绑定 {@link OpenLatchProperties} 并装配单例 {@link OpenLatchClient} Bean，
@@ -42,7 +42,7 @@ import org.springframework.context.annotation.Configuration;
  * （用户实例唯一），这是"仅加依赖与注解"与"高级用户自定义"两条路径的
  * 会合点；参数校验（时长为正、退避序）委托客户端 Builder 单一事实源完成。
  *
- * <p><b>客户端指标（Phase 3 T2）</b>：上下文存在 {@code MeterRegistry} Bean
+ * <p><b>客户端指标</b>：上下文存在 {@code MeterRegistry} Bean
  * 时经内嵌守卫配置把注册表注入客户端 Builder（启用可选指标），不存在时
  * 静默跳过、Micrometer 缺席亦不影响本类加载——细节见
  * {@link MetricsInjectionConfiguration}。
@@ -62,13 +62,14 @@ public class OpenLatchAutoConfiguration {
      *
      * <p>属性映射：{@code server-host}/{@code server-port} 拼为 Builder 的
      * {@code address}；{@code openlatch.*} 表内四类时长直传，
-     * {@code connectTimeout}/{@code workerThreads} 不在 §8.2 属性表内，
+     * {@code connectTimeout}/{@code workerThreads} 不在 {@code openlatch.*}
+     * 属性表内，
      * 取客户端 Builder 默认值。{@code destroyMethod = "shutdown"}
      * 使上下文关闭时客户端先尽力释放本地持有的全部锁（至多一个请求超时），
      * 再停止重连与网络资源。应用已自行定义客户端 Bean 时不创建。
      *
      * @param properties  已绑定的 {@code openlatch.*} 属性
-     * @param customizers 构建期定制器（按 {@code @Order} 升序应用；T2 度量
+     * @param customizers 构建期定制器（按 {@code @Order} 升序应用；度量
      *                    注册表注入即经此挂接，无实现 Bean 时零操作）
      * @return 已发起首次异步连接的客户端实例
      */
@@ -83,7 +84,7 @@ public class OpenLatchAutoConfiguration {
                 .reconnectInitialBackoff(properties.reconnectInitialBackoff())
                 .reconnectMaxBackoff(properties.reconnectMaxBackoff())
                 .tlsEnabled(properties.tlsEnabled());
-        // TLS/认证属性（Phase 3 T4，spec spring-boot-starter"配置属性绑定与默认值"）：
+        // TLS/认证属性：
         // 仅在显式配置时透传，未配置（null）保持客户端默认（TLS 关 / 无令牌）。
         if (isNotBlank(properties.tlsTrustStore())) {
             builder.tlsTrustStore(properties.tlsTrustStore());
@@ -112,12 +113,12 @@ public class OpenLatchAutoConfiguration {
     }
 
     /**
-     * 度量注册表注入分支（T2，spec"度量注册表自动注入"）：类级
+     * 度量注册表注入分支：类级
      * {@code @ConditionalOnClass} 守卫使 Micrometer 缺席时本分支整体
      * 不加载（主配置类不受牵连）；存在时经 {@link ObjectProvider} 延迟
      * 解算——上下文有 {@code MeterRegistry} Bean 即注入客户端 Builder
-     * （启用客户端可选指标），一个也没有则静默跳过（默认关闭，spec
-     * "无注册表不受扰"）。多注册表取主 Bean（{@code getIfAvailable}
+     * （启用客户端可选指标），一个也没有则静默跳过（默认关闭）。
+     * 多注册表取主 Bean（{@code getIfAvailable}
      * 语义：唯一或 {@code @Primary}）。
      */
     @Configuration(proxyBeanMethods = false)

@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §10.2 消息合法性（pipeline 层）+ 变更 phase1-audit-remediation design D1：
+ * 消息合法性（pipeline 层）：
  * 未知 MessageType 数值回 INVALID_REQUEST 语义的承载信封（type 以
  * {@code MESSAGE_TYPE_UNKNOWN} 占位、回显 request_id、无 payload）且不断连；
  * type/payload 不匹配在连接层直接断言"回包后连接仍存活"；
@@ -178,7 +178,7 @@ class MessageLegalityTest {
         ch.writeInbound(hello(1));
         readOut(ch);
 
-        // LOCK_ACQUIRE 携带 ReleaseRequest payload：回 INVALID_REQUEST 且不断连（§10.2 连接层直接断言）。
+        // LOCK_ACQUIRE 携带 ReleaseRequest payload：回 INVALID_REQUEST 且不断连（连接层直接断言）。
         ch.writeInbound(Envelope.newBuilder()
                 .setProtocolVersion(1)
                 .setType(MessageType.LOCK_ACQUIRE)

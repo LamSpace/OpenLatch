@@ -23,7 +23,7 @@ import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 
 /**
- * 示例 1：编程式 API 最小闭环（详设 §9）——lock / tryLock / unlock。
+ * 示例 1：编程式 API 最小闭环——lock / tryLock / unlock。
  *
  * <p>运行：{@code mvn -pl openlatch-examples exec:java
  * -Dexec.mainClass=io.github.lamspace.openlatch.examples.QuickStartExample}

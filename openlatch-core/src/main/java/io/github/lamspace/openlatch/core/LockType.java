@@ -43,21 +43,21 @@ public enum LockType {
     /** 写锁：与任何持有者互斥，可重入。 */
     WRITE,
     /**
-     * 显式公平承诺互斥（Phase 3 T1）：语义与 {@link #REENTRANT} 逐项等价
+     * 显式公平承诺互斥：语义与 {@link #REENTRANT} 逐项等价
      * （同族别名、互通互认），作为公平承诺的 API 标识；授予顺序等于排队
-     * 顺序的保证由 FIFO 队列本体承载（详设 §2.2）。
+     * 顺序的保证由 FIFO 队列本体承载。
      */
     FAIR,
     /**
-     * 许可门闸（Phase 3 T1）：非锁家族类型，仅作请求定型判别——携带此
-     * 类型的命令由门面分派至 {@code SemaphoreEntry}（详设 §2.3），不参与
+     * 许可门闸：非锁家族类型，仅作请求定型判别——携带此
+     * 类型的命令由门面分派至 {@code SemaphoreEntry}，不参与
      * 上述互斥矩阵。
      */
     SEMAPHORE,
     /**
-     * 倒计数屏障（Phase 3 T1）：非锁家族类型，仅作 key 定型判别——屏障
+     * 倒计数屏障：非锁家族类型，仅作 key 定型判别——屏障
      * 操作经门面独立入口（{@code countDown}/{@code latchAwait}）进入
-     * {@code LatchEntry}（详设 §2.4），不经获取/释放/续租命令通道。
+     * {@code LatchEntry}，不经获取/释放/续租命令通道。
      */
     LATCH
 }

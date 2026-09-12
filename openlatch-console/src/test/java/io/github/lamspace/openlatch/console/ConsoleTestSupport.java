@@ -29,7 +29,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 
 /**
- * L2 冒烟基座工具（Phase 3 T3 §7）：以临时端口拉起"锁端口 0 + 管理指标
+ * L2 冒烟基座工具：以临时端口拉起"锁端口 0 + 管理指标
  * 端口 0 + 已配置 admin-token"的真实服务器——控制台端到端用例与协议
  * 拒绝用例共用的唯一启动口径（metrics 常开使概览曲线区可断言）。
  */

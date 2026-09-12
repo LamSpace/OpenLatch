@@ -35,8 +35,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 长空闲优雅关停回归（spec"集群节点生命周期/长空闲后优雅关停有界"，soak 缺陷
- * {@code phase2-release-closure} D7）：三节点 in-JVM 集群建立后完全静默
+ * 长空闲后优雅关停有界的回归：三节点 in-JVM 集群建立后完全静默
  * 65s（越过 Ratis cached 工作线程 60s 空闲回收时限），逐节点优雅
  * {@code stop()} 并断言单节点有界完成。
  *

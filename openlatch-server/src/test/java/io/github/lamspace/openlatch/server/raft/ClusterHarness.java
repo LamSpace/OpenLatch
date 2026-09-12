@@ -21,14 +21,14 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 /**
- * 进程内多节点集群测试基座（详设 §10"复制集成"层，design D8）：以真实
+ * 进程内多节点集群测试基座（复制集成层）：以真实
  * {@link RaftSubsystem}（gRPC 传输 + 本机端口）在同 JVM 组装多节点，
  * 接入侧用 {@link EmbeddedChannel} 直驱 {@link ClusterRequestHandler} /
  * {@link SessionCoordinator}——协议级异步桥（EventLoop ↔ 应用线程）全程为真。
  *
  * <p><b>与进程级演练的分工</b>：{@link #stopNode} 关停运行时（等价节点停止
- * 服务对复制面的效果）；真实 {@code kill -9} 计时与分区演练归 S3/S4
- * （P2-14/P2-18，复用 PoC driver）。
+ * 服务对复制面的效果）；真实 {@code kill -9} 计时与分区演练归进程级
+ * 演练用例（复用 PoC driver）。
  *
  * <p><b>参数取向</b>：选举超时独立可调——"无日志增长"类断言取大值排除
  * NOOP 探针噪声；failover/失联类取小值压缩用例时长。租约下限压至 100ms
@@ -48,9 +48,9 @@ final class ClusterHarness implements AutoCloseable {
         final int raftPort;
         /** 选举超时（重启复用）。 */
         final long electionTimeoutMs;
-        /** 快照触发阈值（重启复用；S4 用例以小阈值驱动自动快照）。 */
+        /** 快照触发阈值（重启复用；快照用例以小阈值驱动自动快照）。 */
         final long snapshotThreshold;
-        /** 日志 segment 上限字节（{@code 0}=库默认；S4 安装流用例强制截断）。 */
+        /** 日志 segment 上限字节（{@code 0}=库默认；安装流用例强制截断）。 */
         final int logSegmentBytes;
         /** 当前运行时（{@code null}=已停机）。 */
         volatile ClusterRuntime runtime;
@@ -145,7 +145,7 @@ final class ClusterHarness implements AutoCloseable {
     }
 
     /**
-     * 启动 n 节点集群并等待初始选主（默认大阈值：S2/S3 用例零扰动）。
+     * 启动 n 节点集群并等待初始选主（默认大阈值：既有用例零扰动）。
      *
      * @param n                 节点数
      * @param electionTimeoutMs 选举超时（探针周期与 failover 时长的共同旋钮）
@@ -157,7 +157,7 @@ final class ClusterHarness implements AutoCloseable {
     }
 
     /**
-     * 启动 n 节点集群并等待初始选主，快照阈值显式给定（S4 用例以小阈值
+     * 启动 n 节点集群并等待初始选主，快照阈值显式给定（快照用例以小阈值
      * 驱动自动快照；重启沿用同一阈值）。
      *
      * @param n                 节点数
@@ -173,7 +173,7 @@ final class ClusterHarness implements AutoCloseable {
 
     /**
      * 完整参数启动：小 {@code logSegmentBytes}（如 4096）使日志按小块滚动，
-     * 配合快照截断可把落后节点推入安装流（S4/P2-16；{@code 0}=库默认）。
+     * 配合快照截断可把落后节点推入安装流（{@code 0}=库默认）。
      *
      * @param n                 节点数
      * @param electionTimeoutMs 选举超时
@@ -206,7 +206,7 @@ final class ClusterHarness implements AutoCloseable {
     }
 
     /**
-     * 以空数据目录启动一个新节点（S4/P2-17 加节点流程测试用）：仅启动其
+     * 以空数据目录启动一个新节点（加节点流程测试用）：仅启动其
      * Raft 服务并纳入其自身视角的成员表——组的正式变更由用例经
      * {@code subsystem().setMembers} 走运维路径（listener 加入→追赶→升票）。
      *
@@ -349,7 +349,7 @@ final class ClusterHarness implements AutoCloseable {
 
     /**
      * 当值 Leader 存活让位（Ratis 3.3 {@code AdminApi.transferLeadership}，
-     * §8 行 2 的驱动源）：Leadership 移交目标节点，原 Leader 进程/连接/会话
+     * 让位场景的驱动源）：Leadership 移交目标节点，原 Leader 进程/连接/会话
      * 全部存活——EmbeddedChannel 接入不受影响，用于验证 Follower 转发车道。
      *
      * @param toId 移交目标节点 id
@@ -403,7 +403,7 @@ final class ClusterHarness implements AutoCloseable {
 
     /**
      * 指定节点数据目录内的快照文件（按 {@code snapshot.T_I} 命名匹配，
-     * 不含 MD5/tmp/corrupt 伴随文件；S4 保留数与位点断言入口）。
+     * 不含 MD5/tmp/corrupt 伴随文件；保留数与位点断言入口）。
      *
      * @param id 节点 id
      * @return 快照文件路径列表（无序）
@@ -461,7 +461,7 @@ final class ClusterHarness implements AutoCloseable {
         }
 
         /**
-         * 指定握手版本的集群 HELLO 直驱（Phase 3 T1：v3 专属类型门控用例用）。
+         * 指定握手版本的集群 HELLO 直驱（v3 专属类型门控用例用）。
          *
          * @param requestId 请求 id
          * @param version   客户端声明的协议版本（信封与会话字段一致）

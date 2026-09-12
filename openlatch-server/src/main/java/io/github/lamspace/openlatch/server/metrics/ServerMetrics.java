@@ -34,18 +34,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 /**
- * 服务端指标词表与埋点门面（Phase 3 详设 §3.2，spec"服务端指标清单与线路命名"/
- * "请求埋点覆盖单机与集群双路径"）。
+ * 服务端指标词表与埋点门面。
  *
- * <p><b>单一命名点</b>：§3.2 全部指标的逻辑名/标签常量收编于本类（详设 §3.4
- * 勘误后的双路径共用组件，design D1）——{@code RequestDispatcher}（单机）与
+ * <p><b>单一命名点</b>：全部指标的逻辑名/标签常量收编于本类，
+ * {@code RequestDispatcher}（单机）与
  * {@code ClusterRequestHandler}（集群）都经本类记录，同一指标在两种装配下
  * 名称、标签、计数口径一致。Prometheus 线路名由 Micrometer 命名翻译生成
  * （点转下划线；counter 的 {@code .total} 逻辑名翻译为 {@code _total} 尾且
  * 不重复追加；Timer 输出 {@code _seconds_bucket/_count/_sum}），映射表以
- * {@code ServerMetricsVocabularyTest} 为唯一权威断言点（design D2）。
+ * {@code ServerMetricsVocabularyTest} 为唯一权威断言点。
  *
- * <p><b>消息 → 指标映射口径</b>（spec"耗时与到期计数口径"）：
+ * <p><b>消息 → 指标映射口径</b>：
  * {@code LOCK_ACQUIRE}/{@code LATCH_AWAIT} 应答计入 {@code acquire.total{status}}
  * 与 {@code acquire.duration{result}}（屏障等待同为"获取-排队"形态，result 按
  * 应答状态码折算 {@code granted/queued/denied}）；{@code LOCK_RELEASE}/
@@ -54,7 +53,7 @@ import java.util.function.BooleanSupplier;
  * （PING 回包、未知类型）不计。
  *
  * <p><b>启停语义</b>：{@code metrics.enabled=false} 仅关闭 {@code /metrics}
- * 对外服务，埋点照常累积进内存注册表（design D1"关闭即不抓取"而非
+ * 对外服务，埋点照常累积进内存注册表（"关闭即不抓取"而非
  * "关闭即无数据"）；本类永不为 {@code null} 使用，装配点可判空跳过
  * （直接构造的测试夹具允许不挂指标）。
  *
@@ -76,7 +75,7 @@ public final class ServerMetrics {
     public static final String ACQUIRE_DURATION = "openlatch.server.acquire.duration";
     /** 释放请求计数（含屏障倒计数），counter。 */
     public static final String RELEASE_TOTAL = "openlatch.server.release.total";
-    /** 续租请求计数（失败续租是锁丢失前兆，spec 告警项），counter。 */
+    /** 续租请求计数（失败续租是锁丢失前兆），counter。 */
     public static final String RENEW_TOTAL = "openlatch.server.renew.total";
     /** 租约到期强制释放次数，counter。 */
     public static final String LEASE_EXPIRED_TOTAL = "openlatch.server.lease.expired.total";
@@ -172,7 +171,7 @@ public final class ServerMetrics {
      *
      * @param status       应答协议状态码
      * @param elapsedNanos 请求受理至应答生成（单机为 dispatch 起止；集群为
-     *                     受理至写回，含 Raft 提交等待，spec"耗时与到期计数口径"）
+     *                     受理至写回，含 Raft 提交等待）
      */
     public void recordAcquire(StatusCode status, long elapsedNanos) {
         count(ACQUIRE_TOTAL, status);
@@ -181,8 +180,8 @@ public final class ServerMetrics {
 
     /**
      * 获取耗时计时器（按 result 三档缓存）：开 Prometheus 直方图桶，
-     * 线路形态钉为 {@code _seconds_bucket/_count/_sum}（design D2 词表口径；
-     * 桶位取 Micrometer 默认集，非配置项——详设 §9 遗留"桶位可配置"不在 T2）。
+     * 线路形态钉为 {@code _seconds_bucket/_count/_sum}；
+     * 桶位取 Micrometer 默认集，非配置项。
      *
      * @param result 结果标签值
      * @return 计时器实例
@@ -243,7 +242,7 @@ public final class ServerMetrics {
     }
 
     /**
-     * 绑定集群形态 gauge（spec"Gauge 取值语义与采样安全"）：held 读影子表
+     * 绑定集群形态 gauge：held 读影子表
      * 无锁投影（Leader 上为权威值、非 Leader 上为其回放状态——两侧同为
      * "本节点本地观察"）、waiters/队深读 Leader 内存等待队列（非 Leader
      * 队列恒空）、{@code is_leader} 依 {@link LeaderTracker} 快照当时视图。
@@ -278,7 +277,7 @@ public final class ServerMetrics {
     }
 
     /**
-     * 注册集群角色 gauge（spec"Gauge 取值语义与采样安全"：仅集群启用时注册，
+     * 注册集群角色 gauge（仅集群启用时注册，
      * 单机部署 MUST NOT 出现 {@code openlatch.cluster.is_leader} 线）。
      *
      * @param nodeId   本节点 id（{@code node_id} 标签值）

@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Timeout;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 通知端到端（规格"队首通知推送"与"租约到期扫描驱动"）：
+ * 通知端到端（队首通知推送与租约到期扫描驱动）：
  * 真实端口、真实协议收发，通知 → 重发 → 授予闭环。
  */
 class NotifyEndToEndTest {
@@ -119,7 +119,7 @@ class NotifyEndToEndTest {
             assertThat(push.getAwaitNotify().getRequestIdRef()).isEqualTo(waiterRequestId);
             assertThat(push.getAwaitNotify().getKey()).isEqualTo("order");
 
-            // 以同一 request_id 重发：服务端幂等授予（§4.8 规则 7）。
+            // 以同一 request_id 重发：服务端幂等授予。
             Envelope retry = waiter.sendAndAwait(acquire(waiterRequestId, "order", 0, -1));
             assertThat(retry.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
             assertThat(retry.getAcquireResponse().getLeaseToken()).isPositive();

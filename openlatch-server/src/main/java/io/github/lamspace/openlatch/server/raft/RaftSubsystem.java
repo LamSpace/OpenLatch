@@ -42,7 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Raft 子系统装配（详设 §3.2 {@code RaftSubsystem}，design D6/D7/D11）：
+ * Raft 子系统装配：
  * 持有本节点的 Ratis {@link RaftServer}、状态机与内部提交通道
  * （{@link RaftClient} 池），把集群能力绑定到 OpenLatch 节点生命周期。
  *
@@ -52,29 +52,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  * （{@code ClusterRequestHandler}）。
  *
  * <p><b>状态机组件</b>：内核与状态机在本子系统构造（registry 回调可能多次
- * 调用——每分一次组，S2 单组、实例幂等复用），装配方经 {@link #core()} /
+ * 调用——每分一次组，本部署形态为单组、实例幂等复用），装配方经 {@link #core()} /
  * {@link #stateMachine()} 取用并在 gateway 建成后回挂观察者。
  *
- * <p><b>快照装配（S4，§7/P2-15）</b>：Ratis 自动触发按
+ * <p><b>快照装配</b>：Ratis 自动触发按
  * {@code openlatch.cluster.snapshot-threshold} 开启（未快照位点差越过阈值
- * 即在应用线程产出快照）；快照文件保留数钉为 2（详设 §7.2"保留最近 2 份"，
+ * 即在应用线程产出快照）；快照文件保留数钉为 2（保留最近 2 份，
  * 不随外部配置浮动——保留语义与恢复判据耦合）；日志截断由库侧按快照位点
  * 协同完成。手动触发见 {@link #triggerSnapshot()}。
  *
  * <p><b>线程模型</b>：{@link #start()} 前不可用（除构造期字段）；启动后
  * {@link #isLeader()}/{@link #acquireClient()} 任意线程可调（Ratis 自身并发安全）；
- * {@link #close()} 幂等。客户端池轮转仅为摊开 Ratis 单 ClientId 串行化
- * （PoC 摩擦档案），不承诺池内顺序。
+ * {@link #close()} 幂等。客户端池轮转仅为摊开 Ratis 单 ClientId 串行化，
+ * 不承诺池内顺序。
  *
  * <p><b>生命周期</b>：由 {@code OpenLatchServer} 在集群模式下于开放接入端口
- * <b>之前</b>调用 {@link #start()}（spec"Raft 子系统生命周期绑定"）；关停反序。
+ * <b>之前</b>调用 {@link #start()}；关停反序。
  */
 public final class RaftSubsystem {
 
     /** 日志器：装配与关停诊断。 */
     private static final Logger log = LoggerFactory.getLogger(RaftSubsystem.class);
 
-    /** 内部提交客户端池大小（PoC 摩擦：同 ClientId 在途串行，池化摊开，design D11）。 */
+    /** 内部提交客户端池大小（同 ClientId 在途串行，池化摊开）。 */
     private static final int CLIENT_POOL_SIZE = 4;
 
     /** 集群 Raft 组 UUID（按组名派生，全节点一致）。 */
@@ -97,7 +97,7 @@ public final class RaftSubsystem {
 
     /** Ratis 服务，start 后非空、close 后置回 {@code null}。 */
     private RaftServer server;
-    /** 内部提交客户端池（design D11），未启动为 {@code null}。 */
+    /** 内部提交客户端池，未启动为 {@code null}。 */
     private RaftClient[] clients;
     /** 客户端池轮转下标。 */
     private final AtomicInteger clientIdx = new AtomicInteger();
@@ -124,14 +124,14 @@ public final class RaftSubsystem {
     /**
      * 启动 Raft 服务与内部客户端池。
      *
-     * <p>存储目录已存在时以 RECOVER 启动（Ratis 摩擦档案：默认 FORMAT 在重启
-     * 非空目录即失败），否则 FORMAT 新建。
+     * <p>存储目录已存在时以 RECOVER 启动（Ratis 默认 FORMAT 在重启时遇非空
+     * 目录即失败），否则 FORMAT 新建。
      *
      * <p><b>线程池装配契约</b>：proxy/server/client 三组池钉为非缓存固定池
      * （常驻 worker）——Ratis 3.3.0 的组关停派发是 fire-and-forget 进 cached
      * proxy 池，而 cached 池 worker 空闲 60s 全部退出后，优雅关停的派发任务
      * 可能永不被执行（关停链挂至库内 1 天超时），空闲节点必中；固定池从构造
-     * 上消除该前提（soak 取证见 observations 档案）。尺寸 4 覆盖单分组启动
+     * 上消除该前提。尺寸 4 覆盖单分组启动
      * 派发与本服务内部客户端池（{@value #CLIENT_POOL_SIZE}）并发度，属保守
      * 容量而非调优参数。
      *
@@ -146,16 +146,16 @@ public final class RaftSubsystem {
                 TimeDuration.valueOf(Math.max(1, electionMs / 2), TimeUnit.MILLISECONDS));
         RaftServerConfigKeys.Rpc.setTimeoutMax(props,
                 TimeDuration.valueOf(electionMs, TimeUnit.MILLISECONDS));
-        // S4：自动触发按 snapshot-threshold 开启；保留 2 份（详设 §7.2）。
+        // 自动触发按 snapshot-threshold 开启；保留 2 份。
         RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(props, true);
         RaftServerConfigKeys.Snapshot.setAutoTriggerThreshold(
                 props, clusterConfig.snapshotThreshold());
         RaftServerConfigKeys.Snapshot.setRetentionFileNum(props, 2);
         // 截断推进至本节点快照位点（快照位点恒为已应用⊆已提交，对多数派安全）。
         // 库默认的"按全体 peer 提交位取 min"会被任一长期缺席节点卡死——日志
-        // 无上界增长且严重落后场景永远走不到安装流（§7.3-2 依赖截断制造位点差）。
+        // 无上界增长且严重落后场景永远走不到安装流（安装流依赖截断制造位点差）。
         RaftServerConfigKeys.Log.setPurgeUptoSnapshotIndex(props, true);
-        // 线程池钉死（soak 缺陷修复，契约见本方法 Javadoc）：cached 池的 worker
+        // 线程池钉死（契约见本方法 Javadoc）：cached 池的 worker
         // 空闲 60s 回收，而 Ratis 3.3.0 RaftServerProxy.close 以 fire-and-forget
         // 把组关停任务派发进 proxy 池（不 join）——零 worker 时刻派发即永不被执行，
         // 状态机更新器收不到停止信号，同线程的 shutdownAndWait 挂 1 天。
@@ -167,7 +167,7 @@ public final class RaftSubsystem {
         RaftServerConfigKeys.ThreadPool.setClientSize(props, 4);
         if (clusterConfig.logSegmentBytes() > 0) {
             // Raft 库语义透传（同 election-timeout-ms 口径）：小 segment 使截断
-            // 粒度落在测试可驱动的条目量级（S4 追赶用例）。
+            // 粒度落在测试可驱动的条目量级（追赶用例）。
             org.apache.ratis.util.SizeInBytes seg =
                     org.apache.ratis.util.SizeInBytes.valueOf(clusterConfig.logSegmentBytes());
             RaftServerConfigKeys.Log.setSegmentSizeMax(props, seg);
@@ -175,7 +175,7 @@ public final class RaftSubsystem {
         }
 
         RaftGroup group = RaftGroup.valueOf(groupId, peers);
-        // 摩擦档案（P2-02）：重启目录非空必须 RECOVER，否则 "Failed to FORMAT"。
+        // 重启目录非空必须 RECOVER，否则 Ratis 报 "Failed to FORMAT"。
         boolean storageExists = java.nio.file.Files.exists(
                 java.nio.file.Path.of(clusterConfig.dataDir(), groupId.getUuid().toString()));
         server = RaftServer.newBuilder()
@@ -230,7 +230,7 @@ public final class RaftSubsystem {
     }
 
     /**
-     * 手动触发一份快照（详设 §7.2"手动管理命令"落点，S4/design D6）：
+     * 手动触发一份快照（手动管理命令落点）：
      * 直调本节点状态机的 {@code takeSnapshot}，语义与自动触发一致
      * （applyLock 内一致性副本 + 锁外落盘）。仅供运维脚本与测试在阈值
      * 之外主动产快照；不等待库侧截断/清理——那由下一轮自动快照周期顺带
@@ -249,7 +249,7 @@ public final class RaftSubsystem {
     }
 
     /**
-     * 成员变更（详设 §7.4，S4/P2-17/design D6）：以目标投票者/监听者全集
+     * 成员变更：以目标投票者/监听者全集
      * 提交 Ratis 单步配置变更（{@code AdminApi.setConfiguration}）。
      *
      * <p><b>输入形态</b>：与配置键 {@code peers} 同族的 {@code id@host:port}
@@ -257,7 +257,7 @@ public final class RaftSubsystem {
      * 可达，其后续升票由运维以全集列表再次调用完成（listener 追赶→升
      * voter 的两段流程见部署文档）。
      *
-     * <p><b>多数派护栏</b>（spec"成员变更运维"，机械拒绝而非仅文档约定）：
+     * <p><b>多数派护栏</b>（机械拒绝而非仅文档约定）：
      * 以<b>本节点视角</b>的当前投票者集为基线做差集校验——单次调用对投票者
      * 的净变更 MUST ≤ 1 个成员，且 MUST NOT 同时含加与删。两条件联合保证
      * 旧/新多数派恒相交（单步变更安全前提）；违反抛
@@ -293,7 +293,7 @@ public final class RaftSubsystem {
         if (!added.isEmpty() && !removed.isEmpty() || added.size() + removed.size() > 1) {
             throw new IllegalArgumentException(
                     "成员变更多数派护栏：单次仅可加或删一个投票者（added=" + added
-                            + ", removed=" + removed + "）——先加新节点并等待追赶完成，再移除旧节点（§7.4）");
+                            + ", removed=" + removed + "）——先加新节点并等待追赶完成，再移除旧节点");
         }
         var reply = acquireClient().admin().setConfiguration(voters, listeners);
         if (!reply.isSuccess()) {
@@ -370,7 +370,7 @@ public final class RaftSubsystem {
     }
 
     /**
-     * 轮转取用一个内部提交客户端（design D11）。
+     * 轮转取用一个内部提交客户端。
      *
      * @return 池内客户端；未启动为 {@code null}
      */
@@ -419,7 +419,7 @@ public final class RaftSubsystem {
     }
 
     /**
-     * 分区的公开视图（peer commitInfos 轮询——失联检测入口，design D5）。
+     * 分区的公开视图（peer commitInfos 轮询——失联检测入口）。
      *
      * @return Ratis division 句柄
      * @throws IOException 服务未启动或组不存在

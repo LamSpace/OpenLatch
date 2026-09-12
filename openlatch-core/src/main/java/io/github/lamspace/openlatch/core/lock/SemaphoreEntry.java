@@ -37,7 +37,7 @@ import java.util.Map;
 import java.util.function.LongSupplier;
 
 /**
- * 单 key 的许可门闸状态机（Phase 3 详设 §2.3 / P3-03）：N 个许可的共享
+ * 单 key 的许可门闸状态机：N 个许可的共享
  * 资源闸口，许可获取受租约保护（客户端崩溃不泄漏许可）。
  *
  * <p><b>状态要素</b>：
@@ -57,7 +57,7 @@ import java.util.function.LongSupplier;
  *
  * <p><b>公平性</b>：严格 FIFO 仅队首可获——许可归还后只有队首的请求
  * 被检查，队首不满足时任何后续请求（含所需许可更小的）都不得越位，
- * 杜绝大请求饥饿（详设 §2.3）。同归属重入是唯一例外：它不改变队列
+ * 杜绝大请求饥饿。同归属重入是唯一例外：它不改变队列
  * 位次，只在许可足量时直接累加持有。
  */
 public final class SemaphoreEntry implements KeyEntry {
@@ -93,9 +93,9 @@ public final class SemaphoreEntry implements KeyEntry {
     }
 
     /**
-     * 快照重建工厂（详设 §7.1 推广，供 {@code CoreEngine.restoreFrom} 加载
+     * 快照重建工厂（供 {@code CoreEngine.restoreFrom} 加载
      * Semaphore 条目）：以传入的池与持有快照直接装配初态，不经状态迁移
-     * 规则；等待队列恒空（集群等待队列不进复制状态，design D9）。
+     * 规则；等待队列恒空（集群等待队列不进复制状态）。
      *
      * @param key              锁键
      * @param permitsTotal     许可总量
@@ -137,7 +137,7 @@ public final class SemaphoreEntry implements KeyEntry {
      * </ol>
      *
      * <p>非队首的足量请求 MUST NOT 被授予（严格 FIFO 防饥饿）；一切授予
-     * 路径的租约以 {@code effectiveLeaseMs} 整段刷新（design D2 口径）。
+     * 路径的租约以 {@code effectiveLeaseMs} 整段刷新。
      * 会话有效性与条目存活校验由 {@code CoreEngine} 在本方法之外完成。
      *
      * @param cmd                获取命令（{@code permits ≥ 1}，已由门面归一）
@@ -239,8 +239,7 @@ public final class SemaphoreEntry implements KeyEntry {
     /**
      * 归还许可：判定顺序——无任何持有 → {@code NOT_HELD}；凭证不匹配 →
      * {@code INVALID_TOKEN}；归属未持有 → {@code NOT_HELD}；归还数超过
-     * 该归属持有数 → {@code OVER_RELEASE}（池零扰动，详设 §2.3 对称扣减
-     * 约定）；否则持有计数扣减、许可即时归还池中，持有归零时移除归属，
+     * 该归属持有数 → {@code OVER_RELEASE}（池零扰动）；否则持有计数扣减、许可即时归还池中，持有归零时移除归属，
      * 全体持有清空时撤销共享租约。每次成功归还后按队首规则尝试推进
      * （许可部分归还即可解锁队首，与锁"全体释放才推进"不同）。
      *
@@ -422,7 +421,7 @@ public final class SemaphoreEntry implements KeyEntry {
     }
 
     /**
-     * 等待队列长度读数（统计观察面，Phase 3 T2）。须在持有条目锁时调用。
+     * 等待队列长度读数（统计观察面）。须在持有条目锁时调用。
      *
      * @return 当前排队等待项数
      */
@@ -432,7 +431,7 @@ public final class SemaphoreEntry implements KeyEntry {
     }
 
     /**
-     * 明细只读快照（Phase 3 T3，spec"明细只读观察面"）：条目锁内拷贝
+     * 明细只读快照：条目锁内拷贝
      * 许可池（总量/可用）、持有表（角色恒 {@code HOLDER}，计数即持有
      * 许可数）、等待队列（按 FIFO 序）与共享租约三元组，并以 {@code now}
      * 折算已等待时长与剩余租约。纯读，MUST NOT 改变任何状态；锁家族

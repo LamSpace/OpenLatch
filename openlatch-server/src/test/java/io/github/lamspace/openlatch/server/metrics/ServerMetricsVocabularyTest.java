@@ -27,8 +27,8 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * §3.2 指标清单 ↔ Prometheus 线路名的映射词表（design D2，spec"服务端指标
- * 清单与线路命名"的唯一权威断言点）：逐项记录后 scrape，断言点分逻辑名翻译
+ * 指标清单 ↔ Prometheus 线路名的映射词表（服务端指标
+ * 清单与线路命名的唯一权威断言点）：逐项记录后 scrape，断言点分逻辑名翻译
  * 出的线名（counter 带 {@code _total} 尾不重复追加、Timer 输出
  * {@code _seconds_bucket/_count/_sum}、gauge 原名下划线化）。
  */

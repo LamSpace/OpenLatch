@@ -23,7 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 
 /**
- * Leader 侧等待队列（详设 §4.4/§4.5 的集群承载结构，design D9）：FIFO 排队
+ * Leader 侧等待队列（集群承载结构）：FIFO 排队
  * 是 Leader 任期内状态、不复制、不进引擎——本结构是该契约的唯一实现。
  *
  * <p><b>规则对齐</b>（与 {@code CoreEngine} 单机等待语义同构）：
@@ -33,20 +33,20 @@ import java.util.List;
  *   <li>深度限额 {@code maxQueueDepthPerKey}（超限回 {@code -1}，调用方映射
  *       {@code OVERLOADED}）；</li>
  *   <li>等待项携带请求许可数（{@code permits}，锁与屏障恒 1）：Semaphore 的
- *       队首唤醒须"可用许可 ≥ 队首请求"方可通知（防大请求饥饿，Phase 3 T1
- *       design D4——与单机 {@code SemaphoreEntry} 判定语义等价）；屏障归零
+ *       队首唤醒须"可用许可 ≥ 队首请求"方可通知（防大请求饥饿，
+ *       与单机 {@code SemaphoreEntry} 判定语义等价）；屏障归零
  *       经 {@link #broadcastKey} 全体放行；</li>
  *   <li>队首唤醒一次性：{@link #onKeyFreed} 只标记"已通知"并返回待推送项，
  *       截止 {@code headReplyTimeoutMs} 前不重复通知；超时未重发由
  *       {@link #sweepNotified} 摘除并让位下一队首（AWAIT_NOTIFY 丢失兜底，
- *       同 Phase 1 规则）；</li>
+ *       同单机规则）；</li>
  *   <li>授予成功（含幂等重发抵达）经 {@link #onGranted} 出队；会话关闭经
  *       {@link #purgeSession} 全量摘除。</li>
  * </ul>
  *
  * <p><b>任期作用域</b>：结构仅在 Leader 任期内有意义；WinLeadership 调用
- * {@link #clear()}——"单个 Leader 任期内的严格 FIFO"（§4.4 公平性表述）由
- * 任期边界机械保证，降级残留随下次当选一并清除。
+ * {@link #clear()}——"单个 Leader 任期内的严格 FIFO"由任期边界机械保证，
+ * 降级残留随下次当选一并清除。
  *
  * <p><b>线程模型</b>：全部方法以实例锁同步——写侧来源包括连接 EventLoop
  * （入队/出队）与状态机应用线程（唤醒/摘除），读侧来源含调度线程
@@ -82,7 +82,7 @@ public final class WaitQueue {
         private final Waiter waiter;
         /** 已通知时刻（毫秒）；0 表示尚未通知。 */
         private long notifiedAtMs;
-        /** 入队时刻（epoch 毫秒，管理观察 waited_ms 折算基准，Phase 3 T3）。 */
+        /** 入队时刻（epoch 毫秒，管理观察 waited_ms 折算基准）。 */
         private final long enqueuedAtMs;
 
         /**
@@ -98,7 +98,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 管理观察的等待项视图（Phase 3 T3）：位次、归属与已等待时长的不可变
+     * 管理观察的等待项视图：位次、归属与已等待时长的不可变
      * 快照——{@code waitedMs} 以调用方提供的 {@code now} 折算。
      *
      * @param position   1 起位次
@@ -186,7 +186,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 许可感知的队首推进（Phase 3 T1 design D4）：仅当可用许可满足队首请求
+     * 许可感知的队首推进：仅当可用许可满足队首请求
      * 时通知队首；队首不满足时不检查任何后续条目（防大请求饥饿）。锁路径
      * {@code available} 传 {@link Integer#MAX_VALUE} 与 {@link #onKeyFreed} 等价。
      *
@@ -212,7 +212,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 屏障归零全体广播（Phase 3 T1）：标记全部未通知等待项为已通知并返回
+     * 屏障归零全体广播：标记全部未通知等待项为已通知并返回
      * 待推送列表；已通知项不重复推（其重发自行抵达放行）。条目不离队——
      * 等待者经重发命中"已归零"时由 {@link #onGranted} 出队。
      *
@@ -268,7 +268,7 @@ public final class WaitQueue {
 
     /**
      * 会话关闭摘除：移除该会话全部等待项；若因此改变了某个 key 的队首，
-     * 返回新队首供通知（同 Phase 1 的摘除级联语义）。
+     * 返回新队首供通知（同单机的摘除级联语义）。
      *
      * @param sessionId 逻辑会话 id
      * @param now       当前时刻（毫秒，用于新队首通知标记）
@@ -336,7 +336,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 全部队列条目总数（Phase 3 T2 gauge 读数，含锁/Semaphore 等待与
+     * 全部队列条目总数（gauge 指标读数，含锁/Semaphore 等待与
      * latch awaiter——同队列承载）。与入队/出队经同一监视器互斥，
      * 读数对本队列内部一致、与引擎状态弱一致。
      *
@@ -351,7 +351,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 单 key 队列深度的当时最大值（Phase 3 T2 gauge 采样读数，
+     * 单 key 队列深度的当时最大值（gauge 指标采样读数，
      * 口径为"抓取时刻"，允许错过两次抓取之间的瞬时峰高）。
      *
      * @return 最大队深；无等待返回 0
@@ -367,7 +367,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 指定 key 的等待队列明细快照（Phase 3 T3，ADMIN_KEY_DETAIL Leader 侧
+     * 指定 key 的等待队列明细快照（ADMIN_KEY_DETAIL Leader 侧
      * 数据源）：实例锁内按 FIFO 序拷贝位次、归属与以 {@code now} 折算的
      * 已等待时长。与 {@link #totalWaiters()} 同监视器互斥，对本队列内部
      * 一致、与引擎状态弱一致。
@@ -392,7 +392,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 按逻辑会话聚合的在队等待数（Phase 3 T3，ADMIN_LIST_SESSIONS 的
+     * 按逻辑会话聚合的在队等待数（ADMIN_LIST_SESSIONS 的
      * {@code waiting_keys} 来源；仅 Leader 队列有真实值）。
      *
      * @return sessionId → 等待项数（弱一致快照）
@@ -437,7 +437,7 @@ public final class WaitQueue {
     }
 
     /**
-     * 清空全部队列（WinLeadership 任期边界调用，design D9）。
+     * 清空全部队列（WinLeadership 任期边界调用）。
      */
     public synchronized void clear() {
         queues.clear();

@@ -52,8 +52,8 @@ import io.github.lamspace.openlatch.server.session.ServerSession;
 import java.util.Objects;
 
 /**
- * 请求分发（设计说明书 §5.4）：{@code Envelope} → core 命令，core 结果 → {@code Envelope}。
- * 映射为纯函数（design.md D5），可脱离 Netty 单测；{@link #dispatch} 为入口。
+ * 请求分发：{@code Envelope} → core 命令，core 结果 → {@code Envelope}。
+ * 映射为纯函数，可脱离 Netty 单测；{@link #dispatch} 为入口。
  *
  * <p><b>线程模型</b>：{@link #dispatch} 由 {@code ServerSessionHandler} 在
  * 连接所属 EventLoop 线程上同步调用（含 {@code core.acquire}/{@code release}/
@@ -61,7 +61,7 @@ import java.util.Objects;
  * core 与指标引用），可被多连接线程并发进入；单 key 状态的串行性由
  * {@code CoreEngine} 的条目锁保证，不属本类职责。
  *
- * <p><b>指标埋点</b>（Phase 3 T2，详设 §3.4 勘误后口径）：每条产出应答的
+ * <p><b>指标埋点</b>：每条产出应答的
  * 请求在 {@link #dispatch} 收口记录一次（计数按应答状态码、获取类消息附带
  * dispatch 起止耗时）；{@code metrics} 可为 {@code null}（既有测试夹具的
  * 直接构造），此时零记录、行为不变。
@@ -96,7 +96,7 @@ public final class RequestDispatcher {
     /**
      * 分发一条已握手连接上的业务消息。返回要写回的响应；{@code PING} 返回
      * {@code null}（不回复）。未知类型与 payload 不匹配回 {@code INVALID_REQUEST}，
-     * 不断连（规格"消息合法性校验"）。
+     * 不断连。
      *
      * @param session 已握手会话（提供 sessionId）
      * @param msg     入站消息信封
@@ -130,7 +130,7 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 分发屏障倒计数（Phase 3 P3-05，详设 §2.4）：负参数在协议层拒绝；
+     * 分发屏障倒计数：负参数在协议层拒绝；
      * v3 门控——LATCH 消息对握版本 &lt;3 的会话消息级拒绝、不断连。
      *
      * @param session 已握手会话
@@ -154,7 +154,7 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 分发屏障等待（Phase 3 P3-05）：判定与门控同上；QUEUED 携带位次，
+     * 分发屏障等待：判定与门控同上；QUEUED 携带位次，
      * 归零经 {@code AWAIT_NOTIFY} 推送后由客户端同 id 重发。
      *
      * @param session 已握手会话
@@ -179,7 +179,7 @@ public final class RequestDispatcher {
 
     /**
      * 屏障命令结果 → 协议状态码（映射表与 {@link #toAcquireStatus} 同规则：
-     * GRANTED=OK、拒绝细分同码，design D3 协议面不新增状态码）。
+     * GRANTED=OK、拒绝细分同码，协议面不新增状态码）。
      *
      * @param outcome 屏障命令结果状态
      * @return 协议状态码
@@ -202,7 +202,7 @@ public final class RequestDispatcher {
     /**
      * 分发获取锁请求：协议 {@code AcquireRequest} → core {@code AcquireCommand}
      * → 结果映射为协议响应。{@code wait_ms == 0} 映射为立即式（不排队），
-     * {@code -1} 与正数均映射为可排队（设计说明书 §3.2.2）；租约到期时刻
+     * {@code -1} 与正数均映射为可排队；租约到期时刻
      * 以映射时的 {@code System.currentTimeMillis()} 计算。v3 门控与许可参数
      * 合法性（{@link #validateAcquirePermits}）先于命令构造，许可数经
      * {@link #normalizedPermits} 归一后传入 core。
@@ -213,7 +213,7 @@ public final class RequestDispatcher {
      */
     private Envelope dispatchAcquire(ServerSession session, Envelope msg) {
         AcquireRequest req = msg.getAcquireRequest();
-        // v3 门控（详设 §6）：新锁类型仅对握手中声明 v3 的会话开放，v1/v2
+        // v3 门控：新锁类型仅对握手中声明 v3 的会话开放，v1/v2
         // 会话消息级拒绝、不断连（请求形状错误，非安全事件）。
         if (session.protocolVersion() < 3 && isV3OnlyLockType(req.getLockType())) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -233,7 +233,7 @@ public final class RequestDispatcher {
                 lockType,
                 req.getThreadId(),
                 req.getLeaseMs(),
-                req.getWaitMs() != 0,   // wait_ms == 0 立即式；-1 与 >0 均可排队（设计说明书 §3.2.2）
+                req.getWaitMs() != 0,   // wait_ms == 0 立即式；-1 与 >0 均可排队
                 normalizedPermits(req.getPermits()),
                 req.getPermitsTotal());
         AcquireResult result = core.acquire(cmd);
@@ -241,7 +241,7 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 获取请求的许可参数合法性（Phase 3 详设 §2.1 / P3-03）：
+     * 获取请求的许可参数合法性：
      * {@code permits}/{@code permits_total} 为负，或非 SEMAPHORE 类型携带
      * {@code permits > 1} / {@code permits_total != 0} 时非法。合法返回
      * {@code null}；非法返回映射状态码（统一 {@code INVALID_REQUEST}）。
@@ -327,8 +327,8 @@ public final class RequestDispatcher {
 
     /**
      * 是否 v3 专属协议锁类型：握版本 &lt;3 的会话请求这些类型 MUST 被消息级
-     * 拒绝（详设 §6 兼容性策略）。已接入：{@code FAIR}（P3-02）、
-     * {@code SEMAPHORE}（P3-03）；{@code LATCH} 随 P3-05 增列。
+     * 拒绝（v3 兼容性策略）。适用类型：{@code FAIR}、
+     * {@code SEMAPHORE}、{@code LATCH}。
      *
      * @param type 协议锁类型
      * @return v3 专属返回 {@code true}
@@ -340,7 +340,7 @@ public final class RequestDispatcher {
     }
 
     /**
-     * core 授予结果 → 协议响应（design.md D5 全表映射）。
+     * core 授予结果 → 协议响应（全表映射）。
      *
      * @param request 原请求信封（回显 protocolVersion 与 requestId）
      * @param result  core 获取结果
@@ -413,7 +413,7 @@ public final class RequestDispatcher {
             case INVALID_TOKEN -> StatusCode.INVALID_TOKEN;
             case NOT_HELD -> StatusCode.NOT_HELD;
             case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
-            // 超额归还是请求参数与持有不符，非租约问题（design D3）。
+            // 超额归还是请求参数与持有不符，非租约问题。
             case OVER_RELEASE -> StatusCode.INVALID_REQUEST;
         };
     }
@@ -441,7 +441,7 @@ public final class RequestDispatcher {
      * 构造与请求类型对应的最小错误响应，回显 {@code request_id}。
      * 请求 {@code type} 为协议未定义数值（Protobuf 解析为 {@code UNRECOGNIZED}）时，
      * 响应 type 以 {@code MESSAGE_TYPE_UNKNOWN} 占位并返回无 payload 的信封——
-     * MUST NOT 因回显未知类型抛异常而使请求静默悬挂（规格"消息合法性校验"）。
+     * MUST NOT 因回显未知类型抛异常而使请求静默悬挂。
      * 其余未知类型（{@code PING}/{@code AWAIT_NOTIFY}）同样返回无 payload 信封，
      * 仍可被客户端按 {@code request_id} 关联。
      *
@@ -469,7 +469,7 @@ public final class RequestDispatcher {
                     LatchCountDownResponse.newBuilder().setStatus(status));
             case LATCH_AWAIT -> b.setLatchAwaitResponse(
                     LatchAwaitResponse.newBuilder().setStatus(status));
-            // v3-T3：ADMIN 消息同规则——认证/门控/限额拒绝的状态码在线路可见
+            // v3：ADMIN 消息同规则——认证/门控/限额拒绝的状态码在线路可见
             // （控制台裁决依赖；被拒应答仅带状态码，观察字段留零值）。
             case ADMIN_SUMMARY -> b.setAdminSummaryResponse(
                     AdminSummaryResponse.newBuilder().setStatus(status));

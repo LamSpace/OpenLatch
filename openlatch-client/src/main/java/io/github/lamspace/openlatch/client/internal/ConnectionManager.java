@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * 连接与重连状态机（详设 §6.2）。
+ * 连接与重连状态机。
  *
  * <p><b>状态迁移</b>：
  * <pre>
@@ -63,7 +63,7 @@ import java.util.function.Consumer;
  * 每次失败倍增，上限 {@code reconnectMaxBackoff}（默认 10s），
  * 每次延时附加 ±20% 随机抖动。重连成功后退避复位为初始值。
  *
- * <p><b>目标选择（S3，详设 §6.3）</b>：连接目标为可轮换的 {@code (currentHost,
+ * <p><b>目标选择</b>：连接目标为可轮换的 {@code (currentHost,
  * currentPort)}，初值 = 种子列表首项。主动断连后的重试先试原地址；TCP 连接
  * 失败或握手失败则游标推进到下一种子（按序循环），实现"先试原地址，失败后
  * 轮询种子列表"。Leader 改连由客户端新建专用车道完成，不在本状态机内切换目标。
@@ -105,9 +105,9 @@ public final class ConnectionManager {
         CLOSED
     }
 
-    /** v3 协议版本（Phase 3 T1 起），握手请求固定携带（服务端兼容 v1–v3，应答回显本版本）。 */
+    /** v3 协议版本，握手请求固定携带（服务端兼容 v1–v3，应答回显本版本）。 */
     private static final int PROTOCOL_VERSION = 3;
-    /** 入站帧最大长度（1 MiB），与服务端帧长限制一致（详设 §3.1）。 */
+    /** 入站帧最大长度（1 MiB），与服务端帧长限制一致。 */
     private static final int MAX_FRAME_LENGTH = 1024 * 1024;
     /** 日志器。 */
     private static final Logger log = LoggerFactory.getLogger(ConnectionManager.class);
@@ -151,7 +151,7 @@ public final class ConnectionManager {
     private long currentBackoffMs;
     /** 待执行的重连任务句柄，关停时取消。 */
     private Timeout reconnectTask;
-    /** 客户端指标门面（T2 重连计数；默认禁用，装配阶段经 {@link #setMetrics} 注入）。 */
+    /** 客户端指标门面（重连计数；默认禁用，装配阶段经 {@link #setMetrics} 注入）。 */
     private volatile ClientMetrics metrics = ClientMetrics.DISABLED;
     /** 本次连接尝试的握手截止时刻（epoch 毫秒），用于约束握手剩余超时。 */
     private long connectDeadlineMs;
@@ -165,7 +165,7 @@ public final class ConnectionManager {
     /**
      * 握手成功监听器（v2）：进入 ACTIVE 时收到（且仅在收到）{@code OK} 的
      * {@code HelloResponse} 上回调，携带服务端 leader 提示字段——客户端据此
-     * 做启动直连发现（详设 §6.3）。在 EventLoop 线程调用，MUST NOT 阻塞。
+     * 做启动直连发现。在 EventLoop 线程调用，MUST NOT 阻塞。
      */
     private volatile Consumer<HelloResponse> helloListener = hello -> {
         // 客户端装配前不通知
@@ -184,7 +184,7 @@ public final class ConnectionManager {
     /**
      * 计算本次重连延时并推进退避（stateLock 内调用）。
      *
-     * <p><b>单种子（Phase 1 语义，逐字节不变）</b>：每次失败即指数倍增
+     * <p><b>单种子</b>：每次失败即指数倍增
      * （初始 200ms，上限 reconnectMaxBackoff）。
      * <p><b>多种子（集群）</b>：一轮内快速轮换种子（延时取当前退避不倍增），
      * 扫完全部种子一圈后才抬升退避——使 crash failover 能在亚秒级触及
@@ -220,7 +220,7 @@ public final class ConnectionManager {
     }
 
     /**
-     * 全参构造（S3 多车道，design D6）：车道以显式初始目标建连。
+     * 全参构造（多车道形态）：车道以显式初始目标建连。
      *
      * @param config                 客户端配置（超时/退避/种子表来源）
      * @param group                  网络线程组
@@ -255,7 +255,7 @@ public final class ConnectionManager {
 
     /**
      * 连接失败时把目标推进到下一粒种子（stateLock 内调用；种子表非空由
-     * Builder 校验保证）。主动断连不推进——重连先试原地址（详设 §6.3）。
+     * Builder 校验保证）。主动断连不推进——重连先试原地址。
      */
     private void advanceSeedLocked() {
         if (!seedRotationOnFailure) {
@@ -278,7 +278,7 @@ public final class ConnectionManager {
     }
 
     /**
-     * 注入指标门面（T2；仅由客户端装配阶段调用）。断连重连与连接失败重试
+     * 注入指标门面（仅由客户端装配阶段调用）。断连重连与连接失败重试
      * 两个发起点计数，首次建连不计。
      *
      * @param metrics 指标门面；{@code null} 回落禁用形态
@@ -499,9 +499,9 @@ public final class ConnectionManager {
             state = State.CONNECTING;
             connectDeadlineMs = System.currentTimeMillis() + config.connectTimeout().toMillis();
         }
-        // 客户端 TLS（Phase 3 T4）：启用时惰性构造 SslContext 并缓存（跨重连复用，
-        // 主连接与各车道同一装配源）。PEM 配置不可用按连接失败处理（有界退避重连
-        // + WARN 日志，不崩溃 EventLoop），与 spec"错误 trust-store 清晰失败"一致。
+        // 客户端 TLS：启用时惰性构造 SslContext 并缓存（跨重连复用，
+        // 主连接与各车道同一装配源）。错误的 trust-store 等 PEM 配置不可用按
+        // 连接失败清晰处理（有界退避重连 + WARN 日志，不崩溃 EventLoop）。
         SslContext ssl = sslContext;
         if (ssl == null && config.tlsEnabled()) {
             try {
@@ -521,7 +521,7 @@ public final class ConnectionManager {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        // TLS 必居 pipeline 首位（Phase 3 T4）：握手/加解密先于
+                        // TLS 必居 pipeline 首位：握手/加解密先于
                         // 分帧编解码；SslHandler 于 channelActive 自动开始握手。
                         if (fssl != null) {
                             ch.pipeline().addLast("ssl", fssl.newHandler(ch.alloc()));
@@ -592,7 +592,7 @@ public final class ConnectionManager {
         HelloRequest.Builder helloReq = HelloRequest.newBuilder()
                 .setClientProtocolVersion(PROTOCOL_VERSION)
                 .setClientName("openlatch-client");
-        // 业务令牌（Phase 3 T4）：配置非空即随 HELLO 携带（认证开启的服务端校验；
+        // 业务令牌：配置非空即随 HELLO 携带（认证开启的服务端校验；
         // 默认关闭服务端维持"非空即拒"，故未配置时不得携带）。令牌不落日志。
         if (config.authToken() != null && !config.authToken().isBlank()) {
             helloReq.setAuthToken(config.authToken());
@@ -627,7 +627,7 @@ public final class ConnectionManager {
             if (err != null || hello == null || hello.getStatus() != StatusCode.OK) {
                 log.debug("handshake failed: {}", err == null ? hello.getStatus() : err.toString());
                 // 握手失败常因该节点无主可登记（集群 SESSION_OPEN 不可提交）：
-                // 推进游标，关闭后的退避重连换下一种子（详设 §6.3）。
+                // 推进游标，关闭后的退避重连换下一种子。
                 advanceSeedLocked();
                 // 离开锁再关闭，避免 close 事件与状态锁交叉
             } else {
@@ -644,8 +644,8 @@ public final class ConnectionManager {
             }
         }
         if (becameActive) {
-            // 锁外回调：首连/重连成功通知（重连裁决经此触发，详设 §6.2）；
-            // 握手监听携带 v2 leader 提示，客户端启动发现据此直连（§6.3）。
+            // 锁外回调：首连/重连成功通知（重连裁决经此触发）；
+            // 握手监听携带 v2 leader 提示，客户端启动发现据此直连。
             activeListener.run();
             helloListener.accept(activeHello);
         }

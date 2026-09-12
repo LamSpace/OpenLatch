@@ -27,7 +27,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * FairLock 公平性回归套件（Phase 3 详设 §2.2/P3-02，验收标准 §8-1 常开档）：
+ * FairLock 公平性回归套件（常开档）：
  * "并发竞争下授予顺序 == 排队顺序"的 core 直驱档。{@code FAIR} 与
  * {@code REENTRANT} 参数化跑同一矩阵——矩阵对 REENTRANT 同样成立即是
  * "语义等价"的机器验证（别名不是特权）；任何未来优化（如读者批量授予）

@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 冒烟（规格"可执行交付形态"，设计说明书 §13.2 P1-17）：
+ * 冒烟（可执行交付形态）：
  * {@code java -jar} 独立启动后完整执行 HELLO → ACQUIRE → LEASE_RENEW → RELEASE。
  * 由 failsafe 在 integration-test 阶段执行（package/shade 之后），
  * verify 阶段校验其结果。

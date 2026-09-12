@@ -9,7 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 集群配置解析与校验测试（详设 §9，spec"集群配置体系"三场景）。
+ * 集群配置解析与校验测试（三场景）。
  *
  * <p>判据：默认即单机（零配置回落）；{@code enabled=true} 必填项缺失/非法
  * 以指明配置键的异常快速失败（不静默降级）；合法值逐项解析。
@@ -72,7 +72,7 @@ class ClusterConfigTest {
                 .hasMessageContaining("openlatch.cluster.peers");
     }
 
-    /** spec"地址映射未配置不阻塞启动"：缺省空表，查询降级为空串。 */
+    /** 地址映射未配置不阻塞启动：缺省空表，查询降级为空串。 */
     @Test
     void clientAddressesAbsentDegradesToEmpty() {
         Properties p = props(
@@ -99,7 +99,7 @@ class ClusterConfigTest {
         assertThat(c.clientAddress(3)).isEmpty();
     }
 
-    /** spec"地址映射非法启动失败"：格式非法指明配置键与具体条目。 */
+    /** 地址映射非法启动失败：格式非法指明配置键与具体条目。 */
     @Test
     void malformedClientAddressRejected() {
         Properties p = props(
@@ -112,7 +112,7 @@ class ClusterConfigTest {
                 .hasMessageContaining("openlatch.cluster.client-addresses");
     }
 
-    /** spec"地址映射非法启动失败"：nodeId 重复拒绝。 */
+    /** 地址映射非法启动失败：nodeId 重复拒绝。 */
     @Test
     void duplicateClientAddressIdRejected() {
         Properties p = props(

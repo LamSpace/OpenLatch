@@ -26,12 +26,11 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 
 /**
- * 集群运行时装配（design D6：{@code RaftSubsystem} 与 §9 配置并入 gateway
- * 交付的落点）：按固定顺序组装子系统、网关、等待队列、会话协调器与到期
+ * 集群运行时装配：按固定顺序组装子系统、网关、等待队列、会话协调器与到期
  * 驱动，并把消费端点交给接入层（{@code ServerSessionHandler} 的集群分支）。
  *
  * <p><b>构造顺序契约</b>：{@link #create} 完成全部装配并启动 Raft 服务——
- * 调用方 MUST 在开放客户端接入端口之前完成（spec"先组网后开端口"）；
+ * 调用方 MUST 在开放客户端接入端口之前完成；
  * {@link #close} 逆序：停摆看门狗先停（杜绝关停竞态中让位/退出）→ 在途回执以
  * 可重试错误终结 → 摘除探针/扫描线程 → 关停 Raft 服务。
  *
@@ -55,9 +54,9 @@ public final class ClusterRuntime {
     private final LeaseExpiryDriver expiryDriver;
     /** 写请求集群处理器。 */
     private final ClusterRequestHandler requestHandler;
-    /** Leader 提示单源视图（s3 design D3：HELLO/NOT_LEADER/CLUSTER_VIEW 共用）。 */
+    /** Leader 提示单源视图（HELLO/NOT_LEADER/CLUSTER_VIEW 共用）。 */
     private final LeaderTracker leaderTracker;
-    /** 复制停摆自愈看门狗（T2/2B.1，design D2/D3/D6：让位一次→超时升级重启）。 */
+    /** 复制停摆自愈看门狗（让位一次→超时升级重启）。 */
     private final ReplicationStallWatchdog stallWatchdog;
 
     /**
@@ -102,7 +101,7 @@ public final class ClusterRuntime {
 
     /**
      * 组装并启动集群运行时（生产形态：写路径埋点、到期计数与复制态 gauge
-     * 全部挂接调用方共用的 {@link ServerMetrics}，T2/详设 §3.4 勘误口径）。
+     * 全部挂接调用方共用的 {@link ServerMetrics}）。
      *
      * @param clusterConfig 集群配置（{@code enabled=true} 且已校验）
      * @param config        服务器配置（限额/租约参数）
@@ -115,7 +114,7 @@ public final class ClusterRuntime {
                                         ServerSessionRegistry registry,
                                         ServerMetrics metrics) throws IOException {
         RaftSubsystem subsystem = new RaftSubsystem(clusterConfig, config.toCoreConfig());
-        // Leader 提示单源（s3 design D3）：监听器须在 RaftServer 启动前挂上，
+        // Leader 提示单源：监听器须在 RaftServer 启动前挂上，
         // 首个 Leadership 事件抵达前快照保持「未知」（提示以 -1 呈现）。
         LeaderTracker leaderTracker = new LeaderTracker(clusterConfig);
         subsystem.stateMachine().setLeaderIdentityListener(leaderTracker::onLeaderChanged);
@@ -132,12 +131,12 @@ public final class ClusterRuntime {
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
                 waitQueue, config, leaderTracker, metrics);
         if (metrics != null) {
-            // 复制态 gauge 与角色指标绑定（T2）：抓取线程弱一致读，不触碰应用锁。
+            // 复制态 gauge 与角色指标绑定：抓取线程弱一致读，不触碰应用锁。
             metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
                     clusterConfig.nodeId(), leaderTracker);
         }
-        // 复制停摆自愈看门狗（T2）：装配末位——全部判据通道（division/gateway/
-        // client 池）此时均已就绪；阈值由 election-timeout 折算钉死（D6）。
+        // 复制停摆自愈看门狗：装配末位——全部判据通道（division/gateway/
+        // client 池）此时均已就绪；阈值由 election-timeout 折算钉死。
         ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
@@ -145,7 +144,7 @@ public final class ClusterRuntime {
     }
 
     /**
-     * Leader 提示视图（HELLO/NOT_LEADER/CLUSTER_VIEW 消费，s3 design D3）。
+     * Leader 提示视图（HELLO/NOT_LEADER/CLUSTER_VIEW 消费）。
      *
      * @return 跟踪器（与运行时同生命周期）
      */
@@ -212,12 +211,11 @@ public final class ClusterRuntime {
     }
 
     /**
-     * 成员变更运维入口：移除一个投票者并清理其会话（详设 §7.4，S4/P2-17，
-     * design D6）。
+     * 成员变更运维入口：移除一个投票者并清理其会话。
      *
      * <p><b>两步编排</b>：先提交单步配置变更（出组；多数派护栏与差集校验在
      * {@link RaftSubsystem#removeVoter(int)}），应答返回即配置已提交（Ratis
-     * 单步变更语义）；随后立即触发被移除节点会话的批量清理（§5.2 规则 4
+     * 单步变更语义）；随后立即触发被移除节点会话的批量清理（失联批量清理
      * 同车道——出组成员从 commitInfos 消失，失联判定不可见，必须显式）。
      * 配置变更失败则异常上抛、不清理；清理以日志条目落地，各副本一致收敛。
      * MUST 在当值 Leader 节点上调用（非 Leader 时提交路径按既有语义失败）。
@@ -241,7 +239,7 @@ public final class ClusterRuntime {
     }
 
     /**
-     * 复制状态摘要（退出门与演练断言入口）。
+     * 复制状态摘要（跨副本一致性摘要的对外断言入口）。
      *
      * @return SHA-256 hex
      */

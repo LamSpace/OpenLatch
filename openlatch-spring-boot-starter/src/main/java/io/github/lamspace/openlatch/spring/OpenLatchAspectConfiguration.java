@@ -26,13 +26,13 @@ import org.springframework.context.annotation.Bean;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 
 /**
- * {@link OpenLatchAspect} 切面的条件装配（详设 §8.1，design D4/D7）。
+ * {@link OpenLatchAspect} 切面的条件装配。
  *
  * <p><b>条件矩阵</b>：类级 {@code @ConditionalOnClass(Aspect)} 保证缺少
  * AspectJ 依赖时整类跳过（自动装配经 ASM 元数据判定，不触发类加载）；
  * {@code openlatch.enabled=false} 时不注册切面 Bean——注解方法按无注解
- * 原样执行，而 {@link OpenLatchClient} Bean 照常装配（开关只关注解面，
- * design D4）；{@code @ConditionalOnBean(OpenLatchClient)} 覆盖"客户端
+ * 原样执行，而 {@link OpenLatchClient} Bean 照常装配（开关只关注解面）；
+ * {@code @ConditionalOnBean(OpenLatchClient)} 覆盖"客户端
  * Bean 缺失"的病态场景（如自动装配被 exclude）。
  *
  * <p><b>装配次序</b>：{@code after = OpenLatchAutoConfiguration} 确保切面

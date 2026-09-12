@@ -23,8 +23,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * 监控指标配置（Phase 3 详设 §3.1/§10.2 T2，spec"指标配置与管理端点生命周期"；
- * {@code openlatch.server.metrics.*} 键族）。
+ * 监控指标配置（{@code openlatch.server.metrics.*} 键族）。
  *
  * <p><b>与 {@link ServerConfig}/{@link ClusterConfig} 的关系</b>：同一 Properties
  * 文件的指标子集，独立记录而非扩展既有记录——保持 {@code ServerConfig} 构造
@@ -45,7 +44,7 @@ import java.util.Properties;
  */
 public record MetricsConfig(boolean enabled, int port) {
 
-    /** 配置键前缀（详设 §3.1）。 */
+    /** 配置键前缀。 */
     public static final String KEY_PREFIX = "openlatch.server.metrics.";
 
     /** 默认启用（文件加载路径）。 */

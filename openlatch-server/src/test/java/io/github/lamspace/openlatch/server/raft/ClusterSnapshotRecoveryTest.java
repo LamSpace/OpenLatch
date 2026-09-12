@@ -16,14 +16,14 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 恢复路径集群用例（详设 §7.3/§8"快照点前后重启"行，S4/P2-16 验证列
- * "恢复一致"；兼作 design D5 安装流 spike 的固化判据）：
+ * 恢复路径集群用例（快照点前后重启，验证列"恢复一致"；
+ * 兼作安装流 spike 的固化判据）：
  * <ul>
  *   <li>{@code restartFollowerLoadsLocalSnapshotAndConverges} —— 启动加载
  *       （initialize 读最新快照 + 尾部回放）；</li>
  *   <li>{@code severelyLaggingFollowerInstallsSnapshotFromLeader} —— Leader
  *       截断后重启严重落后 Follower，走库侧安装流（pause→发布→reload）而非
- *       本地全量回放；追赶窗口写请求 {@code NOT_LEADER}（§7.3-3）。</li>
+ *       本地全量回放；追赶窗口写请求 {@code NOT_LEADER}。</li>
  * </ul>
  *
  * <p>安装用例以 {@code logSegmentBytes=4096} 强制日志小块滚动 +
@@ -107,7 +107,7 @@ class ClusterSnapshotRecoveryTest {
             ClusterHarness.Node leader = h.leader();
             // victim 停机前先握手（既有会话跨重启复用）：追赶窗口内 HELLO 的
             // 会话注册需提交至 Leader 并等待本节点应用，可能长于测试超时——
-            // §3.1"会话注册除外"的既定语义，故角色门探针不经重新握手直发。
+            // "会话注册除外"的既定语义，故角色门探针不经重新握手直发。
             ClusterHarness.Node preVictim = h.nodes().stream()
                     .filter(x -> !x.isLeader()).findFirst().orElseThrow();
             ClusterHarness.TestConn vc = h.connect(preVictim);
@@ -124,7 +124,7 @@ class ClusterSnapshotRecoveryTest {
             h.restartNode(victimId);
             ClusterHarness.Node victim = h.node(victimId);
 
-            // 追赶窗口：victim 尚非 Leader，写请求一律 NOT_LEADER（§7.3-3）。
+            // 追赶窗口：victim 尚非 Leader，写请求一律 NOT_LEADER。
             Envelope probe = vc.request(acquire(500, "install-window"));
             assertThat(probe.getAcquireResponse().getStatus()).isEqualTo(StatusCode.NOT_LEADER);
 

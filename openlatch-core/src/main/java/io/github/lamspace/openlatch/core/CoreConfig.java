@@ -17,7 +17,7 @@
 package io.github.lamspace.openlatch.core;
 
 /**
- * 核心引擎限额与租约配置。各默认值与设计说明书 §5.7 对齐。
+ * 核心引擎限额与租约配置。
  *
  * @param defaultLeaseMs      请求未指定租约时使用的默认租约时长（毫秒）
  * @param minLeaseMs          租约时长下限（毫秒）
