@@ -6,7 +6,7 @@
 [![drill](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml?query=branch%3Amaster)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-25-orange)](#requirements--compatibility)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](#3-spring-boot-declarative-starter)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](#4-spring-boot-declarative-starter)
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](#requirements--compatibility)
 
 OpenLatch is a lightweight distributed lock service. It provides JUC-style coordination
