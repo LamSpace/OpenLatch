@@ -35,6 +35,8 @@
 # 用法：
 #   bash scripts/check-source-citations.sh              # 全量扫描
 #   bash scripts/check-source-citations.sh --selftest   # 夹具自检（模式集回归）
+#   bash scripts/check-source-citations.sh --paths docs/guide   # 扩展扫描：指定目录下
+#       全部 Markdown 逐行按同一模式集检查（用户文档面复用同一纪律，可多次给目录）。
 #
 # 退出码：0 = 零命中；1 = 有命中或自检失败。
 set -u
@@ -138,6 +140,24 @@ EOF
 if [ "${1:-}" = "--selftest" ]; then
   selftest
   exit $?
+fi
+
+# --paths <dir>...：对外文档面扩展扫描（同一 PATTERN 单一事实源），逐行命中即非零。
+if [ "${1:-}" = "--paths" ]; then
+  shift
+  root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  cd "$root" || exit 1
+  hits=$(find "$@" -name '*.md' -print0 2>/dev/null \
+    | xargs -0 -r grep -Hn -E "$PATTERN" 2>/dev/null || true)
+  if [ -z "$hits" ]; then
+    echo "== 零命中：$* 无内部过程文档引用 =="
+    exit 0
+  fi
+  printf '%s\n' "$hits"
+  total=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
+  files=$(printf '%s\n' "$hits" | cut -d: -f1 | sort -u | wc -l | tr -d ' ')
+  echo "== 命中 ${total} 处，涉及 ${files} 个文件：对外文档禁止内部过程文档引用 =="
+  exit 1
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
