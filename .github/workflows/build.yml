@@ -1,0 +1,60 @@
+# PR/push 验证门禁（spec: continuous-integration「push 与 PR 验证门禁」）。
+# CI 环境不携带任何本机 Maven settings：runner 直连 Maven Central。
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: verify (unit + IT + javadoc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Full verify
+        run: mvn -B -ntp clean verify
+
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.run_number }}
+          path: |
+            */target/surefire-reports/**
+            */target/failsafe-reports/**
+          if-no-files-found: ignore
+
+      - name: Upload javadoc site (on success)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: javadoc-site-${{ github.run_number }}
+          path: "*/target/site/apidocs/**"
+          if-no-files-found: ignore
+
+  citation-check:
+    name: source citation gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate self-test (pattern fixture regression)
+        run: bash scripts/check-source-citations.sh --selftest
+
+      - name: Repository scan (src/main + pom descriptions)
+        run: bash scripts/check-source-citations.sh

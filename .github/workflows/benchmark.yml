@@ -1,0 +1,39 @@
+# 基准 harness 定时/手动 job：基线报告以 run artifacts 交付，不入仓库工作树。
+# 注意：exec:java 用 -pl openlatch-examples，不可带 -am（落根聚合 pom 会 ClassNotFound）。
+name: benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * 1"
+
+jobs:
+  benchmark:
+    name: BenchmarkMain baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build modules (no drills)
+        run: mvn -B -ntp clean install -DskipTests
+
+      - name: Run BenchmarkMain
+        run: >
+          mvn -B -ntp -pl openlatch-examples exec:java
+          -Dexec.mainClass=io.github.lamspace.openlatch.examples.BenchmarkMain
+
+      - name: Upload baseline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-baseline-${{ github.run_number }}
+          path: docs/benchmark-baseline-*.md
+          if-no-files-found: warn
+          retention-days: 60

@@ -1,0 +1,71 @@
+# 进程级故障演练重档位 job（spec: continuous-integration「drill 与 benchmark 重档位 job」）。
+# 不入 PR 门禁：共享 runner 抖动不得转化为 PR 假红；nightly + 手动双触发。
+# concurrency 串行：分区演练占固定端口 9411 与 netns 前缀 oln，并行必冲突误报。
+# hosted runner 提供 passwordless sudo（-n 无交互可用），承载 netns/iptables 特权段。
+name: drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 19 * * *"
+
+concurrency:
+  group: drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    name: -Pdrill full process-level suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Build reactor + shaded server jar (drill prerequisite)
+        run: mvn -B -ntp clean install -DskipTests
+
+      - name: Run drills
+        run: mvn -B -ntp verify -Pdrill
+
+      # 防假绿：任一演练套件缺失或被跳过（jar 未产出/特权不满足时的
+      # assume-skip 形态）都判红——缺失≠通过。
+      - name: Assert every drill suite executed (no silent skip)
+        if: '!cancelled()'
+        run: |
+          set -e
+          require() {
+            f="$1"
+            if [ ! -f "$f" ]; then
+              echo "::error::missing failsafe report $f (suite did not run)"
+              exit 1
+            fi
+            if grep -q "Skipped: [1-9]" "$f"; then
+              echo "::error::$f reports Skipped>0 (assume-skip = false green)"
+              exit 1
+            fi
+          }
+          require openlatch-client/target/failsafe-reports/io.github.lamspace.openlatch.client.LeaderKillDrillIT.txt
+          require openlatch-client/target/failsafe-reports/io.github.lamspace.openlatch.client.RollingRestartDrillIT.txt
+          require openlatch-client/target/failsafe-reports/io.github.lamspace.openlatch.client.PartitionDrillIT.txt
+          require openlatch-server/target/failsafe-reports/io.github.lamspace.openlatch.server.raft.LeaderStallReproDrillIT.txt
+
+      - name: Upload drill reports & node logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drill-evidence-${{ github.run_number }}
+          path: |
+            docs/failover-drill-*.md
+            docs/rolling-restart-drill-*.md
+            docs/partition-drill-*.md
+            docs/leader-stall-repro-*.md
+            */target/drill-logs/**
+            */target/failsafe-reports/**
+          if-no-files-found: warn
+          retention-days: 30
