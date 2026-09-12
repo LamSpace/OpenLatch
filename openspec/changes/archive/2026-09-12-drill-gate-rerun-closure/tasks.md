@@ -10,5 +10,5 @@
 
 ## 2. 收口
 
-- [ ] 2.1 提交后归档本变更与 `drill-metrics-port-collision-fix`、`drill-port-allocation-race-fix`（规格增量同步主规格）
+- [x] 2.1 提交后归档本变更与 `drill-metrics-port-collision-fix`、`drill-port-allocation-race-fix`（规格增量同步主规格）
 - [ ] 2.2 评审人签署复核改判（手工介入项）
