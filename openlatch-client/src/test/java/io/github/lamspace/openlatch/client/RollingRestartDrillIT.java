@@ -381,6 +381,9 @@ class RollingRestartDrillIT {
         for (int i = 0; i < n; i++) {
             access[i] = freePort();
             raft[i] = freePort();
+            if (raft[i] == access[i]) {
+                raft[i] = freePort();
+            }
         }
         StringBuilder peers = new StringBuilder();
         StringBuilder addrs = new StringBuilder();
@@ -521,10 +524,33 @@ class RollingRestartDrillIT {
         return null;
     }
 
+    /**
+     * 为子进程分配一个可用监听端口，取值恒避开 Linux 临时端口带
+     * （{@code /proc/sys/net/ipv4/ip_local_port_range}，常见 32768–60999）。
+     *
+     * <p>探针 socket 关闭后端口即刻回到临时池，若端口取自临时带，本 JVM 内
+     * 客户端/gRPC 的出站连接会在子进程 bind 前把它抽作源端口，子进程以
+     * EADDRINUSE 启动失败（2026-09-12 演练实证：node3 raft 口被自家出站
+     * 连接抢占，bind(-98) 退出、用例以"接入端口未就绪"红）。固定
+     * 20000–29999 窗口随机重试从根上消除该竞态；探针禁用 SO_REUSEADDR，
+     * 不放行 TIME_WAIT 残留口。
+     *
+     * @return 当前可绑定、且不落在临时端口带的端口
+     * @throws IOException 窗口内无可用端口（探针反复失败 100 次）
+     */
     private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
+        for (int attempt = 0; attempt < 100; attempt++) {
+            int candidate = 20_000
+                    + java.util.concurrent.ThreadLocalRandom.current().nextInt(10_000);
+            try (ServerSocket s = new ServerSocket()) {
+                s.setReuseAddress(false);
+                s.bind(new InetSocketAddress(candidate));
+                return candidate;
+            } catch (IOException busy) {
+                // 被占或 TIME_WAIT 残留：换下一个候选
+            }
         }
+        throw new IOException("no free non-ephemeral port in 20000-29999");
     }
 
     /** 子串计数（节点日志自愈事件行统计用）。 */
