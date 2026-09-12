@@ -405,6 +405,7 @@ class RollingRestartDrillIT {
                     openlatch.cluster.raft-port=%d
                     openlatch.cluster.data-dir=%s
                     openlatch.cluster.election-timeout-ms=800
+                    openlatch.server.metrics.port=0
                     """.formatted(access[i], i + 1, peers, addrs, raft[i], dir));
             Node node = new Node(i + 1, cfg, dir, access[i], raft[i]);
             node.process = launch(jar, node);

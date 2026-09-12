@@ -404,7 +404,12 @@ class LeaderKillDrillIT {
 
     // ---------- 集群装配 / 探测 ----------
 
-    /** 以 shaded jar 起三节点集群（显式端口 + client-addresses 映射 + 短选举超时）。 */
+    /** 以 shaded jar 起三节点集群（显式端口 + 管理端口临时化 + client-addresses 映射 + 短选举超时）。
+
+     * <p>管理端口取 0（OS 分配临时端口）：单机三节点若都用默认 9412，按指标端口的
+     * fail-fast 策略后起节点绑定冲突即整机启动失败、集群失多数派（2026-09-12 全量
+     * 演练复跑实证，后两节点日志一律终止于"管理端口启动失败"）。
+     */
     private static List<Node> startCluster(Path jar) throws IOException, InterruptedException {
         int n = 3;
         int[] access = new int[n];
@@ -436,6 +441,7 @@ class LeaderKillDrillIT {
                     openlatch.cluster.raft-port=%d
                     openlatch.cluster.data-dir=%s
                     openlatch.cluster.election-timeout-ms=800
+                    openlatch.server.metrics.port=0
                     """.formatted(access[i], i + 1, peers, addrs, raft[i], dir));
             // 子进程日志落盘（target/drill-logs/，端口命名防多场景覆写）：
             // 失败复盘取证用（选举窗口、角色变更时间点），兼防管道缓冲满阻塞。
