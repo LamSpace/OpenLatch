@@ -102,6 +102,7 @@ Phase 3 未引入锁热路径的性能相关变更（扩展锁类型与 TLS 均�
 - **模块**：`OpenLatch` 0.7s / `openlatch-protocol` 7.1s / `openlatch-core` 4.7s / `openlatch-server` **04:18** / `openlatch-client` **02:28** / `openlatch-spring-boot-starter` 11.2s / `openlatch-console` 16.5s / `openlatch-examples` 1.5s —— 全部 SUCCESS
 - **覆盖**：含 v1/v2/v3 全部回归、协议 golden 冻结测试、T1 公平性三档套件、T2 词表/端点/集群指标、T3 管理协议与 console 页面、T4 TLS/认证套件，以及 `maven-javadoc-plugin`（`show=private`，CLAUDE.md §5）校验。
 - **未执行项**：`-Pdrill` 进程级演练（见「缺陷与遗留记录」第 3 条——无 TTY 沙箱不可靠，等价进程内故障覆盖已含于上述 `openlatch-server` 测试；留 CI/运维环境复跑）。
+  *2026-09-12 关闭（`drill-gate-rerun-closure`）：绑定修订 `b35f549` 的全量 `-Pdrill` 已单环境跑毕、五轨全绿（15:33 min，Skipped=0），正式实录与复核改判见《Phase2-验收报告》"标准 5 复核记录（第二轮）"。归因勘正：本节"无 TTY 沙箱不可靠"经实证为误判——真实根因是 T2 起潜伏的两层夹具缺陷（管理端口 9412 单机三节点互撞，`drill-metrics-port-collision-fix` 修复；探针-重绑端口 TOCTOU 竞态，`drill-port-allocation-race-fix` 修复），与执行环境无关；"等价进程内故障覆盖"作为兜底口径保留有效。*
 
 ## 发布宣告
 

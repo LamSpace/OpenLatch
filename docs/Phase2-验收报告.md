@@ -120,6 +120,18 @@
   4. NOT_HELD 外观项关闭：见"遗留与偏差记录"第 6 条更新与
   `observations-not-held-code-shape.md`。
 
+## 标准 5 复核记录（第二轮，2026-09-12 修复后全量复跑，phase2 收口批 drill 三连变更）
+
+- **触发**：Phase 3 验收将本项列为"未执行项（留 CI/运维环境复跑）"；评审人依 runbook 桌面复跑，当日定位并修复两层**夹具缺陷**——`drill-metrics-port-collision-fix`（提交 `978bc4f`：T2 默认管理端口 9412 单机三节点互撞致 LeaderKill/RollingRestart 必挂，节点配置模板补 `metrics.port=0`）与 `drill-port-allocation-race-fix`（提交 `b35f549`：`freePort()` 探针-重绑 TOCTOU，端口被自家出站连接抢占致子进程 bind EADDRINUSE 间歇挂，端口分配改 20000–29999 带外窗口）。旧归因"无 TTY 沙箱不可靠"经实证**证伪**：为 T2 后潜伏的夹具回归，与执行环境无关（Phase 3 验收对应勘正见彼报告）。
+- **正式实录**：绑定修订 `b35f549`，单环境全 reactor `clean verify -Pdrill`，15:33 min，八模块全 SUCCESS，五演练轨全部真实执行（Skipped=0）：
+  - 杀 Leader（failover）：kill→首次成功授予 **1671ms**（<10s 判据 ✅）；杀 Follower 271ms 无感 ✅；死主会话失锁回调触发 ✅；停载后无泄漏、同键无双授 ✅；扩展原语（Semaphore 池收敛/CountDownLatch 计数存续）跨切换成立 ✅；
+  - 滚动重启（rolling，分段判据 2B.1）：先从后主全程错误率 0.08%、先主后从 1.65%（窗内瞬态，仅报告）；**两序"末重启窗+45s 自愈预算后残留错误=0"均成立 ✅**；逐台重启耗时 1.98–2.55s（任意时刻 ≥2/3 存活）；本轮零停摆、零自愈触发（0/0），形态 B 未显形；
+  - 真分区（partition，netns）：少数派 n3 会话化 ACQUIRE ×4 全 `NOT_LEADER`、RELEASE 道 `NOT_HELD`（应用点归属裁决，两形态皆拒）✅、Leader 侧同凭证释放成功（锁存活）✅、同键无双授 ✅、撤分区自动收敛 digest 一致 ✅；
+  - 停摆采样（stall-repro，仪器非门禁）：K=8 轮 **STALL=0 / RECOVERED=8 / CHURN=0 / ABORTED=0**，命中率 0.00%——本轮样本未复现双稳态命中（历史"热机 4/4、冷机 1/5"档案维持，单轮零命中不构成命中概率变化证据）。
+- **复核改判**：标准 5 **维持 ⚠️**——形态 A 自愈承载与形态 B 概率残余的定夺均不变（B 的零命中样本不消除残余风险，跟踪仍由升级评估对账承载；无人值守部署仍须配 supervisor 退避重启）；同时**清除"未执行"状态**：`-Pdrill` 全量复跑承诺由本实录兑现，此后常态回归由 `ci-github-actions` 的 drill job 承载（nightly + 手动，含防 assume-skip 假绿断言，报告以 run artifacts 交付不入库）。
+- **证据**：原始四份 dated 报告按"过时报告不入库"定夺不列管，留档 `/tmp/drill-evidence-2026-09-12/formal-b35f549/`（本机）；关键数字已全量录入本节。
+- **签署**：评审人 ____________　日期 ____________
+
 ## 发布宣告
 
 - 版本：Phase 2（Raft 集群），协议 v2，模块 `openlatch-*` 1.0-SNAPSHOT → 发布评审通过后定版。
