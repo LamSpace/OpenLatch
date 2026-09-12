@@ -69,7 +69,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p><b>运行门控</b>：需 passwordless sudo 且内核支持 netns/iptables；
  * 不满足时显式跳过并打印触发命令。默认构建排除（{@code @Tag("drill")}）；
  * 进程内辅轨 {@code MinorityQuorumTest} 保留为零权限回归。
- * 子进程日志落 {@code target/drill-logs/}，报告追加 {@code docs/partition-drill-<日期>.md}。
+ * 子进程日志落 {@code target/drill-logs/}，报告追加 {@code target/drill-reports/}（不入库）。
  */
 @Tag("drill")
 @Timeout(value = 300, unit = TimeUnit.SECONDS)
@@ -577,7 +577,7 @@ class PartitionDrillIT {
     private static void appendReport(Node majorityLeader, List<Node> nodes, String[] errs,
                                      String relOnMinority)
             throws IOException {
-        Path out = Path.of("..", "docs", "partition-drill-"
+        Path out = Path.of("target", "drill-reports", "partition-drill-"
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {

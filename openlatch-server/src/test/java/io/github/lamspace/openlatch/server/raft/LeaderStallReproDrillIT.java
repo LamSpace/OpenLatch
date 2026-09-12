@@ -77,9 +77,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code excludedGroups}）；执行 {@code -Pdrill}（见 openlatch-server pom
  * drill profile），K 轮高频采样耗时长（默认 8 轮 ≈ 5–8 分钟），不入缺省门禁。
  *
- * <p><b>产物</b>：每轮前置事实 + 采样序列 CSV + 判词追加写入仓库根
- * {@code docs/leader-stall-repro-<日期>.md}（failsafe 工作目录为模块域，
- * 落盘路径取 {@code ../docs/}，与其余演练报告同纪律）；轮末 stdout 摘要
+ * <p><b>产物</b>：每轮前置事实 + 采样序列 CSV + 判词追加写入模块
+ * {@code target/drill-reports/leader-stall-repro-<日期>.md}（运行时工件不入库，
+ * 与其余演练报告同纪律）；轮末 stdout 摘要
  * {@code [STALL-DRILL]}。
  */
 @Tag("drill")
@@ -493,7 +493,7 @@ class LeaderStallReproDrillIT {
         }
     }
 
-    // ---------- 归档（docs/leader-stall-repro-<日期>.md，纪律同其余演练报告） ----------
+    // ---------- 归档（target/drill-reports/leader-stall-repro-<日期>.md，纪律同其余演练报告） ----------
 
     /**
      * 定名/续建报告文件：文件头首次写；每次运行另起一节 run 头（构造、K、
@@ -504,7 +504,7 @@ class LeaderStallReproDrillIT {
      * @throws IOException 落盘失败
      */
     private void openReport(int rounds) throws IOException {
-        reportPath = Path.of("..", "docs", "leader-stall-repro-"
+        reportPath = Path.of("target", "drill-reports", "leader-stall-repro-"
                 + LocalDate.now() + ".md");
         Files.createDirectories(reportPath.getParent());
         if (!Files.exists(reportPath)) {

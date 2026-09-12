@@ -59,8 +59,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *       混沌测试横扩（此处以单驱动串行 + token 审计覆盖最小面）。</li>
  * </ol>
  *
- * <p>产物：结构化演练报告追加写入仓库根 {@code docs/failover-drill-<日期>.md}
- * （failsafe 工作目录为模块域，故落盘路径取 {@code ../docs/}）；节点子进程
+ * <p>产物：结构化演练报告追加写入模块 {@code target/drill-reports/}
+ * （运行时工件不入库，常态经 CI artifacts 分布，docs/README.md 有述）；节点子进程
  * 日志落 {@code target/drill-logs/} 供失败复盘；杀点前打印三节点角色快照。
  */
 @Tag("drill")
@@ -389,9 +389,9 @@ class LeaderKillDrillIT {
         return jar;
     }
 
-    /** 演练报告追加（同日单文件，两场景各写一节；入库仓库根 docs/）。 */
+    /** 演练报告追加（同日单文件，两场景各写一节；落模块 target/drill-reports/，不入库）。 */
     private static void appendReport(String section) throws IOException {
-        Path out = Path.of("..", "docs", "failover-drill-"
+        Path out = Path.of("target", "drill-reports", "failover-drill-"
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {

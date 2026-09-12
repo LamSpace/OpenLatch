@@ -38,7 +38,8 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
  * 吞吐、竞争授予延迟分位数（蓄水池采样，P50/P99）。
  *
  * <p><b>定位</b>：记录为基线防退化参考，<b>不作发布门槛</b>；
- * 结果写入 {@code docs/benchmark-baseline-<date>.md}（可用系统属性
+ * 结果写入仓库根 {@code target/benchmark/benchmark-baseline-<date>.md}（运行时工件
+ * 不入库，常态经 CI artifacts 分布；可用系统属性
  * {@code -Dbenchmark.output=<path>} 覆盖），报告注明机器/JDK/服务器档位。
  *
  * <p>运行：{@code mvn -pl openlatch-examples exec:java
@@ -415,8 +416,8 @@ public final class BenchmarkMain {
 
     /**
      * 报告输出路径：{@code -Dbenchmark.output} 优先，否则仓库根
-     * {@code docs/benchmark-baseline-<date>.md}——仓库根自当前目录向上
-     * 寻找含 {@code docs} 目录的祖先（exec:java 与直接 {@code java}
+     * {@code target/benchmark/benchmark-baseline-<date>.md}——仓库根自当前目录
+     * 向上寻找含 {@code docs} 目录的祖先（exec:java 与直接 {@code java}
      * 启动的工作目录不一致，故不依赖相对路径）。
      *
      * @return 输出路径
@@ -431,7 +432,7 @@ public final class BenchmarkMain {
             dir = dir.getParent();
         }
         Path root = dir != null ? dir : Path.of("").toAbsolutePath();
-        return root.resolve("docs")
+        return root.resolve("target").resolve("benchmark")
                 .resolve("benchmark-baseline-" + java.time.LocalDate.now() + ".md");
     }
 }

@@ -61,10 +61,7 @@ jobs:
         with:
           name: drill-evidence-${{ github.run_number }}
           path: |
-            docs/failover-drill-*.md
-            docs/rolling-restart-drill-*.md
-            docs/partition-drill-*.md
-            docs/leader-stall-repro-*.md
+            */target/drill-reports/**
             */target/drill-logs/**
             */target/failsafe-reports/**
           if-no-files-found: warn

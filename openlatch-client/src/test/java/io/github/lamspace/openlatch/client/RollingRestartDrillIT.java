@@ -54,7 +54,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * 全程错误率的旧 &lt;1% 判定废除——它既被停摆双稳态概率性击穿（收口缺陷档案），
  * 又无法区分"瞬态窗内错误"与"永久停摆"，分段零残留才是无人值守可用性的正确形状。
  *
- * <p>产物：报告追加 {@code docs/rolling-restart-drill-<日期>.md}（两顺序的
+ * <p>产物：报告追加 {@code target/drill-reports/rolling-restart-drill-<日期>.md}（两顺序的
  * 总请求/错误/错误率/自愈事件/残留错误、单台恢复时长，失败轮次如实记录）；
  * 门控与 shaded jar 纪律同 {@link LeaderKillDrillIT}（{@code @Tag("drill")}，
  * 缺失显式告警跳过）。
@@ -562,13 +562,13 @@ class RollingRestartDrillIT {
         return n;
     }
 
-    /** 报告追加（同日单文件，两顺序各写一节；入库仓库根 docs/）。 */
+    /** 报告追加（同日单文件，两顺序各写一节；落模块 target/drill-reports/，不入库）。 */
     private static void appendReport(String tag, long tot, long err, double ratePct,
                                      List<Long> restartMs, List<String> errorSamples,
                                      List<Long> errorTimesMs, List<long[]> restartWindows,
                                      long tailErrors, long stallEvents, long restartEvents)
             throws IOException {
-        Path out = Path.of("..", "docs", "rolling-restart-drill-"
+        Path out = Path.of("target", "drill-reports", "rolling-restart-drill-"
                 + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE) + ".md");
         Files.createDirectories(out.getParent());
         if (!Files.exists(out)) {
