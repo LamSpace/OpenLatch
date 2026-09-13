@@ -52,6 +52,12 @@
 - 附带发现（过程纠错如实记）：注入锚点最初按 `class CoreConfig` 书写，实际为 `record`——分类器服务
   抖动延后了执行，改用真实锚点后本地门禁先行命中，云端结果与本地预期逐项一致。
 
+## build.yml — PR#2（docs/acceptance-signature，runner flake 第三例 → 防噪落地）
+
+- 首跑 `verify` 红（md-only diff，本地同树 `209b182` 全量 verify 绿，16 分钟内实证）；`citation-check` 绿。
+- 评审人 Re-run all jobs → **重跑双绿** → Merge（67deca2，仓库首个 PR 流程走通：门禁+分支保护+重跑三合一验证）。
+- 三例同族（build #2 / drill #1 / PR#2）均为共享 runner 争用 → 本分支落防噪：build verify 失败自动重试一次 + 三 workflow 的 actions 升级（checkout@v7/setup-java@v6/upload-artifact@v7，消 Node 20 弃用告警）。
+
 ## 待录
 
 - drill.yml 首跑（需 Actions 网页手动 workflow_dispatch，或等 nightly `19:23 UTC`）：核对 PartitionDrillIT 非跳过 → 记入本文件（tasks 2.3）
