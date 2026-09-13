@@ -12,7 +12,7 @@
 
 - [x] 2.1 新增 `.github/workflows/drill.yml`：`on: workflow_dispatch + schedule(cron: 非整点，如 "23 19 * * *")`；`concurrency: group: drill, cancel-in-progress: false`；`timeout-minutes: 150`；runs-on ubuntu-latest
 - [x] 2.2 步骤：checkout → setup-java(temurin/25, cache:maven) → `mvn -B -ntp clean install -DskipTests`（产出 `openlatch-server-1.0-SNAPSHOT-executable.jar`——缺失时演练 assume-skip 假绿，此步不可省）→ `mvn -B -ntp verify -Pdrill` → `if: always()` upload-artifact：演练报告（现状 `docs/*-drill-*.md`、`docs/leader-stall-repro-*.md`；docs-restructure-and-report-retirement 落地后切 `**/target/drill-reports/**`，两侧对账）+ `**/target/drill-logs/**`
-- [ ] 2.3 首次 workflow_dispatch：核对 hosted runner 上 PartitionDrillIT 非跳过（`sudo -n true` 可用 + netns 建立成功；若 assume-skip 或环境不满足，如实记录处置决定——保留进程内辅轨 MinorityQuorumTest 兜底、或申报 self-hosted runner——写入 `ci-first-runs.md`）
+- [x] 2.3 首跑核对（2026-09-13 nightly drill #1 以 schedule 达成）：防假绿断言步通过——四套件报告齐全且 Skipped=0，hosted runner 上 PartitionDrillIT 真实执行、特权可用；处置结论与失败分诊记入 `ci-first-runs.md`
 - [ ] 2.4 首周观察：连续 nightly 若出现 flaky 轮次，暂停 `schedule` 仅留 `workflow_dispatch`，处置结论记档（drill job 红灯不挂 badge，不作 PR 门禁）
 
 ## 3. benchmark.yml

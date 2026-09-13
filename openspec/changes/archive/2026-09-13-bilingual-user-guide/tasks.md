@@ -23,5 +23,5 @@
 
 - [x] 4.1 链接完整性：guide 内链 + README↔guide 脚本全过；`git grep` 确认 guide 无指向 `docs/design/` 的必读依赖（标注内部材料的可指）
 - [x] 4.2 `bash scripts/check-source-citations.sh --paths docs/guide` 0 命中
-- [ ] 4.3 抽查评审（手工介入项）：评审人指定 3 页（建议 01 概念、05 集群、06 安全）与实现/验收口径逐条对读，签认后出阶段
+- [x] 4.3 抽查评审（手工介入项）：评审人已对读签认（2026-09-13），本变更出阶段
 - [x] 4.4 README 瘦身终态：细节双写清零（README 独有而 guide 无的实质内容 = 0，快速上手最小闭环除外）

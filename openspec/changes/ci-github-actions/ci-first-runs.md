@@ -26,6 +26,20 @@
 - 触发 push `e17983f`；结果：**成功**（build + citation-check 双 job）
 - 意义：docs 三分/README 门户/报告落点改造后的全量门禁与反引用门禁在 CI 上首次通过。
 
+## drill.yml — run #1（定时首跑，失败在案）
+
+- 时间：2026-09-13 05:29（北京时间）schedule 触发，job 用时 17.7 min
+- 步骤结论：`Build reactor` ✅；`Run drills` ❌（exit 1）；**`Assert every drill suite executed` ✅——
+  四套件的 failsafe 报告齐全且 Skipped=0，即 hosted runner 上 PartitionDrillIT 真实执行、
+  特权/网段环境可用（tasks 2.3 的"非跳过"命题由本 run 回答：是）**；artifacts 步骤 ✅
+  （`drill-evidence-1` 257KB——新 target/drill-reports glob 采集有效）。
+- 失败面：某轨真断言/超时失败，具体套件匿名 API 不可达（logs/artifacts 需 token）。
+  分诊中：本地同构复跑（含 sudo 特权）比对——本地绿则归 runner 侧（4 核争用/共享环境），
+  按 tasks 2.4 首周观察处置；本地红则取现场定根因。
+- 附注（非阻塞）：Actions 提示 actions/checkout@v4 / setup-java@v4 依赖 Node 20 弃用路径与
+  setup-java v5 迁移建议——后续小提交统一升级 @v5/v4→v5 与 checkout@v5，与本失败无关。
+- 链接：`https://github.com/LamSpace/OpenLatch/actions/runs/34720084117`
+
 ## 待录
 
 - drill.yml 首跑（需 Actions 网页手动 workflow_dispatch，或等 nightly `19:23 UTC`）：核对 PartitionDrillIT 非跳过 → 记入本文件（tasks 2.3）
