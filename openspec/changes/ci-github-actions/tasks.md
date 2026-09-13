@@ -23,5 +23,5 @@
 ## 4. badge 与分支保护
 
 - [x] 4.1 交付 badge markdown 片段（build / drill / license / Java 25 / Spring Boot 4 / protocol v3）写入本 change `badges.md`；README 写入与 docs-restructure-and-report-retirement 对账（其先落地则本任务顺带补行，其后落地则由其按 `badges.md` 原名嵌入）
-- [ ] 4.2 分支保护操作步骤文档 `branch-protection-steps.md`：Settings → Branches → Add branch protection rule → `master`；Require status checks to pass → 勾选 `build`（建议连带 `citation-check`）；Do not allow bypassing。由评审人在 GitHub 网页执行（手工介入项），完成后本任务勾选即对账
+- [x] 4.2 分支保护已按 `branch-protection-steps.md` 于 GitHub 网页配置完成（评审人 2026-09-13 执行确认）
 - [ ] 4.3 收口：`ci-first-runs.md` 汇总三类 workflow 首跑链接 + 额度占用读数（Actions 页分钟数）
