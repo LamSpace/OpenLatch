@@ -6,7 +6,7 @@
 
 - [x] 1.1 新增 `.github/workflows/build.yml`：`on: push(branches:[master]) + pull_request`；job `build`：runs-on ubuntu-latest、`concurrency: build-${{ github.ref }}` + cancel-in-progress；步骤 checkout → setup-java（temurin/"25"/cache:maven）→ `mvn -B -ntp clean verify` → 失败时 upload-artifact（`**/target/surefire-reports/**`、`**/target/failsafe-reports/**`，`if: failure()`）→ 成功时 upload javadoc（`**/target/site/apidocs/**`）
 - [x] 1.2 同文件 job `citation-check`：checkout + `bash scripts/check-source-citations.sh`（模式集单一事实源在该脚本，见 javadoc-internal-citation-cleanup）
-- [x] 1.3 （绿面）验证红绿两面：开一个临时 PR 在任一 `src/main` 注释加"设计说明书 §1" → citation-check 红、build 绿；删行 → 双绿；合并前回滚。run 链接记入本 change `ci-first-runs.md`
+- [x] 1.3 红绿两面验证完成（2026-09-13）：绿面 build #1–#5；红面 PR#1——注入样本 citation-check 红、build 绿，验证后关闭未合并。详见 `ci-first-runs.md`
 
 ## 2. drill.yml（进程级演练重档位）
 
@@ -23,5 +23,5 @@
 ## 4. badge 与分支保护
 
 - [x] 4.1 交付 badge markdown 片段（build / drill / license / Java 25 / Spring Boot 4 / protocol v3）写入本 change `badges.md`；README 写入与 docs-restructure-and-report-retirement 对账（其先落地则本任务顺带补行，其后落地则由其按 `badges.md` 原名嵌入）
-- [ ] 4.2 分支保护操作步骤文档 `branch-protection-steps.md`：Settings → Branches → Add branch protection rule → `master`；Require status checks to pass → 勾选 `build`（建议连带 `citation-check`）；Do not allow bypassing。由评审人在 GitHub 网页执行（手工介入项），完成后本任务勾选即对账
+- [x] 4.2 分支保护已按 `branch-protection-steps.md` 于 GitHub 网页配置完成（评审人 2026-09-13 执行确认）
 - [ ] 4.3 收口：`ci-first-runs.md` 汇总三类 workflow 首跑链接 + 额度占用读数（Actions 页分钟数）
