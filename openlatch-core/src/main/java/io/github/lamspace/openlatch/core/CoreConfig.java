@@ -26,6 +26,7 @@ package io.github.lamspace.openlatch.core;
  * @param maxKeyLength        锁键长度上限（UTF-8 字节）
  * @param maxQueueDepthPerKey 单 key 等待队列深度上限
  */
+// 引用"设计说明书 §1"作为红面验证样本(CI citation-check 应拦截本行；勿合并)
 public record CoreConfig(
         long defaultLeaseMs,
         long minLeaseMs,
