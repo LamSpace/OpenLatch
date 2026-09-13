@@ -44,6 +44,14 @@
   setup-java v5 迁移建议——后续小提交统一升级 @v5/v4→v5 与 checkout@v5，与本失败无关。
 - 链接：`https://github.com/LamSpace/OpenLatch/actions/runs/34720084117`
 
+## 红面验证（PR#1，tasks 1.3 红面达成，2026-09-13）
+
+- 分支 `ci-citation-red-test`（注入 `CoreConfig.java:29` "设计说明书 §1" 样本行，a562f4b）→ PR#1 → 验证后 **closed（未合并）**。
+- 结论：`source citation gate` = **failure**（拦截命中行）；`verify (unit + IT + javadoc)` = **success**——
+  两 job 独立性实证；分支保护下红 check 使合并不可行，防线闭环。
+- 附带发现（过程纠错如实记）：注入锚点最初按 `class CoreConfig` 书写，实际为 `record`——分类器服务
+  抖动延后了执行，改用真实锚点后本地门禁先行命中，云端结果与本地预期逐项一致。
+
 ## 待录
 
 - drill.yml 首跑（需 Actions 网页手动 workflow_dispatch，或等 nightly `19:23 UTC`）：核对 PartitionDrillIT 非跳过 → 记入本文件（tasks 2.3）
