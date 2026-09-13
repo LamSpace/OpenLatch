@@ -34,8 +34,12 @@
   特权/网段环境可用（tasks 2.3 的"非跳过"命题由本 run 回答：是）**；artifacts 步骤 ✅
   （`drill-evidence-1` 257KB——新 target/drill-reports glob 采集有效）。
 - 失败面：某轨真断言/超时失败，具体套件匿名 API 不可达（logs/artifacts 需 token）。
-  分诊中：本地同构复跑（含 sudo 特权）比对——本地绿则归 runner 侧（4 核争用/共享环境），
-  按 tasks 2.4 首周观察处置；本地红则取现场定根因。
+- **分诊结论（2026-09-13）**：本地同构复跑（同 HEAD 系代码 + 同特权路径）全量 `-Pdrill`
+  **五轨全绿 REPRO_EXIT=0**（stall 70.6s / idle 69.9s / partition 4.2s / LeaderKill 21.2s /
+  Rolling 449.4s，全部 Skipped=0）→ 判定 **runner 侧争用**（hosted 4 核对时序敏感数值演练
+  是部署指南既知弱项），与 build #2 同族，非产品缺陷、非 workflow 配置错误。
+- 处置：按 tasks 2.4 观察至第二样本（下一 nightly）；若连续 flaky → 暂停 schedule 仅留手动；
+  若单发 → 保留 schedule，red 视为运维信号非门禁信号（drill job 本就不挂合并阻断）。
 - 附注（非阻塞）：Actions 提示 actions/checkout@v4 / setup-java@v4 依赖 Node 20 弃用路径与
   setup-java v5 迁移建议——后续小提交统一升级 @v5/v4→v5 与 checkout@v5，与本失败无关。
 - 链接：`https://github.com/LamSpace/OpenLatch/actions/runs/34720084117`
