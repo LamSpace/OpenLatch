@@ -191,5 +191,22 @@ mvn -pl openlatch-client verify -Pdrill
 
 Criteria (recovery <10s; both rolling orders "last window + 45s self-heal budget ⇒ zero
 residual errors"; the partition minority can neither grant nor release) and full reading
-guidance: [09, drill-criteria section](09-troubleshooting.md). CI runs these nightly and
-ships the reports as artifacts.
+guidance: [09, drill-criteria section](09-troubleshooting.md).
+
+> **Privilege prerequisite for the partition drill** (Linux, one-time): `PartitionDrillIT`
+> runs `ip`/`iptables`/`modprobe` via non-interactive `sudo -n`. A least-privilege sudoers
+> snippet is the recommended setup:
+>
+> ```bash
+> sudo tee /etc/sudoers.d/openlatch-drill >/dev/null <<'EOF'
+> <user> ALL=(ALL) NOPASSWD: /usr/bin/true, /usr/sbin/ip, /usr/sbin/iptables, /usr/sbin/modprobe
+> EOF
+> sudo chmod 440 /etc/sudoers.d/openlatch-drill
+> sudo visudo -cf /etc/sudoers.d/openlatch-drill   # must print parsed OK; verify paths with `which`
+> ```
+>
+> Without it the suite **explicitly skips** (never fails silently) — automation should
+> assert `Skipped: 0` to guard against false green. The drills are compute-sensitive
+> (800 ms election windows): run numeric gates on dedicated/performance hardware —
+> shared hosted runners (2 vCPU) do not meet this prerequisite, and the CI nightly is
+> paused accordingly (manual dispatch retained; see ci-github-actions ledger).

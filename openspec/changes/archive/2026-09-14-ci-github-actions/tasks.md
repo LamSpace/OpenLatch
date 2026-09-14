@@ -13,15 +13,15 @@
 - [x] 2.1 新增 `.github/workflows/drill.yml`：`on: workflow_dispatch + schedule(cron: 非整点，如 "23 19 * * *")`；`concurrency: group: drill, cancel-in-progress: false`；`timeout-minutes: 150`；runs-on ubuntu-latest
 - [x] 2.2 步骤：checkout → setup-java(temurin/25, cache:maven) → `mvn -B -ntp clean install -DskipTests`（产出 `openlatch-server-1.0-SNAPSHOT-executable.jar`——缺失时演练 assume-skip 假绿，此步不可省）→ `mvn -B -ntp verify -Pdrill` → `if: always()` upload-artifact：演练报告（现状 `docs/*-drill-*.md`、`docs/leader-stall-repro-*.md`；docs-restructure-and-report-retirement 落地后切 `**/target/drill-reports/**`，两侧对账）+ `**/target/drill-logs/**`
 - [x] 2.3 首跑核对（2026-09-13 nightly drill #1 以 schedule 达成）：防假绿断言步通过——四套件报告齐全且 Skipped=0，hosted runner 上 PartitionDrillIT 真实执行、特权可用；处置结论与失败分诊记入 `ci-first-runs.md`
-- [ ] 2.4 首周观察：连续 nightly 若出现 flaky 轮次，暂停 `schedule` 仅留 `workflow_dispatch`，处置结论记档（drill job 红灯不挂 badge，不作 PR 门禁）
+- [x] 2.4 两夜观察定性质：重载时序断言在 2 vCPU hosted runner 上为算力预算赤字（非 flake，重试无效，诊断详见 ci-first-runs.md）——已暂停 schedule 仅留手动，恢复条件（self-hosted/≥4 vCPU）注记于 drill.yml
 
 ## 3. benchmark.yml
 
 - [x] 3.1 新增 `.github/workflows/benchmark.yml`：`on: workflow_dispatch + schedule(weekly)`；步骤：checkout → setup-java → `mvn -B -ntp clean install -DskipTests` → `mvn -B -ntp -pl openlatch-examples exec:java -Dexec.mainClass=io.github.lamspace.openlatch.examples.BenchmarkMain`（注意 exec:java 不带 `-am`，带 `-am` 会落根聚合 pom 报 ClassNotFound）→ upload-artifact 报告（路径与 docs-restructure 落盘改点对账；系统属性覆盖输出到 `target/` 亦可）
-- [ ] 3.2 首跑验证：run 绿且 artifacts 含当日 baseline 报告；run 链接记入 `ci-first-runs.md`
+- [x] 3.2 首跑验证完成（2026-09-14 15:32 北京，scheduled 延迟 ~5h 属正常）：run 绿、artifact benchmark-baseline-1 在册，见 ci-first-runs.md
 
 ## 4. badge 与分支保护
 
 - [x] 4.1 交付 badge markdown 片段（build / drill / license / Java 25 / Spring Boot 4 / protocol v3）写入本 change `badges.md`；README 写入与 docs-restructure-and-report-retirement 对账（其先落地则本任务顺带补行，其后落地则由其按 `badges.md` 原名嵌入）
 - [x] 4.2 分支保护已按 `branch-protection-steps.md` 于 GitHub 网页配置完成（评审人 2026-09-13 执行确认）
-- [ ] 4.3 收口：`ci-first-runs.md` 汇总三类 workflow 首跑链接 + 额度占用读数（Actions 页分钟数）
+- [x] 4.3 收口完成：三类 workflow 首跑均在案（build #1–#5 含 #2 flake 定性、drill #1/#2 预算赤字定性与处置、benchmark #1），额度读数 ~143 runner-min/两日

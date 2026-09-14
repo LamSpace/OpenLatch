@@ -58,8 +58,24 @@
 - 评审人 Re-run all jobs → **重跑双绿** → Merge（67deca2，仓库首个 PR 流程走通：门禁+分支保护+重跑三合一验证）。
 - 三例同族（build #2 / drill #1 / PR#2）均为共享 runner 争用 → 本分支落防噪：build verify 失败自动重试一次 + 三 workflow 的 actions 升级（checkout@v7/setup-java@v6/upload-artifact@v7，消 Node 20 弃用告警）。
 
-## 待录
+## drill.yml — run #2（2026-09-14 05:35 北京，第二夜即定性质）
 
-- drill.yml 首跑（需 Actions 网页手动 workflow_dispatch，或等 nightly `19:23 UTC`）：核对 PartitionDrillIT 非跳过 → 记入本文件（tasks 2.3）
-- benchmark.yml 首跑（workflow_dispatch，tasks 3.2）
-- 额度读数（tasks 4.3 收口时补）
+- 步骤面：`Run drills` 红（17.0 min）；**`Assert every drill suite executed` 绿**（四套件报告齐全且 Skipped=0——防假绿与"未跳过"命题再证）；artifacts `drill-evidence-2` 上传成功。
+- 失败面：LeaderKill **3/3 绿**、先从后主绿（1.68%，tail=0）；红在**最重的两条时序断言**——
+  Partition "40s 内未在多数派侧探测到 Leader"、先主后从 `errors=156/626 (24.92%) tailErrors=116`
+  （对照先从后主 2617 请求——吞吐坍缩至 1/4，驱动线程大面积阻塞在超时）。
+- **定性（与 #1 合并结论）**：`ubuntu-latest` 2 vCPU 不满足本套件的硬件前提——netns/iptables/bind
+  错误全日志零命中、`stallEvents=0`（产品看门狗未判停摆，复制在推进只是慢）、失败烈度与套件负载
+  正相关、本地同码多次全绿——是**算力预算赤字**而非随机 flake（重试无效），且项目文档自身
+  早已要求"<10s 数值门在独占硬件上执行"。
+- **处置（tasks 2.4）**：暂停 `schedule`（workflow 内注释留档恢复条件），保留手动 dispatch；
+  自动化恢复路径 = self-hosted runner（开发机，已证满足预算）或 ≥4 vCPU 档。
+
+## benchmark.yml — run #1（2026-09-14 15:32 北京，tasks 3.2）
+
+- scheduled 触发（队列延迟 ~5h，免费账户正常现象），**成功**；artifact `benchmark-baseline-1`（849B）在册。
+
+## 额度读数（tasks 4.3）
+
+- 上线两日累计 ~143 runner-min：build 105.5（16 run）/ drill 35.7（2 run，均 runner 不适配废弃）/ benchmark 1.6。
+- public 仓库 hosted Linux 按合理用量免费不计账单；夜间 drill 暂停后主要开销回归 PR 门禁本身。

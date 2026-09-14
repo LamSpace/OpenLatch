@@ -1,13 +1,20 @@
 # 进程级故障演练重档位 job（spec: continuous-integration「drill 与 benchmark 重档位 job」）。
-# 不入 PR 门禁：共享 runner 抖动不得转化为 PR 假红；nightly + 手动双触发。
+# 不入 PR 门禁：共享 runner 抖动不得转化为 PR 假红；仅手动触发（理由见下）。
 # concurrency 串行：分区演练占固定端口 9411 与 netns 前缀 oln，并行必冲突误报。
 # hosted runner 提供 passwordless sudo（-n 无交互可用），承载 netns/iptables 特权段。
+#
+# ── nightly 已于 2026-09-14 暂停（tasks 2.4 处置）──
+# 两次 nightly（drill #1/#2）均败于 ubuntu-latest 2 vCPU 的算力预算：重载时序断言
+# （先主后从滚动、netns 分区选主 40s 窗）在 CPU 饥饿下必然超时，而 netns/bind/看门狗
+# 全数零异常——非产品回归、非随机 flake，重试亦无效。项目自身文档即要求数值门
+# 「在独占硬件上执行」。恢复自动化的正确形态：self-hosted（开发者机）或 ≥4 vCPU 档
+# runner，届时解注释 schedule 并改 runs-on。详见 openspec 台账 ci-first-runs.md。
 name: drill
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "23 19 * * *"
+  # schedule:            # paused 2026-09-14 — see note above
+  #   - cron: "23 19 * * *"
 
 concurrency:
   group: drill

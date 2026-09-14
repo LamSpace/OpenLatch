@@ -179,4 +179,19 @@ mvn -pl openlatch-client verify -Pdrill
 ```
 
 判据口径（恢复 <10s、两序滚动"末重启窗 + 45s 自愈预算后零残留"、分区少数派不可授予）
-与判读细节见 [09 §演练判据](09-troubleshooting.md)；CI 上 nightly 自动执行并交付 artifacts。
+与判读细节见 [09 演练判据](09-troubleshooting.md)。
+
+> **分区演练的特权前置**（Linux，一次性配置）：`PartitionDrillIT` 以非交互 `sudo -n` 执行
+> `ip`/`iptables`/`modprobe`，推荐最小授权 sudoers 片段：
+>
+> ```bash
+> sudo tee /etc/sudoers.d/openlatch-drill >/dev/null <<'EOF'
+> <user> ALL=(ALL) NOPASSWD: /usr/bin/true, /usr/sbin/ip, /usr/sbin/iptables, /usr/sbin/modprobe
+> EOF
+> sudo chmod 440 /etc/sudoers.d/openlatch-drill
+> sudo visudo -cf /etc/sudoers.d/openlatch-drill   # 必须 parsed OK；路径以 which 实测为准
+> ```
+>
+> 未配置时该套件**显式跳过**（不判失败）——CI/自动化务必核对 `Skipped: 0` 防假绿。
+> 进程级演练对算力敏感（选举窗 800ms），数值门复核建议在独占/高性能硬件上执行；
+> hosted 共享 runner（2 vCPU）不满足该前提，CI nightly 已据此暂停（保留手动触发）。
