@@ -1,11 +1,11 @@
-# OpenLatch
+# 🔒 OpenLatch
 
 [English](README.md) | **简体中文**
 
 [![build](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml)
 [![drill](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml?query=branch%3Amaster)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Java](https://img.shields.io/badge/Java-25-orange)](#要求)
+[![Java](https://img.shields.io/badge/Java-25-orange)](#-要求)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](docs/guide/zh/04-spring-boot-starter.md)
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](docs/guide/zh/10-compatibility.md)
 
@@ -18,7 +18,7 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 **锁是协调，不是共识**——锁带租约、会被剥夺；所有关键路径都要实现失锁回调。
 完整语义见下方指南。
 
-## 架构
+## 🏗️ 架构
 
 ```
                         ┌─────────────────────────── Raft 集群（Apache Ratis） ─────────────────────────────┐
@@ -33,7 +33,7 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
    @OpenLatch            └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 模块
+## 📦 模块
 
 | 模块 | 说明 |
 |---|---|
@@ -45,7 +45,7 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 | `openlatch-console` | 只读管理控制台（Web，`ADMIN_*` 协议） |
 | `openlatch-examples` | 示例与基准 harness（不发布） |
 
-## 要求
+## ⚙️ 要求
 
 | 项 | 支持 |
 |---|---|
@@ -54,7 +54,7 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 | 线路协议 | v1 / v2 / v3，HELLO 协商区间 `[1,3]`，不做隐式兼容 |
 | 构件 | 未发布 Maven Central——先 `mvn clean install` |
 
-## 快速上手
+## 🚀 快速上手
 
 ```bash
 mvn clean install -DskipTests                                   # 本地构建安装
@@ -78,7 +78,7 @@ Spring Boot：引入 starter、编译器开启 `-parameters`、标注 `@OpenLatc
 ——三步。集群三节点、令牌轮换、TLS、控制台部署、指标、排障：
 **逐篇见[用户指南](docs/guide/zh/index.md)**。
 
-## 必知语义
+## 🔑 必知语义
 
 - **租约会到期，看门狗按 `lease/3` 续租**；未续持的锁必被回收。
 - **锁会被剥夺**（断连 / 到期 / failover 回滚）——实现 `LockLostListener` 并在回调中中止在途提交。
@@ -86,7 +86,7 @@ Spring Boot：引入 starter、编译器开启 `-parameters`、标注 `@OpenLatc
 - **FIFO 公平**：严格到达序、只通知队头（无惊群）；以单个 Leader 任期为界——切换后队列重排。
 - **重启语义**：单机=内存（重启全释放）；集群=Raft 日志+快照（授予跨 Leader 迁移与滚动重启存续）。
 
-## 已知局限
+## 🚧 已知局限
 
 1. 读热点下读者逐个放行（批量授予经评估暂缓）；
 2. 放弃等待经队头应答超时回收席位，不即时撤销；
@@ -94,19 +94,19 @@ Spring Boot：引入 starter、编译器开启 `-parameters`、标注 `@OpenLatc
 4. 屏障条目存续至节点重启——按轮次命名键隔离；
 5. 集群信号量许可池回收后，纯加入者被显式拒绝。
 
-## 文档
+## 📚 文档
 
 - **用户指南**：[简体中文](docs/guide/zh/index.md) | [English](docs/guide/en/index.md)
   ——概念、上手、SDK、starter、集群运维、安全、控制台、可观测、排障、兼容性、术语表。
 - **设计与质量**（内部材料，中文）：[design/](docs/design/) · [quality/](docs/quality/)
 
-## 示例
+## 💡 示例
 
 ```bash
 mvn -pl openlatch-examples compile exec:java -Dexec.mainClass=io.github.lamspace.openlatch.examples.QuickStartExample
 # ConcurrencyExample / ReadWriteExample / WatchdogExample / SpringAnnotationExample / BenchmarkMain
 ```
 
-## 许可
+## 📜 许可
 
 [Apache License 2.0](LICENSE)
