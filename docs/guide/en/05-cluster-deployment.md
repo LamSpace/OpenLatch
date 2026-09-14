@@ -207,4 +207,6 @@ guidance: [09, drill-criteria section](09-troubleshooting.md).
 >
 > Without it the suite **explicitly skips** (never fails silently) — automation should
 > assert `Skipped: 0` to guard against false green. The drills are compute-sensitive
-> (800 ms election windows): run numeric gates on dedicated/performance hardware.
+> (800 ms election windows): run numeric gates on dedicated/performance hardware —
+> shared hosted runners (2 vCPU) do not meet this prerequisite, and the CI nightly is
+> paused accordingly (manual dispatch retained; see ci-github-actions ledger).
