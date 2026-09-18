@@ -27,7 +27,9 @@ package io.github.lamspace.openlatch.core;
  *   <li>{@link #LOCK}——互斥/读写锁家族（{@link LockType} 的
  *       REENTRANT/SIMPLE/READ/WRITE/FAIR 全部落此家族，由 {@code LockEntry} 承载）；</li>
  *   <li>{@link #SEMAPHORE}——许可门闸家族（{@code SemaphoreEntry} 承载）；</li>
- *   <li>{@link #LATCH}——倒计数屏障家族（{@code LatchEntry} 承载）。</li>
+ *   <li>{@link #LATCH}——倒计数屏障家族（{@code LatchEntry} 承载）；</li>
+ *   <li>{@link #ATOMIC}——原子变量家族（{@code AtomicEntry} 承载）：值为
+ *       跨会话共享的常驻状态，不绑定归属、不随会话死亡回滚，条目不回收。</li>
  * </ul>
  *
  * <p><b>判定归属</b>：{@link LockType} 到家族的映射由 core 门面
@@ -43,5 +45,7 @@ public enum KeyFamily {
     SEMAPHORE,
 
     /** 倒计数屏障家族（{@code LatchEntry}）。 */
-    LATCH
+    LATCH,
+    /** 原子变量家族（{@code AtomicEntry}）：值不绑定会话归属，常驻不回收。 */
+    ATOMIC
 }

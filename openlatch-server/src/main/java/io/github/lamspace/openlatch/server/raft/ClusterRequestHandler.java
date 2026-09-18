@@ -18,12 +18,14 @@ package io.github.lamspace.openlatch.server.raft;
 
 import com.google.protobuf.ByteString;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
+import io.github.lamspace.openlatch.protocol.AtomicOpResponse;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
+import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
@@ -480,6 +482,84 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * ATOMIC_OP 集群路径（转发车道）：值变更与 GET 读数皆属复制状态裁决，
+     * 与 LATCH_COUNT_DOWN 同车道不设角色门——Follower 提交经内部通道由当值
+     * Leader 复制执行（GET 亦进日志：线性一致读数，见 v4 设计裁决，重放零迁移）。
+     * v4 门控与形状合法性先于提交——非法请求零入日志（与单机分发器共用
+     * {@link RequestDispatcher#validateAtomicRequest} 判定）。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleAtomicOp(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, false);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 4) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getAtomicOpRequest();
+        StatusCode shapeBad = RequestDispatcher.validateAtomicRequest(req);
+        if (shapeBad != null) {
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, shapeBad));
+            return;
+        }
+        ByteString payload = AtomicOpPayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequestId(msg.getRequestId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.ATOMIC_OP_ENTRY, payload)
+                .whenComplete((r, err) -> {
+                    Envelope resp = err == null ? mapAtomicOp(msg, r) : commitFailure(msg, err);
+                    if (metrics != null) {
+                        metrics.recordAtomic(req.getLockType(), req.getOp(),
+                                resp.getAtomicOpResponse().getStatus());
+                    }
+                    respondAsync(ctx, session, startNanos, resp);
+                });
+    }
+
+    /**
+     * {@link ApplyResult} → AtomicOpResponse（码形与单机
+     * {@code toAtomicOpResponse} 对齐；OK 携带应答四元组，
+     * CAS 家族成败经 {@code atomic_applied} 透传）。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapAtomicOp(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        AtomicOpResponse.Builder b = AtomicOpResponse.newBuilder()
+                .setStatus(st)
+                .setOp(msg.getAtomicOpRequest().getOp());
+        if (result.getStatus() == ApplyStatus.OK) {
+            b.setApplied(result.getAtomicApplied())
+                    .setOldValue(result.getAtomicOldValue())
+                    .setValue(result.getAtomicValue())
+                    .setVersion(result.getAtomicVersion());
+        }
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.ATOMIC_OP)
+                .setRequestId(msg.getRequestId())
+                .setAtomicOpResponse(b)
+                .build();
+    }
+
+    /**
      * 写请求统一预检：载荷在场性、键长、会话登记；{@code requireLeader} 为
      * 真时先过角色门（ACQUIRE 车道——排队裁决与通知是 Leader 本地态）。
      * 通过返回 {@code null}，否则返回应即写回的拒绝信封。
@@ -501,6 +581,7 @@ public final class ClusterRequestHandler {
             case LEASE_RENEW -> msg.hasLeaseRenewRequest();
             case LATCH_COUNT_DOWN -> msg.hasLatchCountDownRequest();
             case LATCH_AWAIT -> msg.hasLatchAwaitRequest();
+            case ATOMIC_OP -> msg.hasAtomicOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -511,6 +592,7 @@ public final class ClusterRequestHandler {
             case LOCK_RELEASE -> msg.getReleaseRequest().getKey();
             case LATCH_COUNT_DOWN -> msg.getLatchCountDownRequest().getKey();
             case LATCH_AWAIT -> msg.getLatchAwaitRequest().getKey();
+            case ATOMIC_OP -> msg.getAtomicOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -614,6 +696,9 @@ public final class ClusterRequestHandler {
                     .setStatus(StatusCode.NOT_LEADER)
                     .setLeaderNodeId(leader.leaderNodeId())
                     .setLeaderAddress(leader.leaderAddress()));
+            case ATOMIC_OP -> b.setAtomicOpResponse(AtomicOpResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER)
+                    .setOp(msg.getAtomicOpRequest().getOp()));
             default -> b.setAcquireResponse(AcquireResponse.newBuilder()
                     .setStatus(StatusCode.NOT_LEADER)
                     .setLeaderNodeId(leader.leaderNodeId())

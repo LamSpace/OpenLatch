@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.server.metrics;
 import io.github.lamspace.openlatch.core.CoreConfig;
 import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.SystemClock;
+import io.github.lamspace.openlatch.protocol.AtomicOp;
+import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,6 +51,9 @@ class ServerMetricsVocabularyTest {
         metrics.recordRelease(StatusCode.OK);
         metrics.recordRenew(StatusCode.NOT_HELD);
         metrics.recordLeaseExpired(2);
+        metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_LONG, AtomicOp.ATOMIC_CAS, StatusCode.OK);
+        metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_INTEGER, AtomicOp.ATOMIC_GET, StatusCode.OK);
+        metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_BOOLEAN, AtomicOp.ATOMIC_SET, StatusCode.INVALID_REQUEST);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -70,6 +75,9 @@ class ServerMetricsVocabularyTest {
         assertThat(scrape).contains("openlatch_server_release_total{status=\"OK\"}");
         assertThat(scrape).contains("openlatch_server_renew_total{status=\"NOT_HELD\"}");
         assertThat(scrape).contains("openlatch_server_lease_expired_total 2");
+        assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"long\",op=\"cas\",status=\"OK\"} 1");
+        assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"integer\",op=\"get\",status=\"OK\"} 1");
+        assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"boolean\",op=\"set\",status=\"INVALID_REQUEST\"} 1");
         // 不得出现 *_total_total 双后缀。
         assertThat(scrape).doesNotContain("_total_total");
     }

@@ -57,7 +57,8 @@ public interface KeyEntry {
 
     /**
      * 是否已无任何需要保留的状态——各家族对"空"的判据不同（锁：无持有
-     * 且无等待；Semaphore：无持有且无等待；Latch：无在等），但语义一致：
+     * 且无等待；Semaphore：无持有且无等待；Latch：无在等；ATOMIC：恒非空——
+     * 值为常驻状态，无常回收判据），但语义一致：
      * 返回 {@code true} 时条目可从 {@link LockTable} 移除且不影响正确性。
      *
      * @return 条目可回收返回 true
@@ -97,7 +98,7 @@ public interface KeyEntry {
      * 租约到期强制回收：清除该条目全部持有与租约（锁：写侧与读侧；
      * Semaphore：归还持有者全部许可），不触碰等待队列，并在可推进时
      * 收集队首通知。仅由 {@code CoreEngine.expireDue} 在陈旧校验通过后
-     * 调用；无租约家族（Latch）永不入到期堆，本方法对其不可达。
+     * 调用；无租约家族（Latch/ATOMIC）永不入到期堆，本方法对其不可达。
      *
      * @param now                当前时刻（毫秒）
      * @param headReplyTimeoutMs 队首通知的响应超时（毫秒）
@@ -118,7 +119,8 @@ public interface KeyEntry {
 
     /**
      * 等待队列条目读数（统计观察面）：锁/Semaphore 为等待队列
-     * 长度，Latch 为 awaiter 队列长度——三家统一为"本 key 当前排队等待项数"，
+     * 长度，Latch 为 awaiter 队列长度，ATOMIC 恒 0（无等待队列）——四家统一为
+     * "本 key 当前排队等待项数"，
      * 供 {@code CoreEngine.stats()} 聚合。只读，MUST NOT 改变队列状态。
      * 须在持有条目锁时调用（{@code CoreEngine} 保证）。
      *

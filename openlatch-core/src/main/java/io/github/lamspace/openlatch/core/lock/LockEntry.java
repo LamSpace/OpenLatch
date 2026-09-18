@@ -576,6 +576,7 @@ public final class LockEntry implements KeyEntry {
         return new CoreInspection.KeySnapshot(key, KeyFamily.LOCK, reentrant,
                 leaseToken, leaseMs, leaseExpiresAtMs, remaining,
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
-                0, 0, 0, 0, List.of());
+                0, 0, 0, 0, List.of(),
+                null, 0, 0, 0);
     }
 }

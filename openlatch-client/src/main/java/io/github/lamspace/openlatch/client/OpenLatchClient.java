@@ -103,6 +103,11 @@ public final class OpenLatchClient implements AutoCloseable {
     private final HeldLockRegistry heldLockRegistry = new HeldLockRegistry();
     /** 屏障等待的通知信号登记表（按到达连接会话路由）。 */
     private final LatchNotifyRegistry latchNotifies = new LatchNotifyRegistry();
+    /** 原子变量写序号发号器（客户端会话内单调；跨 key 共享计数域，满足"同 key 严格单调"）。 */
+    private final java.util.concurrent.atomic.AtomicLong atomicOpSeq =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    /** key → 在途写互斥监视器（同 key 写串行保证去重单槽充分性；条目随 key 常驻，量级同 key 基数）。 */
+    private final ConcurrentHashMap<String, Object> atomicWriteMonitors = new ConcurrentHashMap<>();
     /**
      * 获取车道（Leader 车道）：{@code null} 即稳态单连接——home 即
      * Leader（或单机）。Leader 改连时按需建/换指向；新获取与等待走此车道，
@@ -1299,6 +1304,110 @@ public final class OpenLatchClient implements AutoCloseable {
      */
     public OCountDownLatch newCountDownLatch(String key) {
         return new RemoteCountDownLatch(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 创建跨进程原子 long 句柄（无主张形态）：key 不存在时值以 0 起步。
+     * 语义降级/增强清单见 {@link OAtomicLong} 接口注释——每操作一次往返、
+     * 值不绑定会话（死亡不回滚）、条目常驻不回收。
+     *
+     * @param key 原子变量键
+     * @return 原子 long 句柄（可多线程共用、可多句柄指向同 key）
+     */
+    public OAtomicLong newAtomicLong(String key) {
+        return new RemoteAtomicLong(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 创建跨进程原子 long 句柄（非零初值主张形态）：key 首建时值以
+     * {@code initialValue} 起步（典型用法：分布式发号器从 1 起）；
+     * 既有条目上该主张与定型初值不符时，本句柄的首个操作抛携带
+     * {@code INVALID_REQUEST} 的 {@link OpenLatchException}（判例：Semaphore
+     * 总量与 Latch 初始计数的非零主张断言；0 为不主张，等价无参形态）。
+     *
+     * @param key          原子变量键
+     * @param initialValue 初值主张（{@code >= 0}，0 不主张）
+     * @return 原子 long 句柄
+     * @throws IllegalArgumentException {@code initialValue < 0}
+     */
+    public OAtomicLong newAtomicLong(String key, long initialValue) {
+        Objects.requireNonNull(key);
+        if (initialValue < 0) {
+            throw new IllegalArgumentException("initialValue must be >= 0");
+        }
+        return new RemoteAtomicLong(this, key, initialValue);
+    }
+
+    /**
+     * 创建跨进程原子 int 句柄（无主张形态），语义同
+     * {@link #newAtomicLong(String)}，值落 int32 域。
+     *
+     * @param key 原子变量键
+     * @return 原子 int 句柄
+     */
+    public OAtomicInteger newAtomicInteger(String key) {
+        return new RemoteAtomicInteger(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 创建跨进程原子 int 句柄（非零初值主张形态），断言语义同
+     * {@link #newAtomicLong(String, long)}。
+     *
+     * @param key          原子变量键
+     * @param initialValue 初值主张（{@code >= 0}，0 不主张）
+     * @return 原子 int 句柄
+     * @throws IllegalArgumentException {@code initialValue < 0}
+     */
+    public OAtomicInteger newAtomicInteger(String key, int initialValue) {
+        Objects.requireNonNull(key);
+        if (initialValue < 0) {
+            throw new IllegalArgumentException("initialValue must be >= 0");
+        }
+        return new RemoteAtomicInteger(this, key, initialValue);
+    }
+
+    /**
+     * 创建跨进程原子 boolean 句柄（无主张形态，初值 false）。
+     *
+     * @param key 原子变量键
+     * @return 原子 boolean 句柄
+     */
+    public OAtomicBoolean newAtomicBoolean(String key) {
+        return new RemoteAtomicBoolean(this, Objects.requireNonNull(key), 0);
+    }
+
+    /**
+     * 创建跨进程原子 boolean 句柄（初值 {@code true} 的主张形态——
+     * boolean 的 false 即缺省不主张）：key 首建值为 true；既有条目定型初值
+     * 为 false 时本句柄首个操作抛 {@link OpenLatchException}。
+     *
+     * @param key   原子变量键
+     * @param initialValue 初值（true 为主张，false 等价无参形态）
+     * @return 原子 boolean 句柄
+     */
+    public OAtomicBoolean newAtomicBoolean(String key, boolean initialValue) {
+        return new RemoteAtomicBoolean(this, Objects.requireNonNull(key), initialValue ? 1 : 0);
+    }
+
+    /**
+     * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
+     * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
+     * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
+     *
+     * @param key 原子变量键
+     * @return 互斥监视器（按 key 常驻）
+     */
+    Object atomicWriteMonitor(String key) {
+        return atomicWriteMonitors.computeIfAbsent(key, k -> new Object());
+    }
+
+    /**
+     * 下一枚写操作序号（客户端会话内单调递增）。
+     *
+     * @return {@code >= 1} 的序号
+     */
+    long nextAtomicOpSeq() {
+        return atomicOpSeq.incrementAndGet();
     }
 
     /**

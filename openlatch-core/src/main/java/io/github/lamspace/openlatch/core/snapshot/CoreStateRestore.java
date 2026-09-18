@@ -24,7 +24,8 @@ import java.util.Set;
 
 /**
  * 快照状态重建的输入值对象：复制状态全集的
- * core 原生形态——锁条目（含持有者计数与租约三元组）与会话登记集合。
+ * core 原生形态——锁条目（含持有者计数与租约三元组）、原子变量条目
+ * （含值、版本戳与去重槽）与会话登记集合。
  *
  * <p><b>定位</b>：本类型是 {@code CoreEngine.restoreFrom} 的唯一合法输入，
  * 刻意使用 core 原生类型（不引用 proto/序列化/网络类型），维持 core
@@ -76,18 +77,21 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      * @param leaseToken  当前租约凭证（{@code >= 1}）
      * @param leaseMs     实际生效租期（{@code >= 1}）
      * @param expiresAtMs 当前到期时刻（{@code >= 1}）
-     * @param holders     持有者列表（锁/Semaphore 非空；Latch 恒空。Semaphore
-     *                    条目的 {@code count} 语义为持有许可数）
+     * @param holders     持有者列表（锁/Semaphore 非空；Latch/ATOMIC 恒空。
+     *                    Semaphore 条目的 {@code count} 语义为持有许可数）
      * @param permitsTotal Semaphore 条目的许可总量（非 Semaphore 恒 0）
      * @param latchTotal  Latch 条目的定型初始计数（非 Latch 恒 0）
      * @param latchCount  Latch 条目的当前剩余计数（非 Latch 恒 0）
+     * @param atomic      ATOMIC 条目的状态组（形态合法值、版本戳与去重槽；
+     *                    非 ATOMIC 恒 {@code null}）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
-                        int permitsTotal, long latchTotal, long latchCount) {
+                        int permitsTotal, long latchTotal, long latchCount,
+                        AtomicState atomic) {
 
         /**
-         * 锁家族便捷构造：许可与屏障字段取缺省 0。
+         * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
          *
          * @param key         锁键
          * @param lockType    锁类型
@@ -98,14 +102,36 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          */
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
-            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0);
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0, null);
+        }
+
+        /**
+         * 无原子状态组的九参构造（Latch/Semaphore/锁通道的既有调用形态）。
+         *
+         * @param key          锁键
+         * @param lockType     锁类型
+         * @param leaseToken   当前租约凭证
+         * @param leaseMs      实际生效租期
+         * @param expiresAtMs  当前到期时刻
+         * @param holders      持有者列表
+         * @param permitsTotal Semaphore 许可总量
+         * @param latchTotal   Latch 定型初始计数
+         * @param latchCount   Latch 当前剩余计数
+         */
+        public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
+                long expiresAtMs, List<Holder> holders, int permitsTotal,
+                long latchTotal, long latchCount) {
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    permitsTotal, latchTotal, latchCount, null);
         }
 
         /**
          * 构造并校验条目形态自洽性（按家族分支）：锁条目在租约三元组非正、
          * 持有者列表为空、写类条目多持有者、{@code SIMPLE} 多层持有时均拒绝；Semaphore 条目额外要求总量不小于持有和且持有者
          * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
-         * 计数须在 {@code [0, total]} 内且 {@code total >= 1}。
+         * 计数须在 {@code [0, total]} 内且 {@code total >= 1}；ATOMIC 条目
+         * 无租约与持有者、MUST 携带原子状态组且初值/当前值/槽应答属形态
+         * 值域（integer 截断域、boolean 限 {0,1}）。
          *
          * @throws IllegalArgumentException 家族自洽性违例
          */
@@ -117,7 +143,26 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 throw new IllegalArgumentException("entry lockType must be non-null");
             }
             holders = List.copyOf(holders);
-            if (lockType == LockType.LATCH) {
+            boolean atomicKind = lockType == LockType.ATOMIC_LONG
+                    || lockType == LockType.ATOMIC_INTEGER
+                    || lockType == LockType.ATOMIC_BOOLEAN;
+            if (atomicKind) {
+                if (atomic == null) {
+                    throw new IllegalArgumentException("atomic entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic entry must have no holders or lease: key=" + key);
+                }
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic entry must not carry other-family counters: key=" + key);
+                }
+                if (!inKindDomain(lockType, atomic.initial()) || !inKindDomain(lockType, atomic.value())
+                        || !inKindDomain(lockType, atomic.slotValue())) {
+                    throw new IllegalArgumentException("atomic value out of kind domain: key=" + key);
+                }
+            } else if (lockType == LockType.LATCH) {
                 if (latchTotal < 1 || latchCount < 0 || latchCount > latchTotal) {
                     throw new IllegalArgumentException(
                             "bad latch counters: key=" + key + " total=" + latchTotal
@@ -127,6 +172,10 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                     throw new IllegalArgumentException("latch entry must have no holders: key=" + key);
                 }
             } else {
+                if (atomic != null) {
+                    throw new IllegalArgumentException(
+                            "non-atomic entry must not carry atomic state: key=" + key);
+                }
                 if (leaseToken < 1 || leaseMs < 1 || expiresAtMs < 1) {
                     throw new IllegalArgumentException(
                             "lease triple must be positive: key=" + key);
@@ -152,7 +201,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 }
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
-                    && lockType != LockType.SEMAPHORE && holders.size() != 1) {
+                    && lockType != LockType.SEMAPHORE && !atomicKind && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -161,6 +210,59 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                         "SIMPLE entry cannot be reentrant-held: key=" + key);
             }
         }
+    }
+
+    /**
+     * ATOMIC 条目的快照状态组（数据载体）：定型初值、当前值、版本戳与
+     * 去重槽（最近被处理写操作的会话/序号与应答四元组；空槽以
+     * {@code slotSession = 0} 表达）。值与槽应答的形态值域不变量由
+     * {@link Entry} 依条目 {@code lockType} 校验。
+     *
+     * @param initial      定型初值（无主张创建为 0）
+     * @param value        当前值
+     * @param version      版本戳（{@code >= 0}）
+     * @param slotSession  去重槽会话（0=空槽）
+     * @param slotOpSeq    去重槽序号（空槽恒 0；非空槽 {@code >= 1}）
+     * @param slotApplied  槽应答 applied
+     * @param slotOldValue 槽应答 oldValue
+     * @param slotValue    槽应答 value
+     * @param slotVersion  槽应答 version
+     */
+    public record AtomicState(long initial, long value, long version, long slotSession,
+                              long slotOpSeq, boolean slotApplied, long slotOldValue,
+                              long slotValue, long slotVersion) {
+
+        /**
+         * 构造并校验版本戳与槽形态自洽性。
+         *
+         * @throws IllegalArgumentException 版本为负、空/非空槽与序号矛盾
+         */
+        public AtomicState {
+            if (version < 0) {
+                throw new IllegalArgumentException("atomic version must be >= 0: " + version);
+            }
+            if (slotSession == 0 && slotOpSeq != 0) {
+                throw new IllegalArgumentException("empty dedup slot must carry seq 0");
+            }
+            if (slotSession != 0 && slotOpSeq < 1) {
+                throw new IllegalArgumentException("occupied dedup slot must carry seq >= 1");
+            }
+        }
+    }
+
+    /**
+     * 值是否属指定原子形态的值域：long 恒真；integer 限 int32；boolean 限 {0,1}。
+     *
+     * @param kind 原子形态判别
+     * @param v    待检值
+     * @return 属域为 {@code true}
+     */
+    private static boolean inKindDomain(LockType kind, long v) {
+        return switch (kind) {
+            case ATOMIC_LONG -> true;
+            case ATOMIC_INTEGER -> (int) v == v;
+            default -> v == 0 || v == 1;
+        };
     }
 
     /**

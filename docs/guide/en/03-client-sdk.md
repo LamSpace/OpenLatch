@@ -90,6 +90,45 @@ latch.await(60, TimeUnit.SECONDS);   // wait for zero; one-shot — the entry th
 Barrier note: entries are not reclaimed when participants disperse — namespace keys per
 round (e.g. `deploy:2026-09-12`).
 
+## Atomic variables (the OAtomicLong family, v4)
+
+```java
+OAtomicLong seq = client.newAtomicLong("ids:order");          // starts at 0
+OAtomicLong one = client.newAtomicLong("ids:user", 1);        // non-zero initial claim: first create starts at 1
+long v = seq.incrementAndGet();                               // one server-side round-trip (not a local CAS loop)
+
+// ABA-free read-modify-write (the recommended form):
+OAtomicLong.Stamped cur = seq.getStamped();
+boolean ok = seq.compareAndSetStamped(cur.value(), cur.version(), cur.value() + 10);
+
+OAtomicBoolean ready = client.newAtomicBoolean("boot:ready");
+if (ready.compareAndSet(false, true)) { doInit(); }           // cross-process first-writer-wins
+
+OAtomicInteger hits = client.newAtomicInteger("counter:hits");
+hits.accumulateAndGet(5, Integer::sum);                       // client-side stamped CAS loop (bounded retries)
+```
+
+A key's **form (long/integer/boolean) is settled by its first creating request** and the
+three forms are mutually exclusive — the same one-type-per-key discipline already enforced
+for locks/semaphores/latches across families.
+
+Semantic boundaries (details in [01 Concepts §7](01-concepts.md)):
+
+1. one round-trip per operation; writes and reads are ordered through the quorum
+   (linearizable) — the cost is RTT;
+2. the value is **not bound to a session** — no client death rolls it back (the opposite of
+   lock/semaphore lock-loss semantics); no lease, no watchdog, no `LockLostListener`;
+3. when a timeout is thrown (`OpenLatchTimeoutException`) a write **may already be applied**:
+   the SDK retried with the same sequence under dedup protection; on the abandoned case
+   (session switch) re-check via `getStamped()` before deciding anything;
+4. the JDK-shaped `compareAndSet` has ABA risk; use `compareAndSetStamped` when value plus
+   history must both be judged;
+5. entries are permanent: no delete API — namespace keys per round/tenant and watch the
+   key cardinality;
+6. the initial value in `newAtomic*(key, initial)` is an **assertion**, not an assignment:
+   a mismatching claim on an existing entry makes the handle's first operation throw
+   `OpenLatchException` (same rule as the latch total).
+
 ## Async usage
 
 ```java

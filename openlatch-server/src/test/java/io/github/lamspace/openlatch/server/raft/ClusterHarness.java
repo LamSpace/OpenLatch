@@ -488,6 +488,7 @@ final class ClusterHarness implements AutoCloseable {
                 case LEASE_RENEW -> node.runtime.requestHandler().handleRenew(session, msg, ctx);
                 case LATCH_COUNT_DOWN -> node.runtime.requestHandler().handleLatchCountDown(session, msg, ctx);
                 case LATCH_AWAIT -> node.runtime.requestHandler().handleLatchAwait(session, msg, ctx);
+                case ATOMIC_OP -> node.runtime.requestHandler().handleAtomicOp(session, msg, ctx);
                 default -> throw new IllegalArgumentException("not a write: " + msg.getType());
             }
             return awaitOutbound(10_000);

@@ -82,8 +82,8 @@ class RequestMultiplexerTest {
         multiplexer.send(acquireBuilder(), 1000);
         Envelope out = channel.readOutbound();
         assertThat(out).isNotNull();
-        // v3：出站信封固定携带协议版本 3。
-        assertThat(out.getProtocolVersion()).isEqualTo(3);
+        // v4：出站信封固定携带协议版本 4。
+        assertThat(out.getProtocolVersion()).isEqualTo(4);
         assertThat(out.getRequestId()).isEqualTo(1);
 
         multiplexer.send(acquireBuilder(), 1000);

@@ -54,8 +54,8 @@ import java.util.function.Supplier;
  */
 public final class RequestMultiplexer {
 
-    /** v3 协议版本，业务出站信封固定携带（服务端应答回显此版本）。 */
-    private static final int PROTOCOL_VERSION = 3;
+    /** v4 协议版本，业务出站信封固定携带（服务端应答回显此版本）。 */
+    private static final int PROTOCOL_VERSION = 4;
 
     /** 挂起请求表：requestId → (future, 超时任务)。 */
     private final ConcurrentMap<Long, PendingRequest> inflight = new ConcurrentHashMap<>();

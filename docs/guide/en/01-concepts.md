@@ -84,6 +84,28 @@ acquisition as "may be invalidated by failover".
 Synchronous APIs never block forever; async APIs (`lockAsync`/`tryLockAsync`/`acquireAsync`/
 `releaseAsync`) express the same failures as exceptionally-completed futures.
 
+## 7. Atomic variables and version stamps
+
+`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean` (protocol v4) are the library's only
+**non-lock** coordination primitives: a shared mutable cell inside the replicated state.
+The semantic differences from locks must be known item by item:
+
+- **The value has no owner** — it does not belong to any `(session, thread)`. Creator death
+  or session timeout never rolls it back or zeroes it; the value lives as long as the key.
+- **Every operation is a network round-trip** (reads included). Reads are not free memory
+  semantics; write replies carry `(value, version)` so read-modify-write should be one
+  stamped CAS instead of a read plus a write.
+- **Version stamp**: every successful value-changing write bumps it by exactly 1 (GET and
+  missed CAS do not). It is the sole basis for timeout re-judgement and ABA elimination —
+  `compareAndSetStamped(expectedValue, expectedVersion, update)` is the ABA-free form;
+  the JDK-shaped `compareAndSet(value, value)` still suffers value rebound.
+- **A timeout means an indeterminate outcome**: the SDK automatically retries with the
+  **same op sequence** and the server's per-key dedup slot guarantees no double apply; if
+  the session switched mid-retry the SDK aborts instead — re-check with `getStamped()`,
+  never blindly retry a different value.
+- **Entries are never reclaimed**: there is no delete; govern key cardinality yourself.
+- Overflow matches the JDK (wrap within long/int32 domains; boolean restricted to {0,1}).
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -94,6 +116,7 @@ Synchronous APIs never block forever; async APIs (`lockAsync`/`tryLockAsync`/`ac
 | Fair lock | ✅ | explicit fairness promise, otherwise equal to reentrant |
 | Semaphore | — | N-permit gate; releasing more than held throws `IllegalMonitorStateException` |
 | Count-down latch | — | one-shot: `init` fixes total, `countDown` to zero releases all `await`s; entry lives until node restart |
+| Atomic variables | — | value has no owner (death never rolls back); every write bumps the version stamp by 1; ABA only eliminated by `*Stamped` forms; entries never reclaimed (v4) |
 
 ## Next
 

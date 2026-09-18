@@ -11,6 +11,7 @@ enum RaftEntryType
   LEASE_EXPIRE_ENTRY 6
   NOOP 7
   LATCH_COUNT_DOWN_ENTRY 8
+  ATOMIC_OP_ENTRY 9
 enum ApplyStatus
   APPLY_STATUS_UNKNOWN 0
   OK 1
@@ -42,6 +43,10 @@ message RenewPayload
 message LatchCountDownPayload
   session_id 1
   request 2
+message AtomicOpPayload
+  session_id 1
+  request_id 2
+  request 3
 message ExpirePayload
   key 1
   lease_token 2
@@ -54,6 +59,10 @@ message ApplyResult
   fully_released 6
   freed_keys 7
   latch_remaining 8
+  atomic_applied 9
+  atomic_old_value 10
+  atomic_value 11
+  atomic_version 12
 message SnapshotHolder
   session_id 1
   thread_id 2
@@ -68,6 +77,15 @@ message SnapshotLock
   permits_total 7
   latch_total 8
   latch_count 9
+  atomic_initial 10
+  atomic_value 11
+  atomic_version 12
+  atomic_slot_session 13
+  atomic_slot_op_seq 14
+  atomic_slot_applied 15
+  atomic_slot_old_value 16
+  atomic_slot_value 17
+  atomic_slot_version 18
 message SnapshotState
   locks 1
   sessions 2

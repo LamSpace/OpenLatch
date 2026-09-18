@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import io.github.lamspace.openlatch.client.OAtomicLong;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
@@ -58,6 +59,8 @@ public final class BenchmarkMain {
     private static final int RESERVOIR = 32_768;
     /** 竞争档位（线程数）。 */
     private static final int[] CONTENDED_LEVELS = {16, 64};
+    /** 原子 CAS 争用档位（线程数）。 */
+    private static final int[] ATOMIC_CAS_LEVELS = {16};
 
     /**
      * 私有构造：入口类。
@@ -103,8 +106,38 @@ public final class BenchmarkMain {
                     latencies.get(i).add(r.latencies);
                 }
             }
+            // 原子相：热身 + 采样（写/读单线程 RTT 与吞吐；CAS 争用放大）。
+            runAtomicAdd(client, WARMUP_MS);
+            runAtomicGet(client, WARMUP_MS);
+            for (int level : ATOMIC_CAS_LEVELS) {
+                runAtomicCasContended(client, level, WARMUP_MS);
+            }
+            List<long[]> addThroughput = new ArrayList<>();
+            List<double[]> addLatencies = new ArrayList<>();
+            List<long[]> getThroughput = new ArrayList<>();
+            List<double[]> getLatencies = new ArrayList<>();
+            List<List<long[]>> casThroughput = new ArrayList<>();
+            List<List<double[]>> casLatencies = new ArrayList<>();
+            for (int level : ATOMIC_CAS_LEVELS) {
+                casThroughput.add(new ArrayList<>());
+                casLatencies.add(new ArrayList<>());
+            }
+            for (int b = 0; b < BATCHES; b++) {
+                Result add = runAtomicAdd(client, SAMPLE_MS);
+                addThroughput.add(new long[] {add.opsPerSec});
+                addLatencies.add(add.latencies);
+                Result get = runAtomicGet(client, SAMPLE_MS);
+                getThroughput.add(new long[] {get.opsPerSec});
+                getLatencies.add(get.latencies);
+                for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+                    Result r = runAtomicCasContended(client, ATOMIC_CAS_LEVELS[i], SAMPLE_MS);
+                    casThroughput.get(i).add(new long[] {r.opsPerSec});
+                    casLatencies.get(i).add(r.latencies);
+                }
+            }
             String report = renderReport(uncThroughput, uncLatencyBatches,
-                    contThroughput, latencies);
+                    contThroughput, latencies, addThroughput, addLatencies,
+                    getThroughput, getLatencies, casThroughput, casLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -211,6 +244,130 @@ public final class BenchmarkMain {
                 f.get(1, TimeUnit.SECONDS);
             } catch (Exception e) {
                 throw new IllegalStateException("bench worker failed", e);
+            }
+        }
+        double[] merged = mergeSorted(reservoirs);
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis), merged);
+    }
+
+    /**
+     * 原子写往返：单线程对同 key {@code addAndGet(1)} 循环——度量写路径
+     * （含 Raft 提交与去重槽推进）的 RTT 与吞吐。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runAtomicAdd(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OAtomicLong counter = client.newAtomicLong("bench:atomic:add");
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            counter.addAndGet(1);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 原子读往返：单线程 {@code get()} 循环——度量 GET 经 Raft 的读数路径
+     * （v4 裁决：读亦线性一致，代价是每读一次提交）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runAtomicGet(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OAtomicLong counter = client.newAtomicLong("bench:atomic:get");
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            counter.get();
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 原子 CAS 争用：N 线程对同 key 循环"读 stamped → 带版本 CAS 加一"，
+     * 直至落值成功——延迟列为<b>单次成功的完整耗时</b>（含重试轮次），
+     * 吞吐为跨线程合并的成功计数，度量争用放大。
+     *
+     * @param client  客户端
+     * @param threads 并发线程数
+     * @param millis  采样时长
+     * @return 结果（合并样本）
+     * @throws InterruptedException 等待被打断
+     */
+    private static Result runAtomicCasContended(OpenLatchClient client, int threads, long millis)
+            throws InterruptedException {
+        OAtomicLong counter = client.newAtomicLong("bench:atomic:cas:" + threads);
+        AtomicLong ops = new AtomicLong();
+        Reservoir[] reservoirs = new Reservoir[threads];
+        for (int i = 0; i < threads; i++) {
+            reservoirs[i] = new Reservoir();
+        }
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            futures.add(pool.submit(() -> {
+                ready.countDown();
+                try {
+                    go.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                long deadline2 = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+                long localOps = 0;
+                while (System.nanoTime() < deadline2) {
+                    long start = System.nanoTime();
+                    try {
+                        while (!counter.compareAndSetStamped(
+                                counter.getStamped().value(),
+                                counter.getVersion(),
+                                // 读后加一：版本不符即重试（服务端裁决）。
+                                counter.get() + 1)) {
+                            if (System.nanoTime() >= deadline2) {
+                                break;
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    reservoirs[idx].record(System.nanoTime() - start);
+                    localOps++;
+                }
+                ops.addAndGet(localOps);
+            }));
+        }
+        ready.await(10, TimeUnit.SECONDS);
+        go.countDown();
+        pool.shutdown();
+        if (!pool.awaitTermination(120, TimeUnit.SECONDS)) {
+            pool.shutdownNow();
+        }
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(1, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new IllegalStateException("atomic bench worker failed", e);
             }
         }
         double[] merged = mergeSorted(reservoirs);
@@ -363,12 +520,24 @@ public final class BenchmarkMain {
      * @param uncLatencyBatches 无竞争往返延迟各批样本
      * @param contThroughput 各竞争档位吞吐
      * @param latencies      各竞争档位延迟样本批次
+     * @param addThroughput  原子写吞吐各批
+     * @param addLatencies   原子写延迟各批样本
+     * @param getThroughput  原子读吞吐各批
+     * @param getLatencies   原子读延迟各批样本
+     * @param casThroughput  原子 CAS 争用各档位吞吐
+     * @param casLatencies   原子 CAS 争用各档位延迟样本批次
      * @return Markdown 文本
      */
     private static String renderReport(List<long[]> uncThroughput,
                                        List<double[]> uncLatencyBatches,
                                        List<List<long[]>> contThroughput,
-                                       List<List<double[]>> latencies) {
+                                       List<List<double[]>> latencies,
+                                       List<long[]> addThroughput,
+                                       List<double[]> addLatencies,
+                                       List<long[]> getThroughput,
+                                       List<double[]> getLatencies,
+                                       List<List<long[]>> casThroughput,
+                                       List<List<double[]>> casLatencies) {
         StringBuilder sb = new StringBuilder();
         sb.append("# OpenLatch 基准基线\n\n");
         sb.append("生成：").append(java.time.LocalDate.now())
@@ -399,7 +568,21 @@ public final class BenchmarkMain {
                     .append(" | ").append(fmt(medianQuantile(latencies.get(i), 0.99)))
                     .append(" |\n");
         }
-        sb.append("\n> 竞争场景延迟列为**授予延迟**（发起到授予，含排队）。")
+        sb.append("| 原子 addAndGet（写 RTT，含提交） | ").append(medianOps(addThroughput))
+                .append(" | ").append(fmt(medianQuantile(addLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(addLatencies, 0.99))).append(" |\n");
+        sb.append("| 原子 get（读 RTT，经 Raft） | ").append(medianOps(getThroughput))
+                .append(" | ").append(fmt(medianQuantile(getLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(getLatencies, 0.99))).append(" |\n");
+        for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+            sb.append("| ").append(ATOMIC_CAS_LEVELS[i])
+                    .append(" 线程争用 CAS 加一 | ").append(medianOps(casThroughput.get(i)))
+                    .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.5)))
+                    .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.99)))
+                    .append(" |\n");
+        }
+        sb.append("\n> 竞争场景延迟列为**授予延迟**（发起到授予，含排队）；")
+                .append("CAS 争用场景为**单次成功的完整耗时**（含重试轮次）。")
                 .append("本基线仅作防退化参考，不作发布门槛。\n");
         return sb.toString();
     }

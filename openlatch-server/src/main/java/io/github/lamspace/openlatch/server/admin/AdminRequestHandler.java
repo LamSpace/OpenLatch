@@ -219,7 +219,7 @@ public final class AdminRequestHandler {
     // ===================== ADMIN_SUMMARY =====================
 
     /**
-     * 装配摘要应答：聚合读数单机取 {@code stats()} + 屏障条目计数、
+     * 装配摘要应答：聚合读数单机取 {@code stats()} + 屏障/原子条目计数、
      * 集群取影子表投影计数；角色/会话数按节点视角如实呈现。
      *
      * @param msg 请求信封
@@ -234,25 +234,32 @@ public final class AdminRequestHandler {
         if (cluster == null) {
             CoreStats st = standaloneCore.stats();
             int latchEntries = 0;
+            int atomicEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
+                } else if (k.family() == KeyFamily.ATOMIC) {
+                    atomicEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
-                    .setLatchEntries(latchEntries).setTotalWaiters(st.totalWaiters())
+                    .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
+                    .setTotalWaiters(st.totalWaiters())
                     .setNodeRole("SINGLE");
         } else {
             ShadowTable shadow = cluster.core().shadow();
             int[] held = shadow.heldFamilyCounts();
             int latchEntries = 0;
+            int atomicEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
+                } else if (ShadowTable.isAtomicType(v.lockType())) {
+                    atomicEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
-                    .setLatchEntries(latchEntries)
+                    .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
                     .setNodeRole(currentRole());
         }
@@ -306,12 +313,17 @@ public final class AdminRequestHandler {
         if (cluster == null) {
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (matches(k.key(), prefix)) {
-                    rows.add(AdminKeyInfo.newBuilder()
+                    AdminKeyInfo.Builder row = AdminKeyInfo.newBuilder()
                             .setKey(k.key()).setFamily(familyName(k.family()))
                             .setHolders(k.holders().size())
                             .setRemainingLeaseMs(k.remainingLeaseMs())
-                            .setWaiterCount(k.waiters().size())
-                            .build());
+                            .setWaiterCount(k.waiters().size());
+                    if (k.family() == KeyFamily.ATOMIC) {
+                        // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
+                        row.setAtomicKind(atomicKindNameOfCore(k.atomicKind()))
+                                .setAtomicValue(k.atomicValue());
+                    }
+                    rows.add(row.build());
                 }
             }
         } else {
@@ -323,13 +335,17 @@ public final class AdminRequestHandler {
                     continue;
                 }
                 ShadowTable.AdminEntryView v = en.getValue();
-                rows.add(AdminKeyInfo.newBuilder()
+                AdminKeyInfo.Builder row = AdminKeyInfo.newBuilder()
                         .setKey(en.getKey()).setFamily(familyNameOfLockType(v.lockType()))
                         .setHolders(v.holders().size())
                         .setRemainingLeaseMs(v.leaseToken() != 0
                                 ? Math.max(0, v.expiresAtMs() - now) : 0)
-                        .setWaiterCount(leader ? cluster.waitQueue().waitCount(en.getKey()) : 0)
-                        .build());
+                        .setWaiterCount(leader ? cluster.waitQueue().waitCount(en.getKey()) : 0);
+                if (ShadowTable.isAtomicType(v.lockType())) {
+                    row.setAtomicKind(atomicKindNameOf(v.lockType()))
+                            .setAtomicValue(v.atomicValue());
+                }
+                rows.add(row.build());
             }
         }
         rows.sort(Comparator.comparing(AdminKeyInfo::getKey));
@@ -384,7 +400,11 @@ public final class AdminRequestHandler {
                     .setPermitsTotal(snap.permitsTotal())
                     .setPermitsAvailable(snap.permitsAvailable())
                     .setLatchTotal(snap.latchTotal())
-                    .setLatchRemaining(snap.latchRemaining());
+                    .setLatchRemaining(snap.latchRemaining())
+                    .setAtomicKind(atomicKindNameOfCore(snap.atomicKind()))
+                    .setAtomicInitial(snap.atomicInitial())
+                    .setAtomicValue(snap.atomicValue())
+                    .setAtomicVersion(snap.atomicVersion());
             for (CoreInspection.HolderSnapshot h : snap.holders()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.sessionId()).setThreadId(h.threadId())
@@ -409,7 +429,11 @@ public final class AdminRequestHandler {
                     .setRemainingLeaseMs(v.leaseToken() != 0
                             ? Math.max(0, v.expiresAtMs() - now) : 0)
                     .setPermitsTotal(v.permitsTotal()).setPermitsAvailable(v.permitsAvailable())
-                    .setLatchTotal(v.latchTotal()).setLatchRemaining(v.latchCount());
+                    .setLatchTotal(v.latchTotal()).setLatchRemaining(v.latchCount())
+                    .setAtomicKind(atomicKindNameOf(v.lockType()))
+                    .setAtomicInitial(v.atomicInitial())
+                    .setAtomicValue(v.atomicValue())
+                    .setAtomicVersion(v.atomicVersion());
             for (Map.Entry<ShadowTable.Holder, Integer> h : v.holders().entrySet()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.getKey().sessionId()).setThreadId(h.getKey().threadId())
@@ -493,13 +517,14 @@ public final class AdminRequestHandler {
      * 家族词表（与指标 {@code locks.held} 的 type 标签同一命名点口径）。
      *
      * @param family 条目家族
-     * @return {@code lock}/{@code semaphore}/{@code latch}
+     * @return {@code lock}/{@code semaphore}/{@code latch}/{@code atomic}
      */
     private static String familyName(KeyFamily family) {
         return switch (family) {
             case LOCK -> "lock";
             case SEMAPHORE -> "semaphore";
             case LATCH -> "latch";
+            case ATOMIC -> "atomic";
         };
     }
 
@@ -516,7 +541,48 @@ public final class AdminRequestHandler {
         if (lockTypeValue == LockType.LOCK_TYPE_LATCH_VALUE) {
             return "latch";
         }
+        if (ShadowTable.isAtomicType(lockTypeValue)) {
+            return "atomic";
+        }
         return "lock";
+    }
+
+    /**
+     * 协议形态数值 → 原子形态词表（管理观察面：long/integer/boolean；
+     * 非原子数值回空串——proto3 缺省即"不适用"）。
+     *
+     * @param lockTypeValue {@code LockType} 数值
+     * @return 形态词或空串
+     */
+    private static String atomicKindNameOf(int lockTypeValue) {
+        if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_LONG_VALUE) {
+            return "long";
+        }
+        if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_INTEGER_VALUE) {
+            return "integer";
+        }
+        if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_BOOLEAN_VALUE) {
+            return "boolean";
+        }
+        return "";
+    }
+
+    /**
+     * core 形态枚举 → 原子形态词表（单机观察侧；null=非原子条目回空串）。
+     *
+     * @param kind core 形态判别
+     * @return 形态词或空串
+     */
+    private static String atomicKindNameOfCore(io.github.lamspace.openlatch.core.LockType kind) {
+        if (kind == null) {
+            return "";
+        }
+        return switch (kind) {
+            case ATOMIC_LONG -> "long";
+            case ATOMIC_INTEGER -> "integer";
+            case ATOMIC_BOOLEAN -> "boolean";
+            default -> "";
+        };
     }
 
     /**

@@ -6,6 +6,7 @@ import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
 import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
+import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
@@ -98,6 +99,24 @@ final class RaftEntrySamples {
                         .setSessionId(sessionId)
                         .setRequest(LatchCountDownRequest.newBuilder()
                                 .setKey(key).setCount(count).setTotal(total))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** 原子操作条目（v4；GET 传 opSeq=0）。 */
+    static RaftLogEntry atomic(long sessionId, long requestId, String key,
+                               io.github.lamspace.openlatch.protocol.AtomicOp op,
+                               LockType kind, long operand, long expected, long expectedVersion,
+                               long initialValue, long opSeq, long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.ATOMIC_OP_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(AtomicOpPayload.newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId)
+                        .setRequest(io.github.lamspace.openlatch.protocol.AtomicOpRequest.newBuilder()
+                                .setKey(key).setOp(op).setLockType(kind)
+                                .setOperand(operand).setExpected(expected)
+                                .setExpectedVersion(expectedVersion).setInitialValue(initialValue)
+                                .setOpSeq(opSeq))
                         .build().toByteString())
                 .build();
     }

@@ -45,9 +45,10 @@ public record CoreInspection(
         long sampledAtMs) {
 
     /**
-     * 单 key 条目的明细快照——三家族共用一个值形态，家族外字段取零值
+     * 单 key 条目的明细快照——四家族共用一个值形态，家族外字段取零值
      * （锁家族无许可/屏障字段，Semaphore 家族无屏障字段，Latch 家族无租约
-     * 与持有者）。不可变值对象。
+     * 与持有者，ATOMIC 家族无租约/持有者/等待者、仅原子四字段有效）。
+     * 不可变值对象。
      *
      * @param key              锁键
      * @param family           条目家族
@@ -65,6 +66,10 @@ public record CoreInspection(
      * @param latchTotal       Latch 定型初始计数（非该家族为 0）
      * @param latchRemaining   Latch 当前剩余计数（非该家族为 0）
      * @param latchParticipants Latch 参与会话集（非该家族为空表）
+     * @param atomicKind       ATOMIC 形态判别（非该家族为 {@code null}）
+     * @param atomicInitial    ATOMIC 定型初值（非该家族为 0）
+     * @param atomicValue      ATOMIC 当前值（非该家族为 0）
+     * @param atomicVersion    ATOMIC 版本戳（非该家族为 0）
      */
     public record KeySnapshot(
             String key,
@@ -80,7 +85,11 @@ public record CoreInspection(
             int permitsAvailable,
             long latchTotal,
             long latchRemaining,
-            List<Long> latchParticipants) {
+            List<Long> latchParticipants,
+            io.github.lamspace.openlatch.core.LockType atomicKind,
+            long atomicInitial,
+            long atomicValue,
+            long atomicVersion) {
     }
 
     /**

@@ -59,5 +59,16 @@ public enum LockType {
      * 操作经门面独立入口（{@code countDown}/{@code latchAwait}）进入
      * {@code LatchEntry}，不经获取/释放/续租命令通道。
      */
-    LATCH
+    LATCH,
+    /**
+     * 原子 long 形态：非锁家族类型，仅作 key 定型与操作判别——
+     * 原子操作经门面独立入口（{@code atomicOp}）进入 {@code AtomicEntry}，
+     * 不经获取/释放/续租命令通道；ACQUIRE 携带本类型属请求形状错误，
+     * 入口即拒。
+     */
+    ATOMIC_LONG,
+    /** 原子 int 形态：值落 int32 域（溢出 wrap），其余语义与 {@link #ATOMIC_LONG} 同构。 */
+    ATOMIC_INTEGER,
+    /** 原子 boolean 形态：值域 {0,1}（0=false、1=true），其余语义与 {@link #ATOMIC_LONG} 同构。 */
+    ATOMIC_BOOLEAN
 }

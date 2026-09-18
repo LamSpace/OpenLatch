@@ -457,7 +457,8 @@ public final class SemaphoreEntry implements KeyEntry {
         return new CoreInspection.KeySnapshot(key, KeyFamily.SEMAPHORE, false,
                 leaseToken, leaseMs, leaseExpiresAtMs, remaining,
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
-                permitsTotal, permitsAvailable, 0, 0, List.of());
+                permitsTotal, permitsAvailable, 0, 0, List.of(),
+                null, 0, 0, 0);
     }
 
     /**
