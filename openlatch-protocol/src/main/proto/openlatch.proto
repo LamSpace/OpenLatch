@@ -21,6 +21,7 @@ enum MessageType {
   ADMIN_LIST_KEYS     = 11; // v3：key 列表（分页/前缀过滤，只读）
   ADMIN_KEY_DETAIL    = 12; // v3：单 key 明细（持有者/等待队列/租约）
   ADMIN_LIST_SESSIONS = 13; // v3：本节点接入会话列表
+  ATOMIC_OP        = 14;   // v4：原子变量操作（独立消息对，不走 ACQUIRE）
 }
 
 // 锁类型。
@@ -32,6 +33,9 @@ enum LockType {
   LOCK_TYPE_FAIR      = 4;   // v3：显式公平承诺互斥（语义等价 REENTRANT，仅对 v3 会话开放）
   LOCK_TYPE_SEMAPHORE = 5;   // v3：许可门闸（仅对 v3 会话开放，详设 §2.3）
   LOCK_TYPE_LATCH     = 6;   // v3：倒计数屏障定型判别（屏障操作经 LATCH_* 消息，详设 §2.4）
+  LOCK_TYPE_ATOMIC_LONG    = 7;  // v4：原子 long 形态判别（仅 ATOMIC_OP 消息携带）
+  LOCK_TYPE_ATOMIC_INTEGER = 8;  // v4：原子 int 形态判别（int32 域 wrap）
+  LOCK_TYPE_ATOMIC_BOOLEAN = 9;  // v4：原子 boolean 形态判别（值域 {0,1}）
 }
 
 // 状态码。
@@ -48,6 +52,17 @@ enum StatusCode {
   INVALID_REQUEST = 9;   // 参数非法（如 lease 越界）
   NOT_LEADER      = 10;  // v2 启用（Phase 1 预留）：本节点非当值 Leader 拒绝写请求，随附 leader 提示
   INTERNAL_ERROR  = 11;
+}
+
+// v4：原子变量操作类型（ATOMIC_OP_REQUEST.op）。GET 为读数零迁移；
+// CAS 家族失败以 applied=false 表达（OK 应答，非错误码）。
+enum AtomicOp {
+  ATOMIC_GET         = 0;  // 读 (value, version)，不建条目、不推版本
+  ATOMIC_SET         = 1;  // 落 operand 值，返回旧值
+  ATOMIC_GET_AND_SET = 2;  // 同 SET（应答同形，语义别名）
+  ATOMIC_ADD         = 3;  // value += operand（溢出按值域 wrap）；expected_version > 0 为条件加断言
+  ATOMIC_CAS         = 4;  // 值 CAS：expected 相符才落 operand
+  ATOMIC_CAS_STAMPED = 5;  // 值+版本双 CAS（ABA-free）：expected 与 expected_version 皆符才落 operand
 }
 
 // 统一封装。request_id 在单条连接内唯一；服务端推送（AWAIT_NOTIFY）时为 0。
@@ -78,6 +93,8 @@ message Envelope {
     AdminKeyDetailResponse    admin_key_detail_response   = 29;
     AdminListSessionsRequest  admin_list_sessions_request  = 30;
     AdminListSessionsResponse admin_list_sessions_response = 31;
+    AtomicOpRequest  atomic_op_request  = 32;  // v4
+    AtomicOpResponse atomic_op_response = 33;  // v4
   }
 }
 
@@ -217,6 +234,7 @@ message AdminSummaryResponse {
   string     node_role        = 7;  // SINGLE/LEADER/FOLLOWER/UNKNOWN
   int64      uptime_ms        = 8;  // 自启动运行时长（应答时刻）
   string     version          = 9;  // 服务端版本
+  int32      atomic_entries   = 10; // v4：ATOMIC 条目数（无持有语义，单列，判例 latch_entries）
 }
 
 message AdminListKeysRequest {
@@ -229,10 +247,12 @@ message AdminListKeysRequest {
 // ADMIN_LIST_KEYS 列表行。holders 为持有者计数（明细见 ADMIN_KEY_DETAIL）。
 message AdminKeyInfo {
   string key                 = 1;
-  string family              = 2;  // lock/semaphore/latch
-  int32  holders             = 3;  // 持有者数（Latch 恒 0）
+  string family              = 2;  // lock/semaphore/latch/atomic
+  int32  holders             = 3;  // 持有者数（Latch/ATOMIC 恒 0）
   int64  remaining_lease_ms  = 4;  // 剩余租约（受理节点时钟；未持有为 0）
   int32  waiter_count        = 5;  // 等待者数（非 Leader 视角恒 0）
+  string atomic_kind         = 6;  // v4：long/integer/boolean（非 ATOMIC 恒空）
+  sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0）
 }
 
 message AdminListKeysResponse {
@@ -279,6 +299,11 @@ message AdminKeyDetailResponse {
   int64  latch_total          = 9;   // LATCH 专属，其余 0
   int64  latch_remaining      = 10;  // LATCH 专属，其余 0（-1 恒不出现：未命中走 status）
   bool   wait_queue_leader_only = 11; // true=本节点非 Leader，等待队列区无数据
+  // v4：ATOMIC 专属四字段（其余家族恒空/0；kind 取 long/integer/boolean 词表）。
+  string atomic_kind     = 12;
+  int64  atomic_initial  = 13;
+  sint64 atomic_value    = 14;
+  int64  atomic_version  = 15;
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -297,4 +322,33 @@ message AdminListSessionsRequest {
 message AdminListSessionsResponse {
   StatusCode status = 1;
   repeated AdminSessionInfo sessions = 2;
+}
+
+// v4：原子变量操作请求（ATOMIC_OP）。lock_type 取三原子形态之一作形态判别；
+// op 之外的操作数按 op 消费：operand 为 SET/GET_AND_SET 新值、ADD 增量、
+// CAS/CAS_STAMPED 更新值；expected 为 CAS/CAS_STAMPED 期望值；
+// expected_version 仅在 ADD（条件加）与 CAS_STAMPED 上有非零意义，> 0 为版本
+// 断言、0 为不主张；initial_value 非零 = 建条目初值主张（判例：Semaphore/Latch
+// 总量非零主张），0 为不主张；op_seq 为会话内单调写序号（GET 填 0 不参与去重）。
+message AtomicOpRequest {
+  string   key              = 1;
+  AtomicOp op               = 2;
+  LockType lock_type        = 3;
+  sint64   operand          = 4;
+  sint64   expected         = 5;
+  sint64   expected_version = 6;
+  sint64   initial_value    = 7;
+  uint64   op_seq           = 8;
+}
+
+// v4：原子变量操作应答。拒绝态四元组为零值形；GET 的 applied 恒 false，
+// 读数即 (value, version)；CAS 家族成败由 applied 承载（status 恒 OK，
+// 与协议"未落值非错误"口径一致）。
+message AtomicOpResponse {
+  StatusCode status  = 1;
+  AtomicOp   op      = 2;
+  bool       applied = 3;
+  sint64     old_value = 4;
+  sint64     value     = 5;
+  sint64     version   = 6;
 }

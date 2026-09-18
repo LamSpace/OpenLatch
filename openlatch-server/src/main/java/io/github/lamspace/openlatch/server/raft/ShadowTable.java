@@ -101,10 +101,14 @@ public final class ShadowTable {
      * @param latchTotal       Latch 定型初始计数（其余家族 0）
      * @param latchCount       Latch 当前剩余计数（其余家族 0）
      * @param latchParticipants Latch 参与逻辑会话集（其余家族空）
+     * @param atomicInitial     ATOMIC 定型初值（其余家族 0）
+     * @param atomicValue       ATOMIC 当前值（其余家族 0）
+     * @param atomicVersion     ATOMIC 版本戳（其余家族 0）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
-                                 long latchTotal, long latchCount, Set<Long> latchParticipants) { }
+                                 long latchTotal, long latchCount, Set<Long> latchParticipants,
+                                 long atomicInitial, long atomicValue, long atomicVersion) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -128,6 +132,24 @@ public final class ShadowTable {
         private long latchCount;
         /** LATCH 条目：参与会话集（逻辑 sid，插入序；其余家族空）。 */
         private final LinkedHashSet<Long> latchParticipants = new LinkedHashSet<>();
+        /** ATOMIC 条目：定型初值（其余家族 0）。 */
+        private long atomicInitial;
+        /** ATOMIC 条目：当前值（其余家族 0）。 */
+        private long atomicValue;
+        /** ATOMIC 条目：版本戳（其余家族 0）。 */
+        private long atomicVersion;
+        /** ATOMIC 条目：去重槽会话（逻辑 sid，0=空槽；其余家族 0）。 */
+        private long atomicSlotSession;
+        /** ATOMIC 条目：去重槽 op_seq（空槽恒 0；其余家族 0）。 */
+        private long atomicSlotOpSeq;
+        /** ATOMIC 条目：槽应答 applied（其余家族 false）。 */
+        private boolean atomicSlotApplied;
+        /** ATOMIC 条目：槽应答 oldValue（其余家族 0）。 */
+        private long atomicSlotOldValue;
+        /** ATOMIC 条目：槽应答 value（其余家族 0）。 */
+        private long atomicSlotValue;
+        /** ATOMIC 条目：槽应答 version（其余家族 0）。 */
+        private long atomicSlotVersion;
 
         /**
          * 构造复制态条目。
@@ -264,7 +286,8 @@ public final class ShadowTable {
     private static AdminEntryView viewOf(SLock l) {
         return new AdminEntryView(l.lockType, l.leaseToken, l.expiresAtMs, l.leaseMs,
                 Map.copyOf(l.holders), l.permitsTotal, l.permitsAvailable,
-                l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants));
+                l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants),
+                l.atomicInitial, l.atomicValue, l.atomicVersion);
     }
 
     /**
@@ -366,6 +389,12 @@ public final class ShadowTable {
     public List<String> expireUpTo(long entryTimeMs) {
         List<String> freed = new ArrayList<>();
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
+            if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
+                    || isAtomicType(en.getValue().lockType)) {
+                // 无租约家族（Latch/ATOMIC）到期时刻恒 0——非"已到期"信号，
+                // 永不由到期清扫回收（一次性护栏与常驻值语义各自承载）。
+                continue;
+            }
             if (en.getValue().expiresAtMs <= entryTimeMs) {
                 freed.add(en.getKey());
             }
@@ -396,6 +425,11 @@ public final class ShadowTable {
                 if (l.latchParticipants.remove(sessionId)) {
                     adminView.put(en.getKey(), viewOf(l));
                 }
+                continue;
+            }
+            if (isAtomicType(l.lockType)) {
+                // 原子条目存续与一切会话无关：值不绑定归属，
+                // 会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
                 continue;
             }
             for (Map.Entry<Holder, Integer> hh : l.holders.entrySet()) {
@@ -493,6 +527,16 @@ public final class ShadowTable {
                 lb.setPermitsTotal(l.permitsTotal);
             } else if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
                 lb.setLatchTotal(l.latchTotal).setLatchCount(l.latchCount);
+            } else if (isAtomicType(l.lockType)) {
+                // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
+                lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
+                        .setAtomicVersion(l.atomicVersion)
+                        .setAtomicSlotSession(l.atomicSlotSession)
+                        .setAtomicSlotOpSeq(l.atomicSlotOpSeq)
+                        .setAtomicSlotApplied(l.atomicSlotApplied)
+                        .setAtomicSlotOldValue(l.atomicSlotOldValue)
+                        .setAtomicSlotValue(l.atomicSlotValue)
+                        .setAtomicSlotVersion(l.atomicSlotVersion);
             }
             b.addLocks(lb);
         }
@@ -529,6 +573,18 @@ public final class ShadowTable {
                 locks.put(l.getKey(), sl);
                 heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
                         Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
+            } else if (isAtomicType(l.getLockTypeValue())) {
+                sl.atomicInitial = l.getAtomicInitial();
+                sl.atomicValue = l.getAtomicValue();
+                sl.atomicVersion = l.getAtomicVersion();
+                sl.atomicSlotSession = l.getAtomicSlotSession();
+                sl.atomicSlotOpSeq = l.getAtomicSlotOpSeq();
+                sl.atomicSlotApplied = l.getAtomicSlotApplied();
+                sl.atomicSlotOldValue = l.getAtomicSlotOldValue();
+                sl.atomicSlotValue = l.getAtomicSlotValue();
+                sl.atomicSlotVersion = l.getAtomicSlotVersion();
+                // 常驻条目：不入 heldIndex（无持有语义），仅入表与观察视图。
+                locks.put(l.getKey(), sl);
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
                 sl.latchTotal = l.getLatchTotal();
                 sl.latchCount = l.getLatchCount();
@@ -591,6 +647,66 @@ public final class ShadowTable {
         }
         l.latchCount = remaining;
         l.latchParticipants.add(sessionId);
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否原子形态（7/8/9，含装载态）。
+     *
+     * @param lockTypeValue 协议数值
+     * @return 原子形态为 {@code true}
+     */
+    public static boolean isAtomicType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_ATOMIC_LONG_VALUE
+                || lockTypeValue == LockType.LOCK_TYPE_ATOMIC_INTEGER_VALUE
+                || lockTypeValue == LockType.LOCK_TYPE_ATOMIC_BOOLEAN_VALUE;
+    }
+
+    /**
+     * 原子操作应用点镜像（ATOMIC_OP_ENTRY 的 GRANTED 落点）：条目不存在且
+     * 本条为写操作时按请求初值主张镜像创建（与引擎懒建条件严格一致——
+     * GET 不建、镜像亦不建）；写操作刷新值/版本戳并覆盖去重槽（含
+     * {@code applied=false} 的 CAS 未命中应答——重发可判性随槽镜像存续，
+     * 快照与追赶据此复原）。家族误用与断言拒绝（回执非 OK）不经本方法，
+     * 镜像零扰动。
+     *
+     * @param key         原子变量键
+     * @param kindValue   请求携带的协议形态数值（建镜像条目定型用）
+     * @param sessionId   逻辑会话 id（槽记录）
+     * @param opSeq       请求 op_seq（0=不参与去重，槽不更新）
+     * @param initialClaim 请求初值主张（建镜像时定格为定型初值）
+     * @param get         本条是否 GET 条目（零迁移，镜像不创建不刷新）
+     * @param applied     应答四元组 applied
+     * @param oldValue    应答四元组 oldValue
+     * @param value       应答四元组 value
+     * @param version     应答四元组 version
+     */
+    public void atomicApplied(String key, int kindValue, long sessionId, long opSeq,
+                              long initialClaim, boolean get, boolean applied, long oldValue,
+                              long value, long version) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            if (get) {
+                return; // GET 且条目缺席：引擎未建条目，镜像同样零扰动
+            }
+            l = new SLock(kindValue, 0, 0, 0);
+            l.atomicInitial = initialClaim;
+            locks.put(key, l);
+        }
+        if (get || l.lockType != kindValue) {
+            // GET 零迁移；形态与镜像定型不符（引擎已回互拒）——均零扰动、不重发布。
+            return;
+        }
+        l.atomicValue = value;
+        l.atomicVersion = version;
+        if (opSeq >= 1) {
+            l.atomicSlotSession = sessionId;
+            l.atomicSlotOpSeq = opSeq;
+            l.atomicSlotApplied = applied;
+            l.atomicSlotOldValue = oldValue;
+            l.atomicSlotValue = value;
+            l.atomicSlotVersion = version;
+        }
         adminView.put(key, viewOf(l));
     }
 

@@ -31,6 +31,12 @@ package io.github.lamspace.openlatch.core.result;
  * {@link #REJECT_QUEUE_FULL}，Semaphore 总量断言不成立 →
  * {@link #REJECT_SEMAPHORE_TOTAL}）。会话校验在预检与条目锁内各执行一次，
  * 两个检查点均返回 {@link #REJECT_SESSION}。
+ *
+ * <p><b>原子通道口径</b>：ATOMIC 家族的判定顺序为会话预检 → key 校验 →
+ * 家族/形态判定（{@link #REJECT_TYPE_MISMATCH}）→ 布尔值域检查
+ * （{@link #REJECT_ATOMIC_RANGE}）→ 初值断言（{@link #REJECT_ATOMIC_INIT}）→
+ * 去重槽重放或操作执行（结果恒 {@link #GRANTED}，CAS 家族成败由
+ * {@code applied} 承载、不占用本枚举判别位）。
  */
 public enum Outcome {
     /** 授予：携带租约凭证与实际租约。重入/快路径/队首重发命中均返回此值。 */
@@ -70,5 +76,18 @@ public enum Outcome {
      * 扣减/挂起），或既有屏障上非零主张与定型值不符；条目状态零扰动，
      * server 层映射协议 {@code INVALID_REQUEST}。
      */
-    REJECT_LATCH_TOTAL
+    REJECT_LATCH_TOTAL,
+    /**
+     * 拒绝：原子变量初值主张不成立——既有条目上非零 {@code initial_value}
+     * 与定型初值不符；条目状态零扰动，server 层映射协议
+     * {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
+     * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
+     */
+    REJECT_ATOMIC_INIT,
+    /**
+     * 拒绝：原子变量参数越出形态值域——布尔形态的落值/期望值不在
+     * {0,1}，或布尔形态携带 ADD 操作；条目状态零扰动，server 层
+     * 映射协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_ATOMIC_RANGE
 }

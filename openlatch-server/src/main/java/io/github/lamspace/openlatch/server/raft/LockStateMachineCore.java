@@ -20,15 +20,19 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.lamspace.openlatch.core.CoreConfig;
 import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.LockType;
+import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.AtomicOpResult;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
+import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
@@ -159,6 +163,7 @@ public final class LockStateMachineCore {
                     case LEASE_RENEW_ENTRY -> applyRenew(entry);
                     case LEASE_EXPIRE_ENTRY -> applyExpire(entry, t);
                     case LATCH_COUNT_DOWN_ENTRY -> applyLatchCountDown(entry);
+                    case ATOMIC_OP_ENTRY -> applyAtomicOp(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -381,8 +386,9 @@ public final class LockStateMachineCore {
 
     /**
      * 协议锁类型数值 → core 枚举（两侧枚举序对齐：0 REENTRANT / 1 SIMPLE /
-     * 2 READ / 3 WRITE / 4 FAIR）；越界回 {@code null}。新类型在进入本路径
-     * 前已被接入层 v3 门控拦截（握手中继/提案预检），此处仅保持映射完备。
+     * 2 READ / 3 WRITE / 4 FAIR / 5 SEMAPHORE / 6 LATCH / 7–9 原子形态）；
+     * 越界回 {@code null}。新类型在进入本路径前已被接入层版本门控拦截
+     * （握手中继/提案预检），此处仅保持映射完备。
      *
      * @param number 协议 {@code LockType} 数值
      * @return core 锁类型，越界为 {@code null}
@@ -447,6 +453,90 @@ public final class LockStateMachineCore {
             case REJECT_LATCH_TOTAL, REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
                     ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
             default -> error("unreachable latch countDown outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * ATOMIC_OP_ENTRY：引擎原子操作（形态互拒/值域/断言/去重全在引擎内，
+     * 应答四元组由应用结果导出——同槽重放在任何副本上得出逐位一致回执），
+     * OK 时镜像影子表（懒建与槽更新、GET 零迁移不建不刷）。家族误用、
+     * 初值断言与值域越界拒回 {@link ApplyStatus#INVALID_REQUEST}；
+     * CAS 家族"未落值"是 {@code OK + atomic_applied=false} 的有效读数。
+     *
+     * @param entry 条目（载荷为 {@link AtomicOpPayload}）
+     * @return 回执（OK 携带应答四元组）
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyAtomicOp(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        AtomicOpPayload p = AtomicOpPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        io.github.lamspace.openlatch.core.LockType kind =
+                toCoreAtomicKind(req.getLockType().getNumber());
+        AtomicOp op = toCoreAtomicOp(req.getOp());
+        if (kind == null || op == null) {
+            // 非原子形态或未知 op：形状非法（ACQUIRE 面类型不得进入本通道）。
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+        }
+        AtomicOpResult r = engine.atomicOp(new AtomicOpCommand(local, p.getRequestId(),
+                req.getKey(), kind, op, req.getOperand(), req.getExpected(),
+                req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                shadow.atomicApplied(req.getKey(), req.getLockType().getNumber(),
+                        p.getSessionId(), req.getOpSeq(), req.getInitialValue(),
+                        op == AtomicOp.GET, r.applied(), r.oldValue(), r.value(), r.version());
+                yield ApplyResult.newBuilder()
+                        .setStatus(ApplyStatus.OK)
+                        .setAtomicApplied(r.applied())
+                        .setAtomicOldValue(r.oldValue())
+                        .setAtomicValue(r.value())
+                        .setAtomicVersion(r.version())
+                        .build();
+            }
+            case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_TYPE_MISMATCH, REJECT_ATOMIC_INIT, REJECT_ATOMIC_RANGE,
+                    REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable atomic op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 协议形态数值 → core 原子形态；非三原子类型（0–6 与越界）回
+     * {@code null}（调用方以形状非法拒绝）。两侧枚举序对齐。
+     *
+     * @param number 协议 {@code LockType} 数值
+     * @return core 原子形态，非原子为 {@code null}
+     */
+    private static io.github.lamspace.openlatch.core.LockType toCoreAtomicKind(int number) {
+        return switch (number) {
+            case 7 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_LONG;
+            case 8 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_INTEGER;
+            case 9 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_BOOLEAN;
+            default -> null;
+        };
+    }
+
+    /**
+     * 协议 {@code AtomicOp} → core {@link AtomicOp}；未知数值回
+     * {@code null}（调用方以形状非法拒绝）。
+     *
+     * @param wireOp 协议操作枚举
+     * @return core 操作枚举，未知为 {@code null}
+     */
+    private static AtomicOp toCoreAtomicOp(io.github.lamspace.openlatch.protocol.AtomicOp wireOp) {
+        return switch (wireOp) {
+            case ATOMIC_GET -> AtomicOp.GET;
+            case ATOMIC_SET -> AtomicOp.SET;
+            case ATOMIC_GET_AND_SET -> AtomicOp.GET_AND_SET;
+            case ATOMIC_ADD -> AtomicOp.ADD;
+            case ATOMIC_CAS -> AtomicOp.CAS;
+            case ATOMIC_CAS_STAMPED -> AtomicOp.CAS_STAMPED;
+            default -> null;
         };
     }
 
@@ -568,9 +658,19 @@ public final class LockStateMachineCore {
                     }
                     holders.add(new CoreStateRestore.Holder(internal, h.getThreadId(), h.getCount()));
                 }
+                // v4：原子条目携状态组重建（值/版本戳/去重槽直写，断言不变量
+                // 在 CoreStateRestore.Entry 构造内复核）；其余家族状态组恒 null。
+                CoreStateRestore.AtomicState atomic = null;
+                if (ShadowTable.isAtomicType(l.getLockTypeValue())) {
+                    atomic = new CoreStateRestore.AtomicState(l.getAtomicInitial(),
+                            l.getAtomicValue(), l.getAtomicVersion(),
+                            l.getAtomicSlotSession(), l.getAtomicSlotOpSeq(),
+                            l.getAtomicSlotApplied(), l.getAtomicSlotOldValue(),
+                            l.getAtomicSlotValue(), l.getAtomicSlotVersion());
+                }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
-                        l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount()));
+                        l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(), atomic));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

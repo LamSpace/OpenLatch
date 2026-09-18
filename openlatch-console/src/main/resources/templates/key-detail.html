@@ -20,6 +20,8 @@
                       th:text="|（可用许可 ${r.value.permitsAvailable}/${r.value.permitsTotal}）|"></span>
                 <span th:if="${r.value.family == 'latch'}"
                       th:text="|（屏障计数 ${r.value.latchRemaining}/${r.value.latchTotal}）|"></span>
+                <span th:if="${r.value.family == 'atomic'}"
+                      th:text="|（形态 ${r.value.atomicKind} · 初值 ${r.value.atomicInitial} · 当前值 ${r.value.atomicValue} · 版本戳 ${r.value.atomicVersion}）|"></span>
             </div>
 
             <h3>持有者</h3>
@@ -31,7 +33,10 @@
                     <td th:text="${h.count}">0</td>
                     <td th:text="${h.role}">writer</td>
                 </tr>
-                <tr th:if="${r.value.holdersList.isEmpty()}"><td colspan="4" class="empty">无持有者</td></tr>
+                <tr th:if="${r.value.holdersList.isEmpty()}">
+                    <td colspan="4" class="empty"
+                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : '无持有者'}">无持有者</td>
+                </tr>
             </table>
 
             <h3>等待队列</h3>
@@ -49,7 +54,10 @@
                         <td th:text="${w.waitedMs} + 'ms'">0ms</td>
                         <td th:text="${w.notified} ? '是' : '否'">否</td>
                     </tr>
-                    <tr th:if="${r.value.waitersList.isEmpty()}"><td colspan="6" class="empty">无人等待</td></tr>
+                    <tr th:if="${r.value.waitersList.isEmpty()}">
+                        <td colspan="6" class="empty"
+                            th:text="${r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : '无人等待'}">无人等待</td>
+                    </tr>
                 </table>
             </th:block>
         </th:block>

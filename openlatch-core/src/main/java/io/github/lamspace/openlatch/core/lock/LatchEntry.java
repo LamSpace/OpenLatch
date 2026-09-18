@@ -332,6 +332,7 @@ public final class LatchEntry implements KeyEntry {
         return new CoreInspection.KeySnapshot(key, KeyFamily.LATCH, false,
                 0, 0, 0, 0,
                 List.of(), List.copyOf(waiterSnaps),
-                0, 0, total, count, List.copyOf(participants));
+                0, 0, total, count, List.copyOf(participants),
+                null, 0, 0, 0);
     }
 }

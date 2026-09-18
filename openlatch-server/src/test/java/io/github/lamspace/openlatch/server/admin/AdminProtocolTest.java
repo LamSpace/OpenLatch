@@ -24,6 +24,8 @@ import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
+import io.github.lamspace.openlatch.core.AtomicOp;
+import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyInfo;
 import io.github.lamspace.openlatch.protocol.AdminListKeysResponse;
@@ -257,6 +259,49 @@ class AdminProtocolTest {
         assertThat(s.getNodeRole()).isEqualTo("SINGLE");
         assertThat(s.getUptimeMs()).isEqualTo(4242L);
         assertThat(s.getVersion()).isEqualTo(OpenLatchServer.serverVersion());
+    }
+
+    @Test
+    void atomicEntriesVisibleInSummaryListAndDetail() {
+        long w = core.sessionOpened();
+        core.atomicOp(new AtomicOpCommand(sessionId, 400, "counter:a",
+                LockType.ATOMIC_LONG, AtomicOp.SET, 5, 0, 0, 100, 1));
+        core.atomicOp(new AtomicOpCommand(w, 401, "counter:a",
+                LockType.ATOMIC_LONG, AtomicOp.ADD, 3, 0, 0, 0, 2));
+
+        AdminSummaryResponse s = admin(adminSummary(8, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getAtomicEntries()).isEqualTo(1);
+
+        AdminKeyInfo row = admin(adminListKeys(9, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("counter:a")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("atomic");
+        assertThat(row.getHolders()).isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getWaiterCount()).isZero();
+        assertThat(row.getAtomicKind()).isEqualTo("long");
+        assertThat(row.getAtomicValue()).isEqualTo(8);
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(10, TOKEN, "counter:a"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getFamily()).isEqualTo("atomic");
+        assertThat(d.getAtomicKind()).isEqualTo("long");
+        assertThat(d.getAtomicInitial()).isEqualTo(100);
+        assertThat(d.getAtomicValue()).isEqualTo(8);
+        assertThat(d.getAtomicVersion()).isEqualTo(2);
+        assertThat(d.getHoldersCount()).isZero();
+        assertThat(d.getWaitersCount()).isZero();
+        assertThat(d.getLeaseExpiresAtMs()).isZero();
+
+        // 他家族明细原子字段恒缺省（零扰动呈现约定）。
+        core.acquire(new AcquireCommand(sessionId, 402, "plain", LockType.REENTRANT,
+                21, 30_000, true));
+        AdminKeyDetailResponse plain = admin(adminKeyDetail(11, TOKEN, "plain"))
+                .getAdminKeyDetailResponse();
+        assertThat(plain.getFamily()).isEqualTo("lock");
+        assertThat(plain.getAtomicKind()).isEmpty();
+        assertThat(plain.getAtomicVersion()).isZero();
     }
 
     // ===================== ADMIN_LIST_KEYS =====================

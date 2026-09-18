@@ -10,7 +10,7 @@
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](docs/guide/zh/10-compatibility.md)
 
 OpenLatch 是一个轻量级分布式锁服务：JUC 风格协调原语（可重入 / 简单 / 读写 / 公平锁、
-信号量、倒计数屏障），后端为 **Raft 集群**（Apache Ratis，含快照）或**单节点**；
+信号量、倒计数屏障、带每 key 版本戳的原子 long/int/boolean），后端为 **Raft 集群**（Apache Ratis，含快照）或**单节点**；
 Netty 长连接上的 Protobuf 协议，租约 + 看门狗续租、等待-通知-重发的 **FIFO 公平队列**；
 Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Prometheus **指标与健康
 端点**、可选 **TLS/mTLS 与令牌认证**。

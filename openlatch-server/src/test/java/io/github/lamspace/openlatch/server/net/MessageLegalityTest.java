@@ -199,6 +199,46 @@ class MessageLegalityTest {
     }
 
     @Test
+    void atomic_message_payload_matrix_rejected_without_disconnect() {
+        EmbeddedChannel ch = channel(null);
+        ch.pipeline().fireChannelActive();
+        // v4 握手（低版本会话的 ATOMIC 拒绝语义已在 AtomicGatingTest 钉死，
+        // 此处只验载荷合法性维度）。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(4).setType(MessageType.HELLO)
+                .setRequestId(1)
+                .setHelloRequest(io.github.lamspace.openlatch.protocol.HelloRequest
+                        .newBuilder().setClientProtocolVersion(4))
+                .build());
+        readOut(ch);
+
+        // ATOMIC_OP 无 payload。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(4)
+                .setType(MessageType.ATOMIC_OP).setRequestId(2).build());
+        Envelope noPayload = readOut(ch);
+        assertThat(noPayload.getType()).isEqualTo(MessageType.ATOMIC_OP);
+        assertThat(noPayload.getAtomicOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+
+        // ATOMIC_OP 错挂他种 payload（类型-载荷不匹配）。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(4)
+                .setType(MessageType.ATOMIC_OP).setRequestId(3)
+                .setReleaseRequest(ReleaseRequest.newBuilder().setKey("k"))
+                .build());
+        Envelope mismatch = readOut(ch);
+        assertThat(mismatch.getAtomicOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        assertThat(ch.isOpen()).isTrue();
+
+        // 同连接继续正常服务：锁获取照常。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(4)
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(4)
+                .setAcquireRequest(AcquireRequest.newBuilder().setKey("ok").setWaitMs(0))
+                .build());
+        assertThat(readOut(ch).getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
     void dispatch_failure_becomes_internal_error_response_not_silent_hang() {
         AtomicBoolean notifyThrows = new AtomicBoolean(false);
         CoreEngine core = new CoreEngine(new CoreConfig(), new SystemClock(),

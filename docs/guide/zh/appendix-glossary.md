@@ -28,3 +28,6 @@
 | 管理令牌 | admin token | `ADMIN_*` 只读观察面的逐消息凭据，与业务令牌相互独立 |
 | 业务令牌 | business auth token | 握手承载的连接级认证凭据（`auth_token`），失败即断连 |
 | 弱一致读数 | weakly consistent read | 观察面取自单副本本地态，允许短暂滞后于多数派提交 |
+| 版本戳 | version stamp | 原子变量每次成功写恰 +1 的单调计数；超时复判与 ABA 消除的依据 |
+| 去重槽 | dedup slot | 原子条目记录的最近已应用写操作 (会话, 序号, 应答)，保证超时同序号重发不双加 |
+| 初值主张 | initial claim | 原子句柄携带的非零初值断言：首建生效、既有条目不符即拒（判例：屏障 total） |

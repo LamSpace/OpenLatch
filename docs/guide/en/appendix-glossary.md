@@ -28,3 +28,6 @@
 | admin token | per-message read-only observation credential (`ADMIN_*`), independent from business tokens |
 | business token | handshake-scoped connection credential (`auth_token`); failure disconnects |
 | weakly consistent read | observation surfaces served from one replica's local state, may lag quorum commits briefly |
+| version stamp | per-key monotone counter of the atomic cell: every successful write adds exactly 1; the basis for timeout re-judgement and ABA elimination |
+| dedup slot | per-atomic-entry record of the last applied write (session, op-sequence, reply quad) that makes same-sequence retries apply only once |
+| initial claim | a handle's non-zero initial-value assertion: applies on first create, rejects on mismatch with the settled value (latch-total precedent) |

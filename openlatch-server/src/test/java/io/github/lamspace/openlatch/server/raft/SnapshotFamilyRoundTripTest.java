@@ -66,6 +66,63 @@ class SnapshotFamilyRoundTripTest {
     }
 
     @Test
+    void atomicValueVersionAndSlotSurviveSnapshotInstall() throws Exception {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(51, 1_000, 1).toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(52, 1_000, 2).toByteArray());
+        // 建条目（非零初值主张）+ 同槽 CAS + 跨会话 GET。
+        ApplyResult init = ApplyResult.parseFrom(origin.applyEntry(RaftEntrySamples.atomic(
+                51, 101, "at", io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER,
+                10, 0, 0, 100, 1, 2_000, 3).toByteArray()));
+        assertThat(init.getAtomicVersion()).isEqualTo(1);
+        origin.applyEntry(RaftEntrySamples.atomic(52, 102, "at",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_CAS_STAMPED,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER,
+                20, 10, 1, 0, 7, 3_000, 4).toByteArray());
+        origin.applyEntry(RaftEntrySamples.atomic(51, 103, "at",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_GET,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER,
+                0, 0, 0, 0, 0, 3_500, 5).toByteArray());
+
+        SnapshotState snap = origin.snapshotState();
+        // 序列化含 v4 家族字段：定型初值与当前值可解析。
+        var atomicLock = snap.getLocksList().stream()
+                .filter(l -> l.getKey().equals("at")).findFirst().orElseThrow();
+        assertThat(atomicLock.getAtomicInitial()).isEqualTo(100);
+        assertThat(atomicLock.getAtomicValue()).isEqualTo(20);
+        assertThat(atomicLock.getAtomicVersion()).isEqualTo(2);
+        assertThat(atomicLock.getAtomicSlotSession()).isPositive();
+        assertThat(atomicLock.getAtomicSlotOpSeq()).isEqualTo(7);
+
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        assertThat(restored.shadow().adminEntry("at").lockType())
+                .isEqualTo(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER_VALUE);
+        assertThat(restored.shadow().adminEntry("at").atomicValue()).isEqualTo(20);
+        assertThat(restored.shadow().adminEntry("at").atomicVersion()).isEqualTo(2);
+
+        // 重启后命中同槽的迟到重发：值与版本不双推进（应答与槽一致）。
+        ApplyResult retry = ApplyResult.parseFrom(restored.applyEntry(RaftEntrySamples.atomic(
+                52, 999, "at", io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_CAS_STAMPED,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER,
+                20, 10, 1, 0, 7, 4_000, 6).toByteArray()));
+        assertThat(retry.getStatus())
+                .isEqualTo(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK);
+        assertThat(retry.getAtomicVersion()).isEqualTo(2);
+        assertThat(retry.getAtomicValue()).isEqualTo(20);
+
+        // 恢复后新写照常推进版本（会话登记存续）。
+        ApplyResult next = ApplyResult.parseFrom(restored.applyEntry(RaftEntrySamples.atomic(
+                52, 104, "at", io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_ADD,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER,
+                1, 0, 0, 0, 8, 5_000, 7).toByteArray()));
+        assertThat(next.getAtomicValue()).isEqualTo(21);
+        assertThat(next.getAtomicVersion()).isEqualTo(3);
+    }
+
+    @Test
     void lockEntrySerializationBytesUnchangedByV3Fields() throws Exception {
         LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
         origin.applyEntry(RaftEntrySamples.sessionOpen(41, 1_000, 1).toByteArray());

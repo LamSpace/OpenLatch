@@ -18,7 +18,7 @@
 
 | 候选原语 | JDK 对应 | 核心语义 | 复用基建 | 关键验收点 | 状态 |
 |---|---|---|---|---|---|
-| `OAtomicLong`(含 Integer/Boolean 形态) | `AtomicLong` + `AtomicStampedReference`(版本戳合一,解决 ABA) | `get`/`incrementAndGet`/`addAndGet`/`getAndSet`/`compareAndSet`/`accumulateAndGet`;CAS 附每 key 单调版本戳 | 条目状态机 + Raft 命令通道(近似 SemaphoreEntry 去许可语义) | 并发 CAS 矩阵 E2E;版本戳单调性断言;值不绑定归属 `(session,threadId)` 需显式声明 | 未启动 |
+| `OAtomicLong`(含 Integer/Boolean 形态) | `AtomicLong` + `AtomicStampedReference`(版本戳合一,解决 ABA) | `get`/`incrementAndGet`/`addAndGet`/`getAndSet`/`compareAndSet`/`accumulateAndGet`;CAS 附每 key 单调版本戳 | 条目状态机 + Raft 命令通道(近似 SemaphoreEntry 去许可语义) | 并发 CAS 矩阵 E2E;版本戳单调性断言;值不绑定归属 `(session,threadId)` 需显式声明 | 已落地([提案归档](openspec/changes/archive/2026-09-19-add-oatomic-long/)) |
 | `OBarrier` | `CyclicBarrier` | 多方集合、可复用、`barrierAction` 由最后到场者执行;**参与者会话死亡 → 即时破障**(整队列失败,强于 JDK,契约注释必须显式声明) | `LatchEntry` 状态机扩展(可复用相位)+ 等待队列推送 | kill 进程裁决破障 E2E;相位复用后重组;队列满护栏 | 未启动 |
 
 ## 二档 — 小载荷(前提:载荷通道;由本档首项开辟)

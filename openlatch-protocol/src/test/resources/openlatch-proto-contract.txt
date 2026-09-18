@@ -15,6 +15,7 @@ enum MessageType
   ADMIN_LIST_KEYS 11
   ADMIN_KEY_DETAIL 12
   ADMIN_LIST_SESSIONS 13
+  ATOMIC_OP 14
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -23,6 +24,9 @@ enum LockType
   LOCK_TYPE_FAIR 4
   LOCK_TYPE_SEMAPHORE 5
   LOCK_TYPE_LATCH 6
+  LOCK_TYPE_ATOMIC_LONG 7
+  LOCK_TYPE_ATOMIC_INTEGER 8
+  LOCK_TYPE_ATOMIC_BOOLEAN 9
 enum StatusCode
   OK 0
   QUEUED 1
@@ -36,6 +40,13 @@ enum StatusCode
   INVALID_REQUEST 9
   NOT_LEADER 10
   INTERNAL_ERROR 11
+enum AtomicOp
+  ATOMIC_GET 0
+  ATOMIC_SET 1
+  ATOMIC_GET_AND_SET 2
+  ATOMIC_ADD 3
+  ATOMIC_CAS 4
+  ATOMIC_CAS_STAMPED 5
 message Envelope
   protocol_version 1
   type 2
@@ -62,6 +73,8 @@ message Envelope
   admin_key_detail_response 29
   admin_list_sessions_request 30
   admin_list_sessions_response 31
+  atomic_op_request 32
+  atomic_op_response 33
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -143,6 +156,7 @@ message AdminSummaryResponse
   node_role 7
   uptime_ms 8
   version 9
+  atomic_entries 10
 message AdminListKeysRequest
   token 1
   page 2
@@ -154,6 +168,8 @@ message AdminKeyInfo
   holders 3
   remaining_lease_ms 4
   waiter_count 5
+  atomic_kind 6
+  atomic_value 7
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -187,6 +203,10 @@ message AdminKeyDetailResponse
   latch_total 9
   latch_remaining 10
   wait_queue_leader_only 11
+  atomic_kind 12
+  atomic_initial 13
+  atomic_value 14
+  atomic_version 15
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -198,3 +218,19 @@ message AdminListSessionsRequest
 message AdminListSessionsResponse
   status 1
   sessions 2
+message AtomicOpRequest
+  key 1
+  op 2
+  lock_type 3
+  operand 4
+  expected 5
+  expected_version 6
+  initial_value 7
+  op_seq 8
+message AtomicOpResponse
+  status 1
+  op 2
+  applied 3
+  old_value 4
+  value 5
+  version 6

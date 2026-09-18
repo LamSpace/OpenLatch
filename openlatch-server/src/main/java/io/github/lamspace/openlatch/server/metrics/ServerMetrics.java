@@ -49,7 +49,9 @@ import java.util.function.BooleanSupplier;
  * 与 {@code acquire.duration{result}}（屏障等待同为"获取-排队"形态，result 按
  * 应答状态码折算 {@code granted/queued/denied}）；{@code LOCK_RELEASE}/
  * {@code LATCH_COUNT_DOWN} 计入 {@code release.total{status}}；
- * {@code LEASE_RENEW} 计入 {@code renew.total{status}}。无应答 payload 的信封
+ * {@code LEASE_RENEW} 计入 {@code renew.total{status}}；v4 起 {@code ATOMIC_OP}
+ * 单独计入 {@code atomic.total{kind,op,status}}（记于分发/受理点而非应答收口——
+ * kind/op 维度只在请求侧存在，形状非法的请求不计数）。无应答 payload 的信封
  * （PING 回包、未知类型）不计。
  *
  * <p><b>启停语义</b>：{@code metrics.enabled=false} 仅关闭 {@code /metrics}
@@ -83,11 +85,19 @@ public final class ServerMetrics {
     public static final String QUEUE_DEPTH_MAX = "openlatch.server.queue.depth.max";
     /** 本节点是否 Leader（仅集群启用注册），gauge。 */
     public static final String CLUSTER_IS_LEADER = "openlatch.cluster.is_leader";
+    /** v4：原子变量操作计数（按形态/操作/应答状态码维度），counter。 */
+    public static final String ATOMIC_TOTAL = "openlatch.server.atomic.total";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
     /** Semaphore 家族 held 线的 type 标签值。 */
     public static final String TYPE_SEMAPHORE = "semaphore";
+    /** 原子形态标签值：long。 */
+    public static final String ATOMIC_KIND_LONG = "long";
+    /** 原子形态标签值：integer。 */
+    public static final String ATOMIC_KIND_INTEGER = "integer";
+    /** 原子形态标签值：boolean。 */
+    public static final String ATOMIC_KIND_BOOLEAN = "boolean";
 
     /** 耗时 result 标签值：授予。 */
     public static final String RESULT_GRANTED = "granted";
@@ -161,7 +171,9 @@ public final class ServerMetrics {
             }
             case LEASE_RENEW -> recordRenew(resp.getLeaseRenewResponse().getStatus());
             default -> {
-                // 无 payload 或无对应指标族的信封（未知类型等）不计。
+                // 无 payload 或无对应指标族的信封（未知类型、ATOMIC_OP 等）不计——
+                // v4 原子计数记于分发/受理点（kind/op 维度只存在于请求侧，
+                // 见 recordAtomic），且形状非法的请求不计数，杜绝维度伪造。
             }
         }
     }
@@ -209,6 +221,41 @@ public final class ServerMetrics {
      */
     public void recordRenew(StatusCode status) {
         count(RENEW_TOTAL, status);
+    }
+
+    /**
+     * 记录一次已受理（形状合法）的原子操作应答：计数线
+     * {@code atomic_total{kind,op,status}}。CAS 家族"未落值"是
+     * {@code status=OK} 的有效读数，成败区分不经本指标维度（避免线的组合
+     * 爆炸，成败量由 {@code cas/cas_stamped} 线对照写侧总量推得）。
+     * 调用点在单机 {@code RequestDispatcher.dispatchAtomicOp} 与集群
+     * {@code ClusterRequestHandler.handleAtomicOp}——两形态同一收口口径。
+     *
+     * @param kind   协议形态判别（三原子类型之一；其余值记 "other" 防御线）
+     * @param op     协议操作枚举（未知值记 "unknown" 防御线）
+     * @param status 应答协议状态码
+     */
+    public void recordAtomic(io.github.lamspace.openlatch.protocol.LockType kind,
+                             io.github.lamspace.openlatch.protocol.AtomicOp op,
+                             StatusCode status) {
+        Counter.builder(ATOMIC_TOTAL)
+                .tag("kind", switch (kind) {
+                    case LOCK_TYPE_ATOMIC_LONG -> ATOMIC_KIND_LONG;
+                    case LOCK_TYPE_ATOMIC_INTEGER -> ATOMIC_KIND_INTEGER;
+                    case LOCK_TYPE_ATOMIC_BOOLEAN -> ATOMIC_KIND_BOOLEAN;
+                    default -> "other";
+                })
+                .tag("op", switch (op) {
+                    case ATOMIC_GET -> "get";
+                    case ATOMIC_SET -> "set";
+                    case ATOMIC_GET_AND_SET -> "get_and_set";
+                    case ATOMIC_ADD -> "add";
+                    case ATOMIC_CAS -> "cas";
+                    case ATOMIC_CAS_STAMPED -> "cas_stamped";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
     }
 
     /**

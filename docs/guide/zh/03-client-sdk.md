@@ -88,6 +88,39 @@ latch.await(60, TimeUnit.SECONDS);   // 等归零；一次性，归零后条目�
 
 屏障注意：条目定型后不随参与者散去而回收（按轮次命名键做隔离，如 `deploy:2026-09-12`）。
 
+## 原子变量（OAtomicLong 族，v4）
+
+```java
+OAtomicLong seq = client.newAtomicLong("ids:order");          // 起步 0
+OAtomicLong one = client.newAtomicLong("ids:user", 1);         // 非零初值主张：首建以 1 起步
+long v = seq.incrementAndGet();                                // 服务端单往返落值（非本地 CAS 循环）
+
+// ABA-free 读改写（推荐形态）：
+OAtomicLong.Stamped cur = seq.getStamped();
+boolean ok = seq.compareAndSetStamped(cur.value(), cur.version(), cur.value() + 10);
+
+OAtomicBoolean ready = client.newAtomicBoolean("boot:ready");
+if (ready.compareAndSet(false, true)) { doInit(); }            // 跨进程"首到者获胜"
+
+OAtomicInteger hits = client.newAtomicInteger("counter:hits");
+hits.accumulateAndGet(5, Integer::sum);                        // 客户端带版本 CAS 循环（有重试界限）
+```
+
+同一 key 的**形态由首建请求定型**（long/integer/boolean 三选一，互斥互拒），与"同 key
+同家族"约定同规则（对齐既有锁/Semaphore/屏障的家族定型纪律）。
+
+语义边界（务必知晓，详见 [01 核心概念 §7](01-concepts.md)）：
+
+1. 每操作一次往返；写与读均经服务端多数派定序（线性一致），代价是 RTT；
+2. 值**不绑定会话**——任何客户端死亡不回滚值（与锁/信号量的失锁语义相反）；
+   无租约、无看门狗、不触发 `LockLostListener`；
+3. 超时抛出（`OpenLatchTimeoutException`）时写效果**可能已生效**——SDK 已以同序号
+   重发兜底去重，放弃场景（会话切换）用 `getStamped()` 复核后再决定；
+4. JDK 形 `compareAndSet` 存在 ABA；需要"值+历史"双判定时用 `compareAndSetStamped`；
+5. 条目常驻：没有删除原子的 API，按轮次/租户给 key 命名并做好基数治理；
+6. `newAtomic*(key, initial)` 的初值是**断言**而非赋值：既有条目初值不符时，
+   该句柄首个操作抛 `OpenLatchException`（与屏障 total 定型同规则）。
+
 ## 异步用法
 
 ```java

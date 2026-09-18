@@ -10,7 +10,8 @@
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](docs/guide/en/10-compatibility.md)
 
 OpenLatch is a lightweight distributed lock service: JUC-style primitives (reentrant /
-simple / read-write / fair locks, semaphore, count-down latch) on a **Raft cluster**
+simple / read-write / fair locks, semaphore, count-down latch, atomic long/int/boolean
+with per-key version stamps) on a **Raft cluster**
 (Apache Ratis, with snapshots) or a **single node**; Protobuf over Netty with leases,
 watchdog renewal and a wait–notify–resend **FIFO fair queue**; a Spring Boot 4 declarative
 `@OpenLatch`, a read-only web **console**, Prometheus **metrics/health**, and optional

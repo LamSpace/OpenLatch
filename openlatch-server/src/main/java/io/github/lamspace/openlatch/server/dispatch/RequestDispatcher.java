@@ -17,13 +17,16 @@
 package io.github.lamspace.openlatch.server.dispatch;
 
 import io.github.lamspace.openlatch.core.CoreEngine;
+import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.AtomicOpResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
@@ -32,6 +35,8 @@ import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
+import io.github.lamspace.openlatch.protocol.AtomicOpRequest;
+import io.github.lamspace.openlatch.protocol.AtomicOpResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
 import io.github.lamspace.openlatch.protocol.AdminListKeysResponse;
 import io.github.lamspace.openlatch.protocol.AdminListSessionsResponse;
@@ -120,6 +125,9 @@ public final class RequestDispatcher {
             case LATCH_AWAIT -> msg.hasLatchAwaitRequest()
                     ? dispatchLatchAwait(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case ATOMIC_OP -> msg.hasAtomicOpRequest()
+                    ? dispatchAtomicOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
@@ -179,9 +187,11 @@ public final class RequestDispatcher {
 
     /**
      * 屏障命令结果 → 协议状态码（映射表与 {@link #toAcquireStatus} 同规则：
-     * GRANTED=OK、拒绝细分同码，协议面不新增状态码）。
+     * GRANTED=OK、拒绝细分同码，协议面不新增状态码；v4 起原子通道的
+     * 初值断言与值域越界拒绝亦并入本表，CAS 家族成败不经状态码——
+     * 由应答 {@code applied} 承载）。
      *
-     * @param outcome 屏障命令结果状态
+     * @param outcome 屏障/原子命令结果状态
      * @return 协议状态码
      */
     static StatusCode toLatchStatus(Outcome outcome) {
@@ -196,6 +206,150 @@ public final class RequestDispatcher {
             case REJECT_TYPE_MISMATCH -> StatusCode.INVALID_REQUEST;
             case REJECT_SEMAPHORE_TOTAL -> StatusCode.INVALID_REQUEST;
             case REJECT_LATCH_TOTAL -> StatusCode.INVALID_REQUEST;
+            // v4：初值断言与值域越界同族同码（形状非法，非租约/会话问题）。
+            case REJECT_ATOMIC_INIT -> StatusCode.INVALID_REQUEST;
+            case REJECT_ATOMIC_RANGE -> StatusCode.INVALID_REQUEST;
+        };
+    }
+
+    /**
+     * 分发原子变量操作（v4）：形状合法性（{@link #validateAtomicRequest}）与
+     * v4 门控先于命令构造——非法请求零入核、零扰动；低版本会话消息级拒绝、
+     * 不断连（判例：LATCH 消息对 v3 门）。应答构造见 {@link #toAtomicOpResponse}；
+     * 单机路径直调引擎，集群路径的对应车道在
+     * {@code ClusterRequestHandler.handleAtomicOp}。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchAtomicOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 4) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        AtomicOpRequest req = msg.getAtomicOpRequest();
+        StatusCode shapeBad = validateAtomicRequest(req);
+        if (shapeBad != null) {
+            return errorResponse(msg, shapeBad);
+        }
+        AtomicOpResult result = core.atomicOp(toAtomicCommand(session.sessionId(),
+                msg.getRequestId(), req));
+        if (metrics != null) {
+            metrics.recordAtomic(req.getLockType(), req.getOp(), toLatchStatus(result.outcome()));
+        }
+        return toAtomicOpResponse(msg, result);
+    }
+
+    /**
+     * 原子请求形状合法性（单机与集群共用判定，先于日志提交）：
+     * 形态非三原子类型、op 未知数值、写操作缺 {@code op_seq}（客户端义务）、
+     * 负 {@code expected_version}、负 {@code initial_value}、布尔形态的
+     * 落值/期望值越出 {0,1} 或携带 ADD——任一命中回
+     * {@code INVALID_REQUEST}。合法返回 {@code null}。core 侧另有权威兜底
+     * （{@code REJECT_ATOMIC_RANGE}），本判定只为"非法不入日志"。
+     *
+     * @param req 原子操作请求
+     * @return 非法时的状态码；合法为 {@code null}
+     */
+    public static StatusCode validateAtomicRequest(AtomicOpRequest req) {
+        io.github.lamspace.openlatch.protocol.LockType kind = req.getLockType();
+        if (kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG
+                && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER
+                && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        AtomicOp op = toCoreAtomicOp(req.getOp());
+        if (op == null) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (op != AtomicOp.GET && req.getOpSeq() < 1) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (op == AtomicOp.GET && req.getOpSeq() != 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getExpectedVersion() < 0 || req.getInitialValue() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (kind == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
+            boolean valuesOk = (op != AtomicOp.CAS && op != AtomicOp.CAS_STAMPED)
+                    || req.getExpected() == 0 || req.getExpected() == 1;
+            boolean operandOk = op == AtomicOp.ADD
+                    || req.getOperand() == 0 || req.getOperand() == 1;
+            if (op == AtomicOp.ADD || !valuesOk || !operandOk) {
+                return StatusCode.INVALID_REQUEST;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 协议原子请求 → core 命令（形态与操作映射；{@code UNRECOGNIZED}
+     * 已由 {@link #validateAtomicRequest} 拦截，此处仅收口编译穷尽）。
+     *
+     * @param sessionId 会话 id
+     * @param requestId 连接内请求 id
+     * @param req       协议请求
+     * @return core 命令
+     */
+    static AtomicOpCommand toAtomicCommand(long sessionId, long requestId, AtomicOpRequest req) {
+        return new AtomicOpCommand(sessionId, requestId, req.getKey(),
+                toCoreAtomicKind(req.getLockType().getNumber()),
+                toCoreAtomicOp(req.getOp()), req.getOperand(), req.getExpected(),
+                req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq());
+    }
+
+    /**
+     * core 原子操作结果 → 协议应答（状态码经 {@link #toLatchStatus} 共表映射；
+     * {@code GRANTED} 携带应答四元组与 op 回显，拒绝态四元组留零值形）。
+     *
+     * @param msg    原请求信封
+     * @param result core 结果
+     * @return 应答信封
+     */
+    static Envelope toAtomicOpResponse(Envelope msg, AtomicOpResult result) {
+        AtomicOpResponse.Builder resp = AtomicOpResponse.newBuilder()
+                .setStatus(toLatchStatus(result.outcome()))
+                .setOp(msg.getAtomicOpRequest().getOp());
+        if (result.outcome() == Outcome.GRANTED) {
+            resp.setApplied(result.applied())
+                    .setOldValue(result.oldValue())
+                    .setValue(result.value())
+                    .setVersion(result.version());
+        }
+        return envelope(msg, MessageType.ATOMIC_OP, b -> b.setAtomicOpResponse(resp));
+    }
+
+    /**
+     * 协议形态数值 → core 原子形态（枚举序对齐 7/8/9）；其余回 {@code null}。
+     *
+     * @param number 协议 {@code LockType} 数值
+     * @return core 形态，非原子为 {@code null}
+     */
+    static LockType toCoreAtomicKind(int number) {
+        return switch (number) {
+            case 7 -> LockType.ATOMIC_LONG;
+            case 8 -> LockType.ATOMIC_INTEGER;
+            case 9 -> LockType.ATOMIC_BOOLEAN;
+            default -> null;
+        };
+    }
+
+    /**
+     * 协议操作枚举 → core {@link AtomicOp}；未知数值回 {@code null}。
+     *
+     * @param wireOp 协议枚举值
+     * @return core 操作，未知为 {@code null}
+     */
+    static AtomicOp toCoreAtomicOp(io.github.lamspace.openlatch.protocol.AtomicOp wireOp) {
+        return switch (wireOp) {
+            case ATOMIC_GET -> AtomicOp.GET;
+            case ATOMIC_SET -> AtomicOp.SET;
+            case ATOMIC_GET_AND_SET -> AtomicOp.GET_AND_SET;
+            case ATOMIC_ADD -> AtomicOp.ADD;
+            case ATOMIC_CAS -> AtomicOp.CAS;
+            case ATOMIC_CAS_STAMPED -> AtomicOp.CAS_STAMPED;
+            default -> null;
         };
     }
 
@@ -479,6 +633,9 @@ public final class RequestDispatcher {
                     AdminKeyDetailResponse.newBuilder().setStatus(status));
             case ADMIN_LIST_SESSIONS -> b.setAdminListSessionsResponse(
                     AdminListSessionsResponse.newBuilder().setStatus(status));
+            // v4：ATOMIC 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
+            case ATOMIC_OP -> b.setAtomicOpResponse(
+                    AtomicOpResponse.newBuilder().setStatus(status));
             default -> {
             }
         }

@@ -17,11 +17,13 @@
 package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
+import io.github.lamspace.openlatch.core.lock.AtomicEntry;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LatchEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
@@ -31,6 +33,7 @@ import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.AtomicOpResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
@@ -77,7 +80,7 @@ public final class CoreEngine {
     private final Clock clock;
     /** 事件出口，接收队首通知事件（条目锁外触发）。 */
     private final CoreEventListener listener;
-    /** key → 状态条目映射与条目生命周期（按家族承载锁/Semaphore/Latch 条目）。 */
+    /** key → 状态条目映射与条目生命周期（按家族承载锁/Semaphore/Latch/ATOMIC 条目）。 */
     private final LockTable lockTable = new LockTable();
     /** 租约到期堆，供 {@link #expireDue} 扫描。 */
     private final LeaseManager leaseManager = new LeaseManager();
@@ -117,8 +120,9 @@ public final class CoreEngine {
      *   <li>条目按家族重建：锁条目经 {@link LockEntry#restored}、Semaphore
      *       条目经 {@link SemaphoreEntry#restored}（持有计数即许可数、池
      *       余量按总量−持有和推导）、Latch 条目经 {@link LatchEntry#restored}
-     *       （计数直写、无租约）——均直写快照原值，不经状态迁移规则、不经
-     *       {@link Clock}，等待队列恒空；</li>
+     *       （计数直写、无租约）、ATOMIC 条目经 {@link AtomicEntry#restored}
+     *       （值/版本戳/去重槽直写、无租约无持有者）——均直写快照原值，
+     *       不经状态迁移规则、不经 {@link Clock}，等待队列恒空；</li>
      *   <li>会话登记：{@code sessions} 全集逐个登记（内部 sid 由调用方在
      *       构造前经 {@link #sessionOpened()} 预生成亦可——本方法幂等于
      *       登记表 {@code putIfAbsent} 语义）；持有者所属会话触及的 key
@@ -146,6 +150,17 @@ public final class CoreEngine {
                     "restoreFrom is allowed once on a fresh zero-state engine");
         }
         for (CoreStateRestore.Entry en : restore.entries()) {
+            if (en.lockType() == LockType.ATOMIC_LONG || en.lockType() == LockType.ATOMIC_INTEGER
+                    || en.lockType() == LockType.ATOMIC_BOOLEAN) {
+                // 原子条目：无租约、无持有者、无常驻回收——值/版本戳/去重槽
+                // 直写快照原值（重发可判性随槽存续，恢复不重演操作规则）。
+                CoreStateRestore.AtomicState as = en.atomic();
+                AtomicEntry ae = AtomicEntry.restored(en.key(), en.lockType(), as.initial(),
+                        as.value(), as.version(), as.slotSession(), as.slotOpSeq(),
+                        as.slotApplied(), as.slotOldValue(), as.slotValue(), as.slotVersion());
+                lockTable.computeIfAbsent(en.key(), k -> ae);
+                continue;
+            }
             if (en.lockType() == LockType.LATCH) {
                 // 屏障条目：无租约、无持有者（计数直写；等待者/参与者为
                 // Leader 本地态，恢复后恒空，后续操作重新登记）。
@@ -300,9 +315,9 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
-        // LATCH 不经获取通道：ACQUIRE 携带 LATCH
-        // 类型属请求形状错误，协议层 v3 门控之后由本守卫兜底。
-        if (cmd.lockType() == LockType.LATCH) {
+        // LATCH/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
+        // 属请求形状错误，协议层门控之后由本守卫兜底。
+        if (cmd.lockType() == LockType.LATCH || familyOf(cmd.lockType()) == KeyFamily.ATOMIC) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         KeyFamily family = familyOf(cmd.lockType());
@@ -364,6 +379,7 @@ public final class CoreEngine {
             case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
             case SEMAPHORE -> KeyFamily.SEMAPHORE;
             case LATCH -> KeyFamily.LATCH;
+            case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN -> KeyFamily.ATOMIC;
         };
     }
 
@@ -388,6 +404,10 @@ public final class CoreEngine {
             // ACQUIRE 携带 LATCH 类型在入口即拒（见 acquire 首行守卫）。
             case LATCH -> throw new IllegalStateException(
                     "latch entries are created only via latch channels");
+            // ATOMIC 条目只能经原子命令通道（atomicOp）创建，
+            // ACQUIRE 携带原子类型在入口即拒（见 acquire 守卫）。
+            case ATOMIC -> throw new IllegalStateException(
+                    "atomic entries are created only via atomic channels");
         };
     }
 
@@ -588,6 +608,68 @@ public final class CoreEngine {
     }
 
     /**
+     * 原子变量操作：ATOMIC 家族的唯一命令入口（无等待、无租约、即时裁决）。
+     *
+     * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检（
+     * {@link Outcome#REJECT_SESSION}）→ key 形状校验 → 条目定位：
+     * {@code GET} 对不存在的 key 直接回 {@code (0, 0)} 且 MUST NOT 建条目；
+     * 写命令对不存在的 key 懒建（竞态良性：他者抢先建条目后本请求按
+     * "既有条目断言/形态判定"规则处理）→ 条目锁内家族判定（他家族 →
+     * {@link Outcome#REJECT_TYPE_MISMATCH}）、会话权威复校（原子条目不入
+     * 会话触及集，本复校与 {@link #sessionClosed} 无互斥义务——值的存续
+     * 与会话生死无关）→ {@link AtomicEntry#op} 规则集（形态互拒、布尔值域、
+     * 初值断言、去重重放、操作执行）。
+     *
+     * <p><b>会话登记差异</b>：与锁/Semaphore/Latch 通道不同，原子操作
+     * MUST NOT 调用 {@code touchIfPresent}——值不绑定归属，会话关闭时
+     * 不得遍历或扰动原子条目（条目常驻亦无回收依据）。
+     *
+     * <p><b>通知路径</b>：恒无——全部操作即时应答，不产生
+     * {@link CoreEventListener} 事件，不入队首/等待机制。
+     *
+     * @param cmd 原子操作命令（会话须已登记；{@code kind} 须为三原子类型之一）
+     * @return 操作结果：{@link Outcome#GRANTED} 携带应答四元组，
+     *         或会话/key/家族/值域/初值类拒绝
+     * @throws IllegalArgumentException {@code cmd.kind()} 非原子形态
+     */
+    public AtomicOpResult atomicOp(AtomicOpCommand cmd) {
+        if (familyOf(cmd.kind()) != KeyFamily.ATOMIC) {
+            throw new IllegalArgumentException("not an atomic kind: " + cmd.kind());
+        }
+        if (!sessions.contains(cmd.sessionId())) {
+            return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return AtomicOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.op() == AtomicOp.GET) {
+                    // 读数零迁移：不存在的 key 即 (0, 0)，不建条目。
+                    return new AtomicOpResult(Outcome.GRANTED, false, 0, 0, 0);
+                }
+                e = lockTable.computeIfAbsent(key, k -> new AtomicEntry(k, cmd.kind(),
+                        cmd.initialValue()));
+            }
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (e.family() != KeyFamily.ATOMIC) {
+                    return AtomicOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.contains(cmd.sessionId())) {
+                    return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                return ((AtomicEntry) e).op(cmd);
+            }
+        }
+    }
+
+    /**
      * key 形状校验的共享出口：空与超长分别回
      * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
      * 合法返回 {@code null}。
@@ -677,7 +759,7 @@ public final class CoreEngine {
                     case LOCK -> heldLocks++;
                     case SEMAPHORE -> heldSemaphores++;
                     default -> {
-                        // LATCH 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
+                        // LATCH/ATOMIC 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
                     }
                 }
             }
@@ -716,8 +798,9 @@ public final class CoreEngine {
                     case LockEntry le -> snapshots.add(le.snapshot(now));
                     case SemaphoreEntry se -> snapshots.add(se.snapshot(now));
                     case LatchEntry la -> snapshots.add(la.snapshot(now));
+                    case AtomicEntry ae -> snapshots.add(ae.snapshot(now));
                     default -> {
-                        // 未知实现不入快照（理论不可达：三家族已穷尽）。
+                        // 未知实现不入快照（理论不可达：四家族已穷尽）。
                     }
                 }
             }
@@ -751,6 +834,7 @@ public final class CoreEngine {
                 case LockEntry le -> le.snapshot(now);
                 case SemaphoreEntry se -> se.snapshot(now);
                 case LatchEntry la -> la.snapshot(now);
+                case AtomicEntry ae -> ae.snapshot(now);
                 default -> null;
             };
         }

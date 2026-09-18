@@ -241,6 +241,30 @@ class ClientClusterIT {
         }
     }
 
+    @Test
+    void committedAtomicValueSurvivesLeaderKillWithoutDoubleApply() throws Exception {
+        startCluster(3);
+        // 种子覆盖全节点：杀任一成员后客户端仍可经种子发现新主（与既有改道用例同理）。
+        String[] allSeeds = nodes.stream().map(NodeRef::address).toArray(String[]::new);
+        try (OpenLatchClient client = clientTo(allSeeds)) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OAtomicLong a = client.newAtomicLong("ak");
+            assertThat(a.addAndGet(5)).isEqualTo(5);
+            assertThat(a.incrementAndGet()).isEqualTo(6);   // version 2
+            NodeRef victim = leader();
+            stopNode(victim);
+            awaitTrue(() -> {
+                NodeRef l = leader();
+                return l != null && l != victim;
+            }, "新主选出");
+            // 已提交值：不丢（回 0）、不双加（12）；版本戳无漂移（2）。
+            assertThat(a.get()).isEqualTo(6);
+            assertThat(a.getVersion()).isEqualTo(2);
+            // 后续写经改道到新主照常落值（同窗口重发由去重槽保证不双加）。
+            assertThat(a.incrementAndGet()).isEqualTo(7);
+        }
+    }
+
     // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test
