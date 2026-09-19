@@ -248,6 +248,12 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                         .handleLatchAwait(session, msg, ctx);
                 case ATOMIC_OP -> cluster.requestHandler()
                         .handleAtomicOp(session, msg, ctx);
+                case BARRIER_AWAIT -> cluster.requestHandler()
+                        .handleBarrierAwait(session, msg, ctx);
+                case BARRIER_LEAVE -> cluster.requestHandler()
+                        .handleBarrierLeave(session, msg, ctx);
+                case BARRIER_ACTION_DONE -> cluster.requestHandler()
+                        .handleBarrierActionDone(session, msg, ctx);
                 case CLUSTER_VIEW -> {
                     // 只读查询：任意节点以 LeaderTracker 单源 + 本地配置作答，
                     // 不产生日志条目（v2 客户端种子发现/诊断）。

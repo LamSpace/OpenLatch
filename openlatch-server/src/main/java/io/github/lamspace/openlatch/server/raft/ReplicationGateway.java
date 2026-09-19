@@ -334,12 +334,87 @@ public final class ReplicationGateway implements ApplyObserver {
                 log.warn("latch payload unparsable in broadcast (seq={})", entry.getSeq());
             }
         }
+        // v5：循环屏障 Leader 侧簿记——推送簿记登记（普通等待者入队、了结/
+        // 离场出队）与世代终态广播（barrier_settled 位驱动，含
+        // SESSION_CLOSE 的破障传播 barrier_released_keys）。位次与队列满
+        // 护栏由引擎条目队列在应用点权威裁决（回执 queue_position 透传），
+        // 本处 WaitQueue 仅承担"谁需要收 AWAIT_NOTIFY"的连接簿记。
+        switch (entry.getType()) {
+            case BARRIER_AWAIT_ENTRY -> {
+                try {
+                    var bp = io.github.lamspace.openlatch.protocol.raft.BarrierAwaitPayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    String bkey = bp.getRequest().getKey();
+                    if (result.getStatus() == ApplyStatus.QUEUED && !result.getBarrierExecutor()) {
+                        if (waitQueue.enqueue(bp.getSessionId(), bp.getRequestId(), bkey, now) < 0) {
+                            // 引擎护栏更严格时理论不可达；兜底不登记（该等待者
+                            // 经重发自愈，与推送丢失同口径）。
+                            log.warn("barrier waiter enqueue overflow (seq={}, key={})",
+                                    entry.getSeq(), bkey);
+                        }
+                    }
+                    if (result.getStatus() == ApplyStatus.OK
+                            || result.getStatus() == ApplyStatus.BARRIER_BROKEN) {
+                        waitQueue.onGranted(bp.getSessionId(), bp.getRequestId());
+                    }
+                    if (result.getBarrierSettled()) {
+                        for (WaitQueue.Waiter w : waitQueue.broadcastKey(bkey, now)) {
+                            pushAwaitNotify(w, bkey);
+                        }
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("barrier await payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
+            }
+            case BARRIER_LEAVE_ENTRY -> {
+                try {
+                    var lp = io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    String lkey = lp.getRequest().getKey();
+                    if (result.getStatus() == ApplyStatus.OK) {
+                        waitQueue.onGranted(lp.getSessionId(), lp.getRequest().getAwaitRequestId());
+                        if (result.getBarrierSettled()) {
+                            for (WaitQueue.Waiter w : waitQueue.broadcastKey(lkey, now)) {
+                                pushAwaitNotify(w, lkey);
+                            }
+                        }
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("barrier leave payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
+            }
+            case BARRIER_ACTION_DONE_ENTRY -> {
+                try {
+                    var dp = io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    String dkey = dp.getRequest().getKey();
+                    if (result.getBarrierSettled()) {
+                        for (WaitQueue.Waiter w : waitQueue.broadcastKey(dkey, now)) {
+                            pushAwaitNotify(w, dkey);
+                        }
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("barrier action-done payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
+            }
+            default -> {
+            }
+        }
         if (entry.getType() == RaftEntryType.SESSION_CLOSE) {
             try {
                 var sp = io.github.lamspace.openlatch.protocol.raft.SessionPayload
                         .parseFrom(entry.getCommandPayload().toByteArray());
                 for (WaitQueue.Waiter w : waitQueue.purgeSession(sp.getSessionId(), now)) {
                     pushAwaitNotify(w, w.key());
+                }
+                // 离场即破障经会话关闭传播：被破世代的存活等待者收放行通知。
+                for (String bkey : result.getBarrierReleasedKeysList()) {
+                    for (WaitQueue.Waiter w : waitQueue.broadcastKey(bkey, now)) {
+                        pushAwaitNotify(w, bkey);
+                    }
                 }
             } catch (InvalidProtocolBufferException e) {
                 log.warn("session payload unparsable in purge (seq={})", entry.getSeq());

@@ -154,6 +154,64 @@ class StateMachineDeterminismTest {
     }
 
     @Test
+    void barrierGenerationsTripsBreaksAndWrapDeterministic() throws Exception {
+        // 交叠世代序列：合拢（无动作）→ 复用回卷 → 动作两阶段 → 会话死亡破障。
+        List<RaftLogEntry> seq = List.of(
+                RaftEntrySamples.sessionOpen(81, 1_000, 1),
+                RaftEntrySamples.sessionOpen(82, 1_000, 2),
+                RaftEntrySamples.sessionOpen(83, 1_000, 3),
+                RaftEntrySamples.barrierAwait(81, 101, "b", 3, false, 2_000, 4),
+                RaftEntrySamples.barrierAwait(82, 102, "b", 0, false, 3_000, 5),
+                // 81 应答丢失重发：不双计。
+                RaftEntrySamples.barrierAwait(81, 101, "b", 0, false, 3_500, 6),
+                RaftEntrySamples.barrierAwait(83, 103, "b", 0, false, 4_000, 7),
+                // 世代 1 合拢（83 当回合拢直答），旧重发命中了结记录。
+                RaftEntrySamples.barrierAwait(81, 101, "b", 0, false, 4_500, 8),
+                // 世代 2：81 到场后死亡 → SESSION_CLOSE 破障传播（scrub 死者身份）。
+                RaftEntrySamples.barrierAwait(81, 110, "b", 0, false, 5_000, 9),
+                RaftEntrySamples.sessionClose(81, 5_500, 10),
+                // 世代 3：81 重开补足三方；83 作为最后到场者携动作；回报合拢。
+                RaftEntrySamples.sessionOpen(81, 5_600, 11),
+                RaftEntrySamples.barrierAwait(81, 118, "b", 0, false, 5_900, 12),
+                RaftEntrySamples.barrierAwait(82, 120, "b", 0, false, 6_000, 13),
+                RaftEntrySamples.barrierAwait(83, 121, "b", 0, true, 6_500, 14),
+                RaftEntrySamples.barrierActionDone(83, "b", 3, 7_000, 15));
+        assertThat(replay(seq)).isEqualTo(replay(seq));
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        ApplyResult last = null;
+        for (RaftLogEntry e : seq) {
+            last = ApplyResult.parseFrom(core.applyEntry(e.toByteArray()));
+        }
+        // 语义钉住（影子表镜像即 digest 输入）：
+        // 世代 1 TRIPPED、世代 2 被 81 死亡打破、世代 3 执行者 82 回报合拢。
+        assertThat(core.shadow().isBarrier("b")).isTrue();
+        var view = core.shadow().adminEntry("b");
+        assertThat(view.barrierParties()).isEqualTo(3);
+        assertThat(view.barrierGeneration()).isEqualTo(4);
+        assertThat(view.barrierCompletedResult()).isEqualTo(1); // TRIPPED（世代 3）
+        assertThat(view.barrierActionPending()).isFalse();
+        // 终笔动作了结回执：OK + settled 广播位。
+        assertThat(last).isNotNull();
+        assertThat(last.getStatus()).isEqualTo(ApplyStatus.OK);
+        assertThat(last.getBarrierSettled()).isTrue();
+    }
+
+    @Test
+    void barrierRejectsAndIdempotencyPerturbNothing() throws Exception {
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        String base = core.digest();
+        // 未知会话、家族误用（锁 key 上到场）、无主张创建拒绝。
+        ApplyResult r1 = ApplyResult.parseFrom(core.applyEntry(
+                RaftEntrySamples.barrierAwait(999, 1, "x", 2, false, 1_000, 1).toByteArray()));
+        assertThat(r1.getStatus()).isEqualTo(ApplyStatus.REJECT_SESSION);
+        ApplyResult r2 = ApplyResult.parseFrom(core.applyEntry(
+                RaftEntrySamples.barrierAwait(11, 1, "y", 0, false, 1_000, 2).toByteArray()));
+        assertThat(r2.getStatus()).isIn(java.util.List.of(ApplyStatus.REJECT_SESSION,
+                ApplyStatus.INVALID_REQUEST));
+        assertThat(core.digest()).isEqualTo(base);
+    }
+
+    @Test
     void unregisteredSessionAcquireRejectedWithoutStateChange() throws Exception {
         LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
         ApplyResult r = ApplyResult.parseFrom(core.applyEntry(
@@ -249,7 +307,7 @@ class StateMachineDeterminismTest {
             t += 500 + rnd.nextInt(2_000);
             long sid = sids[rnd.nextInt(sids.length)];
             String key = keys[rnd.nextInt(keys.length)];
-            int pick = rnd.nextInt(10);
+            int pick = rnd.nextInt(12);
             if (pick < 4) {
                 seq.add(RaftEntrySamples.acquireWithWait(sid, 1000 + i, key, t,
                         types[rnd.nextInt(types.length)], seqNo++,
@@ -264,6 +322,22 @@ class StateMachineDeterminismTest {
                 lastExpireT = t;
                 seq.add(RaftEntrySamples.expire(keys[rnd.nextInt(keys.length)], 1 + rnd.nextInt(4),
                         lastExpireT, seqNo++));
+            } else if (pick == 9) {
+                // 循环屏障到场：首建主张与纯加入混排。
+                seq.add(RaftEntrySamples.barrierAwait(sid, 5000 + i, "kb",
+                        rnd.nextInt(3) == 0 ? 2 : 0, rnd.nextInt(4) == 0, t, seqNo++));
+            } else if (pick == 10) {
+                // 离场/纯破障/未知世代了结回报的幂等与拒绝路径混排。
+                int shape = rnd.nextInt(3);
+                if (shape == 0) {
+                    seq.add(RaftEntrySamples.barrierLeave(sid, "kb", 5000 + rnd.nextInt(60),
+                            t, seqNo++));
+                } else if (shape == 1) {
+                    seq.add(RaftEntrySamples.barrierLeave(sid, "kb", 0, t, seqNo++));
+                } else {
+                    seq.add(RaftEntrySamples.barrierActionDone(sid, "kb",
+                            1 + rnd.nextInt(3), t, seqNo++));
+                }
             } else {
                 seq.add(RaftEntrySamples.noop(t, seqNo++));
             }

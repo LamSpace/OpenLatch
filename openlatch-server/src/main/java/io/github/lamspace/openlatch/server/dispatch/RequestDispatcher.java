@@ -21,6 +21,12 @@ import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
+import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
+import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
+import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
+import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
+import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
@@ -35,6 +41,12 @@ import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
+import io.github.lamspace.openlatch.protocol.BarrierActionDoneRequest;
+import io.github.lamspace.openlatch.protocol.BarrierActionDoneResponse;
+import io.github.lamspace.openlatch.protocol.BarrierAwaitRequest;
+import io.github.lamspace.openlatch.protocol.BarrierAwaitResponse;
+import io.github.lamspace.openlatch.protocol.BarrierLeaveRequest;
+import io.github.lamspace.openlatch.protocol.BarrierLeaveResponse;
 import io.github.lamspace.openlatch.protocol.AtomicOpRequest;
 import io.github.lamspace.openlatch.protocol.AtomicOpResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
@@ -128,6 +140,15 @@ public final class RequestDispatcher {
             case ATOMIC_OP -> msg.hasAtomicOpRequest()
                     ? dispatchAtomicOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case BARRIER_AWAIT -> msg.hasBarrierAwaitRequest()
+                    ? dispatchBarrierAwait(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case BARRIER_LEAVE -> msg.hasBarrierLeaveRequest()
+                    ? dispatchBarrierLeave(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest()
+                    ? dispatchBarrierActionDone(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
@@ -209,6 +230,10 @@ public final class RequestDispatcher {
             // v4：初值断言与值域越界同族同码（形状非法，非租约/会话问题）。
             case REJECT_ATOMIC_INIT -> StatusCode.INVALID_REQUEST;
             case REJECT_ATOMIC_RANGE -> StatusCode.INVALID_REQUEST;
+            // v5：parties 断言与动作回报不被受理同属形状非法；破障是在带裁决。
+            case REJECT_BARRIER_PARTIES -> StatusCode.INVALID_REQUEST;
+            case REJECT_BARRIER_ACTION -> StatusCode.INVALID_REQUEST;
+            case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
         };
     }
 
@@ -318,6 +343,95 @@ public final class RequestDispatcher {
                     .setVersion(result.version());
         }
         return envelope(msg, MessageType.ATOMIC_OP, b -> b.setAtomicOpResponse(resp));
+    }
+
+    /**
+     * 分发循环屏障到场（v5）：v5 门控与形状合法性先于引擎调用——低版本
+     * 会话消息级拒绝、不断连（判例：LATCH v3 门、ATOMIC v4 门）；
+     * {@code parties < 0} 属参数非法。应答携带世代/位次/执行者标记与
+     * 定型回显；单机路径的放行/破障广播经引擎监听点直投
+     * {@code AWAIT_NOTIFY}（与 Latch 同通道）。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchBarrierAwait(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 5) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierAwaitRequest req = msg.getBarrierAwaitRequest();
+        if (req.getParties() < 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierAwaitResult r = core.barrierAwait(new BarrierAwaitCommand(
+                session.sessionId(), msg.getRequestId(), req.getKey(),
+                req.getParties(), req.getCarriesAction()));
+        StatusCode status = toLatchStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordBarrier("await", status);
+        }
+        return envelope(msg, MessageType.BARRIER_AWAIT, b -> b.setBarrierAwaitResponse(
+                BarrierAwaitResponse.newBuilder()
+                        .setStatus(status)
+                        .setQueuePosition(r.queuePosition())
+                        .setGeneration(r.generation())
+                        .setExecutor(r.executor())
+                        .setParties(r.parties())));
+    }
+
+    /**
+     * 分发循环屏障离场（v5，超时/中断/显式破障共用通道）：门控同上；
+     * {@code await_request_id < 0} 属参数非法；OK 即离场完成（离场
+     * 连带破障经其余等待者的重发了结可见，幂等无操作亦回 OK）。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchBarrierLeave(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 5) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierLeaveRequest req = msg.getBarrierLeaveRequest();
+        if (req.getAwaitRequestId() < 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierLeaveResult r = core.barrierLeave(new BarrierLeaveCommand(
+                session.sessionId(), req.getKey(), req.getAwaitRequestId()));
+        StatusCode status = toLatchStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordBarrier("leave", status);
+        }
+        return envelope(msg, MessageType.BARRIER_LEAVE, b -> b.setBarrierLeaveResponse(
+                BarrierLeaveResponse.newBuilder().setStatus(status)));
+    }
+
+    /**
+     * 分发循环屏障动作了结（v5）：门控同上；{@code generation <= 0} 属
+     * 参数非法（世代号自 1 起）；非指定执行者/未知世代回
+     * {@code INVALID_REQUEST}，世代已破回在带裁决 {@code BARRIER_BROKEN}。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchBarrierActionDone(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 5) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierActionDoneRequest req = msg.getBarrierActionDoneRequest();
+        if (req.getGeneration() <= 0) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        BarrierActionDoneResult r = core.barrierActionDone(new BarrierActionDoneCommand(
+                session.sessionId(), req.getKey(), req.getGeneration()));
+        StatusCode status = toLatchStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordBarrier("action_done", status);
+        }
+        return envelope(msg, MessageType.BARRIER_ACTION_DONE, b -> b.setBarrierActionDoneResponse(
+                BarrierActionDoneResponse.newBuilder().setStatus(status)));
     }
 
     /**
@@ -633,6 +747,13 @@ public final class RequestDispatcher {
                     AdminKeyDetailResponse.newBuilder().setStatus(status));
             case ADMIN_LIST_SESSIONS -> b.setAdminListSessionsResponse(
                     AdminListSessionsResponse.newBuilder().setStatus(status));
+            // v5：BARRIER 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
+            case BARRIER_AWAIT -> b.setBarrierAwaitResponse(
+                    BarrierAwaitResponse.newBuilder().setStatus(status));
+            case BARRIER_LEAVE -> b.setBarrierLeaveResponse(
+                    BarrierLeaveResponse.newBuilder().setStatus(status));
+            case BARRIER_ACTION_DONE -> b.setBarrierActionDoneResponse(
+                    BarrierActionDoneResponse.newBuilder().setStatus(status));
             // v4：ATOMIC 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
             case ATOMIC_OP -> b.setAtomicOpResponse(
                     AtomicOpResponse.newBuilder().setStatus(status));

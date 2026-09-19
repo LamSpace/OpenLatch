@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.server.raft;
 
 import io.github.lamspace.openlatch.protocol.LockType;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
@@ -84,6 +85,33 @@ public final class ShadowTable {
     public record HeldRef(long leaseToken, long expiresAtMs, Set<Holder> holders, int lockType) { }
 
     /**
+     * 循环屏障到场身份的逻辑会话投影（(逻辑会话, 请求) 二元组）。
+     * 引擎内部 sid 不出节点，镜像与 digest 一律以逻辑会话 id 表达。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param requestId 到场请求 id
+     */
+    public record ArrivalRef(long sessionId, long requestId) { }
+
+    /**
+     * 循环屏障复制态镜像输入（应用点自引擎导出的不可变快照）。
+     *
+     * @param parties             定型许可数
+     * @param generation          当前世代号
+     * @param arrivals            当前世代到场账簿（逻辑 id，插入序）
+     * @param actionSession       动作挂账逻辑会话（0=无）
+     * @param actionRequest       动作挂账请求 id
+     * @param completedGeneration 最近完结世代号（0=无）
+     * @param completedResult     完结世代了结形态：0=无、1=TRIPPED、2=BROKEN
+     * @param completedArrivals   完结世代到场账簿（逻辑 id，插入序）
+     * @param completedExecutor   完结世代执行者逻辑会话（0=无）
+     */
+    public record BarrierMirrorData(long parties, long generation, List<ArrivalRef> arrivals,
+                                    long actionSession, long actionRequest,
+                                    long completedGeneration, int completedResult,
+                                    List<ArrivalRef> completedArrivals, long completedExecutor) { }
+
+    /**
      * 管理观察的条目全量投影：
      * 应用线程在每次结构变更后自 {@link SLock} 同步发布的不可变明细视图，
      * 以逻辑会话 id 为归属标识（跨节点可对齐；引擎内部 sid 不外露）。
@@ -104,11 +132,19 @@ public final class ShadowTable {
      * @param atomicInitial     ATOMIC 定型初值（其余家族 0）
      * @param atomicValue       ATOMIC 当前值（其余家族 0）
      * @param atomicVersion     ATOMIC 版本戳（其余家族 0）
+     * @param barrierParties    BARRIER 定型许可数（其余家族 0）
+     * @param barrierGeneration BARRIER 当前世代号（其余家族 0）
+     * @param barrierArrived    BARRIER 当前世代到场数（其余家族 0）
+     * @param barrierActionPending BARRIER 是否动作待决（其余家族 false）
+     * @param barrierCompletedResult BARRIER 最近完结世代的了结形态
+     *                               （0=无、1=TRIPPED、2=BROKEN；其余家族 0）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
                                  long latchTotal, long latchCount, Set<Long> latchParticipants,
-                                 long atomicInitial, long atomicValue, long atomicVersion) { }
+                                 long atomicInitial, long atomicValue, long atomicVersion,
+                                 long barrierParties, long barrierGeneration, int barrierArrived,
+                                 boolean barrierActionPending, int barrierCompletedResult) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -150,6 +186,24 @@ public final class ShadowTable {
         private long atomicSlotValue;
         /** ATOMIC 条目：槽应答 version（其余家族 0）。 */
         private long atomicSlotVersion;
+        /** BARRIER 定型许可数（其余家族 0）。 */
+        private long barrierParties;
+        /** BARRIER 当前世代号（其余家族 0）。 */
+        private long barrierGeneration;
+        /** BARRIER 当前世代到场账簿（逻辑 id，插入序；其余家族空）。 */
+        private List<ArrivalRef> barrierArrivals = List.of();
+        /** BARRIER 动作挂账逻辑会话（0=无）。 */
+        private long barrierActionSession;
+        /** BARRIER 动作挂账请求 id。 */
+        private long barrierActionRequest;
+        /** BARRIER 最近完结世代号（0=无）。 */
+        private long barrierCompletedGeneration;
+        /** BARRIER 完结形态：0=无、1=TRIPPED、2=BROKEN。 */
+        private int barrierCompletedResult;
+        /** BARRIER 完结世代到场账簿（逻辑 id，插入序）。 */
+        private List<ArrivalRef> barrierCompletedArrivals = List.of();
+        /** BARRIER 完结世代执行者逻辑会话（0=无）。 */
+        private long barrierCompletedExecutor;
 
         /**
          * 构造复制态条目。
@@ -287,7 +341,9 @@ public final class ShadowTable {
         return new AdminEntryView(l.lockType, l.leaseToken, l.expiresAtMs, l.leaseMs,
                 Map.copyOf(l.holders), l.permitsTotal, l.permitsAvailable,
                 l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants),
-                l.atomicInitial, l.atomicValue, l.atomicVersion);
+                l.atomicInitial, l.atomicValue, l.atomicVersion,
+                l.barrierParties, l.barrierGeneration, l.barrierArrivals.size(),
+                l.barrierActionSession != 0, l.barrierCompletedResult);
     }
 
     /**
@@ -390,9 +446,11 @@ public final class ShadowTable {
         List<String> freed = new ArrayList<>();
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
             if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
+                    || en.getValue().lockType == LockType.LOCK_TYPE_BARRIER_VALUE
                     || isAtomicType(en.getValue().lockType)) {
-                // 无租约家族（Latch/ATOMIC）到期时刻恒 0——非"已到期"信号，
-                // 永不由到期清扫回收（一次性护栏与常驻值语义各自承载）。
+                // 无租约家族（Latch/ATOMIC/BARRIER）到期时刻恒 0——非"已到期"
+                // 信号，永不由到期清扫回收（一次性护栏、常驻值与循环屏障世代
+                // 存续语义各自承载；判例：原子变更对影子表无租约家族到期误扫的修复）。
                 continue;
             }
             if (en.getValue().expiresAtMs <= entryTimeMs) {
@@ -430,6 +488,13 @@ public final class ShadowTable {
             if (isAtomicType(l.lockType)) {
                 // 原子条目存续与一切会话无关：值不绑定归属，
                 // 会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
+                continue;
+            }
+            if (l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                // 循环屏障条目常驻不回收：会话死亡的世代破障由引擎经
+                // SESSION_CLOSE 应用点裁决，破障结果经 barrierMirror
+                // 整体刷新——本表不在此处逐会话摘除账簿项（账簿随
+                // 世代完结整体归档/清空，非按会话增量维护）。
                 continue;
             }
             for (Map.Entry<Holder, Integer> hh : l.holders.entrySet()) {
@@ -527,6 +592,22 @@ public final class ShadowTable {
                 lb.setPermitsTotal(l.permitsTotal);
             } else if (l.lockType == LockType.LOCK_TYPE_LATCH_VALUE) {
                 lb.setLatchTotal(l.latchTotal).setLatchCount(l.latchCount);
+            } else if (l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                // v5 家族字段：仅循环屏障条目写入（列表序即账簿插入序，序列化确定）。
+                lb.setBarrierParties(l.barrierParties).setBarrierGeneration(l.barrierGeneration)
+                        .setBarrierActionSession(l.barrierActionSession)
+                        .setBarrierActionRequest(l.barrierActionRequest)
+                        .setBarrierCompletedGeneration(l.barrierCompletedGeneration)
+                        .setBarrierCompletedResult(l.barrierCompletedResult)
+                        .setBarrierCompletedExecutor(l.barrierCompletedExecutor);
+                for (ArrivalRef a : l.barrierArrivals) {
+                    lb.addBarrierCurrentArrivals(SnapshotBarrierArrival.newBuilder()
+                            .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                }
+                for (ArrivalRef a : l.barrierCompletedArrivals) {
+                    lb.addBarrierCompletedArrivals(SnapshotBarrierArrival.newBuilder()
+                            .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                }
             } else if (isAtomicType(l.lockType)) {
                 // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
                 lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
@@ -583,6 +664,20 @@ public final class ShadowTable {
                 sl.atomicSlotOldValue = l.getAtomicSlotOldValue();
                 sl.atomicSlotValue = l.getAtomicSlotValue();
                 sl.atomicSlotVersion = l.getAtomicSlotVersion();
+                // 常驻条目：不入 heldIndex（无持有语义），仅入表与观察视图。
+                locks.put(l.getKey(), sl);
+            } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                sl.barrierParties = l.getBarrierParties();
+                sl.barrierGeneration = l.getBarrierGeneration();
+                sl.barrierArrivals = l.getBarrierCurrentArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
+                sl.barrierActionSession = l.getBarrierActionSession();
+                sl.barrierActionRequest = l.getBarrierActionRequest();
+                sl.barrierCompletedGeneration = l.getBarrierCompletedGeneration();
+                sl.barrierCompletedResult = l.getBarrierCompletedResult();
+                sl.barrierCompletedArrivals = l.getBarrierCompletedArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
+                sl.barrierCompletedExecutor = l.getBarrierCompletedExecutor();
                 // 常驻条目：不入 heldIndex（无持有语义），仅入表与观察视图。
                 locks.put(l.getKey(), sl);
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
@@ -648,6 +743,47 @@ public final class ShadowTable {
         l.latchCount = remaining;
         l.latchParticipants.add(sessionId);
         adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 循环屏障复制态镜像（三命令应用点与 SESSION_CLOSE 破障传播的落点）：
+     * 条目不存在则按导出态创建，存在则整体刷新（世代回卷、账簿归档与
+     * 破障传播都表现为导出态的自然变化，本方法不做增量推导）。家族冲突
+     * （引擎已回 {@code REJECT_TYPE_MISMATCH} 的拒绝路径）零扰动。
+     *
+     * @param key 屏障键
+     * @param d   引擎复制态导出（逻辑会话 id 投影由调用方完成）
+     */
+    public void barrierMirror(String key, BarrierMirrorData d) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            l = new SLock(LockType.LOCK_TYPE_BARRIER_VALUE, 0, 0, 0);
+            locks.put(key, l);
+        }
+        if (l.lockType != LockType.LOCK_TYPE_BARRIER_VALUE) {
+            return; // 家族冲突：镜像零扰动
+        }
+        l.barrierParties = d.parties();
+        l.barrierGeneration = d.generation();
+        l.barrierArrivals = List.copyOf(d.arrivals());
+        l.barrierActionSession = d.actionSession();
+        l.barrierActionRequest = d.actionRequest();
+        l.barrierCompletedGeneration = d.completedGeneration();
+        l.barrierCompletedResult = d.completedResult();
+        l.barrierCompletedArrivals = List.copyOf(d.completedArrivals());
+        l.barrierCompletedExecutor = d.completedExecutor();
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * key 是否为循环屏障条目（含装载态）。
+     *
+     * @param key 屏障键
+     * @return 存在 BARRIER 条目为 {@code true}
+     */
+    public boolean isBarrier(String key) {
+        SLock l = locks.get(key);
+        return l != null && l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE;
     }
 
     /**

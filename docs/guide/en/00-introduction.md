@@ -7,10 +7,11 @@ OpenLatch is a lightweight distributed lock service offering JUC-style coordinat
 - **Mutex family** (`OLock`): reentrant, simple (non-reentrant), read-write (`OReadWriteLock`), fair;
 - **Distributed semaphore** (`OSemaphore`): an N-permit shared gate;
 - **Distributed count-down latch** (`OCountDownLatch`): a one-shot barrier.
+- **Distributed cyclic barrier** (`OBarrier`): multi-party rendezvous with reusable generations (v5).
 
 Backends: a **Raft cluster** (Apache Ratis replicated state machine with snapshots, default 3
 nodes tolerating 1 failure) or a **single node** (in-memory, zero dependencies). The wire
-protocol is Protobuf over Netty long connections (v3). Semantics are underpinned by **leases**
+protocol is Protobuf over Netty long connections (negotiated v1–v5). Semantics are underpinned by **leases**
 with client-side **watchdog renewal** and a **wait–notify–resend FIFO fair queue**.
 
 One sentence: **coordination, not consensus**. Locks carry leases and can be lost — your

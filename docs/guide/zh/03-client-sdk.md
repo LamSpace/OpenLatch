@@ -121,6 +121,36 @@ hits.accumulateAndGet(5, Integer::sum);                        // 客户端带�
 6. `newAtomic*(key, initial)` 的初值是**断言**而非赋值：既有条目初值不符时，
    该句柄首个操作抛 `OpenLatchException`（与屏障 total 定型同规则）。
 
+## 循环屏障（OBarrier，v5）
+
+```java
+OBarrier gate = client.newBarrier("phase:ingest", 3);          // 创建者句柄：定型 parties=3
+gate.await();                                                   // 阻塞至本世代合拢（兜底超时约束）
+boolean met = gate.await(10, TimeUnit.SECONDS);                  // 限时：超时=本方离场并破障 → false
+
+OBarrier worker = client.newBarrier("phase:ingest");            // 纯加入句柄（不主张 parties）
+OBarrier withAction = client.newBarrier("phase:ingest", 3, () -> flushBuffers());
+// 三方到场合拢时，最后到场方在自己的 await 调用栈内执行 flushBuffers()；
+// 它完成（或抛异常）回报之前，其余两方都不放行。
+
+OBarrier any = client.newBarrier("phase:ingest", 3);
+any.breakBarrier();                                             // 显式打破当前世代（幂等，无 reset）
+if (any.isBroken()) { ... }                                     // 句柄本地最近所见裁决（无网络）
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §8](01-concepts.md)）：
+
+1. 到场合拢、动作两阶段放行均为服务端多数派裁决——每到场/回报一到网络往返；
+2. **离场即破障（增强于 JDK）**：任一已到场方超时/中断/进程死亡/`breakBarrier()` 都
+   即时打破其当前世代，全体在队他方 `await` 抛 `OBrokenBarrierException`；
+3. **破障为世代局部、无粘滞**：下一批到场自然开新世代正常合拢；不提供 `reset()`
+   （与 JDK 差异）；`isBroken()` 是句柄本地读数，非实时跨进程一致；
+4. 动作由最后到场方在其进程内执行；动作抛异常 ⇒ 本方以该异常终结且同世代全体破障；
+5. `await` 超时/中断即破障连带全体收场——对抖动网络建议用 `await()` + 外部监督，
+   或加大超时预算；
+6. 在途到场遇会话切换不自动重放（到场是有副作用请求），本方抛 `OpenLatchException`，
+   旧世代已随会话清理破障；`await` 全程无租约、零续租流量。
+
 ## 异步用法
 
 ```java

@@ -18,12 +18,16 @@ package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
+import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
+import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.AtomicEntry;
+import io.github.lamspace.openlatch.core.lock.BarrierEntry;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LatchEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
@@ -34,6 +38,9 @@ import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.AtomicOpResult;
+import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
+import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
+import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
@@ -161,6 +168,24 @@ public final class CoreEngine {
                 lockTable.computeIfAbsent(en.key(), k -> ae);
                 continue;
             }
+            if (en.lockType() == LockType.BARRIER) {
+                // 循环屏障条目：世代复制态直写（不经迁移规则——恢复不重演
+                // 到场判定）；在队等待队列恒空（Leader 本地态，不入快照）。
+                // 了结记录中指向已消亡会话的账簿项由装配侧（installSnapshot）
+                // 剔除——其重发路径在会话校验处即被拒，账簿永不触达。
+                CoreStateRestore.BarrierState bs = en.barrier();
+                BarrierEntry be = BarrierEntry.restored(en.key(), bs.parties(), bs.generation(),
+                        bs.arrivals(), bs.actionSession(), bs.actionRequest(),
+                        bs.completedGeneration(),
+                        switch (bs.completedResult()) {
+                            case 1 -> io.github.lamspace.openlatch.core.result.BarrierFinal.TRIPPED;
+                            case 2 -> io.github.lamspace.openlatch.core.result.BarrierFinal.BROKEN;
+                            default -> null;
+                        },
+                        bs.completedArrivals(), bs.completedExecutor());
+                lockTable.computeIfAbsent(en.key(), k -> be);
+                continue;
+            }
             if (en.lockType() == LockType.LATCH) {
                 // 屏障条目：无租约、无持有者（计数直写；等待者/参与者为
                 // Leader 本地态，恢复后恒空，后续操作重新登记）。
@@ -243,12 +268,19 @@ public final class CoreEngine {
      * <p>这是断连清理的唯一入口，与 {@link #acquire} 中的会话校验原子互斥：
      * 要么获取请求先登记成功、关闭时一并清理，要么关闭先生效、获取被拒。
      *
+     * <p><b>返回值</b>：本次关闭因"离场即破障"而打破世代的 BARRIER 条目
+     * key 集合（当前世代含该会话到场记录者）——单机路径无需消费（破障
+     * 广播已随 {@code notify} 收集经监听器发出），集群路径由应用点写入
+     * 回执供 Leader 对存活等待者广播。
+     *
      * @param sessionId 要关闭的会话
+     * @return 被本次关闭打破世代的循环屏障 key 列表（无则空表）
      */
-    public void sessionClosed(long sessionId) {
+    public List<String> sessionClosed(long sessionId) {
+        List<String> brokenBarriers = List.of();
         Set<String> keys = sessions.remove(sessionId);
         if (keys == null) {
-            return;
+            return brokenBarriers;
         }
         long now = clock.nowMs();
         for (String key : keys) {
@@ -257,14 +289,24 @@ public final class CoreEngine {
                 continue;
             }
             List<Waiter> notify = new ArrayList<>();
+            boolean broke;
             synchronized (e) {
+                long genBefore = e instanceof BarrierEntry be ? be.generation() : -1L;
                 e.removeSession(sessionId, now, config.headReplyTimeoutMs(), notify);
+                broke = e instanceof BarrierEntry be && be.generation() != genBefore;
                 if (e.isEmpty()) {
                     lockTable.remove(key, e);
                 }
             }
+            if (broke) {
+                if (brokenBarriers.isEmpty()) {
+                    brokenBarriers = new ArrayList<>();
+                }
+                brokenBarriers.add(key);
+            }
             fireNotify(notify, key);
         }
+        return brokenBarriers;
     }
 
     /**
@@ -315,9 +357,10 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
-        // LATCH/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
+        // LATCH/BARRIER/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
         // 属请求形状错误，协议层门控之后由本守卫兜底。
-        if (cmd.lockType() == LockType.LATCH || familyOf(cmd.lockType()) == KeyFamily.ATOMIC) {
+        if (cmd.lockType() == LockType.LATCH || cmd.lockType() == LockType.BARRIER
+                || familyOf(cmd.lockType()) == KeyFamily.ATOMIC) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         KeyFamily family = familyOf(cmd.lockType());
@@ -380,6 +423,7 @@ public final class CoreEngine {
             case SEMAPHORE -> KeyFamily.SEMAPHORE;
             case LATCH -> KeyFamily.LATCH;
             case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN -> KeyFamily.ATOMIC;
+            case BARRIER -> KeyFamily.BARRIER;
         };
     }
 
@@ -408,6 +452,10 @@ public final class CoreEngine {
             // ACQUIRE 携带原子类型在入口即拒（见 acquire 守卫）。
             case ATOMIC -> throw new IllegalStateException(
                     "atomic entries are created only via atomic channels");
+            // BARRIER 条目只能经循环屏障命令通道（barrierAwait）创建，
+            // ACQUIRE 携带屏障定型在入口即拒（见 acquire 守卫）。
+            case BARRIER -> throw new IllegalStateException(
+                    "barrier entries are created only via barrier channels");
         };
     }
 
@@ -670,6 +718,175 @@ public final class CoreEngine {
     }
 
     /**
+     * 循环屏障到场（含旧世代重发）：BARRIER 家族的主命令入口。
+     *
+     * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 校验 →
+     * 条目定位：key 无条目时 MUST 携带 {@code parties > 0} 定型创建（否则
+     * {@link Outcome#REJECT_BARRIER_PARTIES}）；条目锁内回查存活、家族判定
+     * （他家族 → {@link Outcome#REJECT_TYPE_MISMATCH}）、权威会话校验与
+     * 触及登记（与 {@link #sessionClosed} 原子互斥——会话死亡时其当前世代
+     * 到场记录连带破障，见 {@link BarrierEntry#removeSession}）→
+     * {@link BarrierEntry#await} 规则集。条目定型后存续不回收。
+     *
+     * <p><b>通知路径</b>：当回合拢（无动作形态）时在本调用内收集放行广播，
+     * 锁外经 {@link CoreEventListener} 触发——与 {@link #countDown} 的归零
+     * 广播同机制；挂起与动作待决形态不产生通知。
+     *
+     * @param cmd 到场命令
+     * @return 到场结果（世代号、位次与执行者标记回显见结果记录）
+     */
+    public BarrierAwaitResult barrierAwait(BarrierAwaitCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return BarrierAwaitResult.rejected(Outcome.REJECT_SESSION, 0);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return BarrierAwaitResult.rejected(keyBad, 0);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.parties() <= 0) {
+                    return BarrierAwaitResult.rejected(Outcome.REJECT_BARRIER_PARTIES, 0);
+                }
+                e = lockTable.computeIfAbsent(key, k -> new BarrierEntry(k, cmd.parties()));
+            }
+            List<Waiter> notify = new ArrayList<>();
+            BarrierAwaitResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态移除，重试
+                }
+                if (e.family() != KeyFamily.BARRIER) {
+                    return BarrierAwaitResult.rejected(Outcome.REJECT_TYPE_MISMATCH, 0);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    if (e.isEmpty()) {
+                        lockTable.remove(key, e);
+                    }
+                    return BarrierAwaitResult.rejected(Outcome.REJECT_SESSION, 0);
+                }
+                result = ((BarrierEntry) e).await(cmd, now, config,
+                        config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, key);
+            return result;
+        }
+    }
+
+    /**
+     * 循环屏障离场（超时/中断/显式破障）：条目定位与会话校验同
+     * {@link #barrierAwait}；破障通知在条目锁外触发。key 无条目时为幂等
+     * 无操作（纯破障主张对不存在的屏障无对象可破）；他家族条目回
+     * {@link Outcome#REJECT_TYPE_MISMATCH}（零扰动）。
+     *
+     * @param cmd 离场命令
+     * @return 离场结果（恒 {@link Outcome#GRANTED} 或拒绝类）
+     */
+    public BarrierLeaveResult barrierLeave(BarrierLeaveCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return BarrierLeaveResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return BarrierLeaveResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return BarrierLeaveResult.ok(); // 无条目：纯破障主张幂等无操作
+        }
+        List<Waiter> notify = new ArrayList<>();
+        BarrierLeaveResult result;
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                // 条目竞态移除：无到场记录即无世代可破，幂等无操作（与
+                // "条目不存在"同口径；到场账簿随条目存续）。
+                return BarrierLeaveResult.ok();
+            }
+            if (e.family() != KeyFamily.BARRIER) {
+                return BarrierLeaveResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+            }
+            if (!sessions.contains(cmd.sessionId())) {
+                return BarrierLeaveResult.rejected(Outcome.REJECT_SESSION);
+            }
+            result = ((BarrierEntry) e).leave(cmd, now, config.headReplyTimeoutMs(), notify);
+        }
+        fireNotify(notify, key);
+        return result;
+    }
+
+    /**
+     * 循环屏障动作了结（执行者回报）：条目定位与会话校验同
+     * {@link #barrierAwait}；合拢生效时放行广播在条目锁外触发。key 无
+     * 条目或家族不符分别回 {@link Outcome#REJECT_BARRIER_ACTION} /
+     * {@link Outcome#REJECT_TYPE_MISMATCH}。
+     *
+     * @param cmd 了结命令（会话 + 世代号）
+     * @return 了结结果（GRANTED=合拢生效或幂等重复；BARRIER_BROKEN=世代
+     *         已破；REJECT_BARRIER_ACTION=回报不被受理）
+     */
+    public BarrierActionDoneResult barrierActionDone(BarrierActionDoneCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return new BarrierActionDoneResult(Outcome.REJECT_SESSION, 0, false);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return new BarrierActionDoneResult(keyBad, 0, false);
+        }
+        String key = cmd.key();
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return BarrierActionDoneResult.rejected();
+        }
+        List<Waiter> notify = new ArrayList<>();
+        BarrierActionDoneResult result;
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return BarrierActionDoneResult.rejected();
+            }
+            if (e.family() != KeyFamily.BARRIER) {
+                return new BarrierActionDoneResult(Outcome.REJECT_TYPE_MISMATCH, 0, false);
+            }
+            if (!sessions.contains(cmd.sessionId())) {
+                return new BarrierActionDoneResult(Outcome.REJECT_SESSION, 0, false);
+            }
+            result = ((BarrierEntry) e).actionDone(cmd, now, config.headReplyTimeoutMs(), notify);
+        }
+        fireNotify(notify, key);
+        return result;
+    }
+
+    /**
+     * BARRIER 条目复制态导出（影子表镜像与跨副本摘要的权威读口）：
+     * 条目锁内一次拷贝；条目不存在、家族不符或已被回收返回
+     * {@code null}（调用方按"镜像零扰动"处理）。只读，MUST NOT
+     * 改变任何状态。
+     *
+     * @param key 屏障键
+     * @return 复制态快照；非 BARRIER 条目或不存在为 {@code null}
+     */
+    public BarrierEntry.ReplicatedState barrierReplicatedState(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return e instanceof BarrierEntry be ? be.replicatedState() : null;
+        }
+    }
+
+    /**
      * key 形状校验的共享出口：空与超长分别回
      * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
      * 合法返回 {@code null}。
@@ -759,7 +976,7 @@ public final class CoreEngine {
                     case LOCK -> heldLocks++;
                     case SEMAPHORE -> heldSemaphores++;
                     default -> {
-                        // LATCH/ATOMIC 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
+                        // LATCH/ATOMIC/BARRIER 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
                     }
                 }
             }
@@ -799,8 +1016,9 @@ public final class CoreEngine {
                     case SemaphoreEntry se -> snapshots.add(se.snapshot(now));
                     case LatchEntry la -> snapshots.add(la.snapshot(now));
                     case AtomicEntry ae -> snapshots.add(ae.snapshot(now));
+                    case BarrierEntry be -> snapshots.add(be.snapshot(now));
                     default -> {
-                        // 未知实现不入快照（理论不可达：四家族已穷尽）。
+                        // 未知实现不入快照（理论不可达：五家族已穷尽）。
                     }
                 }
             }
@@ -835,6 +1053,7 @@ public final class CoreEngine {
                 case SemaphoreEntry se -> se.snapshot(now);
                 case LatchEntry la -> la.snapshot(now);
                 case AtomicEntry ae -> ae.snapshot(now);
+                case BarrierEntry be -> be.snapshot(now);
                 default -> null;
             };
         }

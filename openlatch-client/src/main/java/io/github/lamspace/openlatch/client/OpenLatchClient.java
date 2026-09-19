@@ -27,6 +27,9 @@ import io.github.lamspace.openlatch.client.internal.SessionContext;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
+import io.github.lamspace.openlatch.protocol.BarrierActionDoneRequest;
+import io.github.lamspace.openlatch.protocol.BarrierAwaitRequest;
+import io.github.lamspace.openlatch.protocol.BarrierLeaveRequest;
 import io.github.lamspace.openlatch.protocol.LatchAwaitRequest;
 import io.github.lamspace.openlatch.protocol.LatchCountDownRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
@@ -1307,6 +1310,56 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程循环屏障句柄（创建者形态）：{@code parties} 为定型主张
+     * （key 首建时定型，既有条目上主张不符被拒——判例 Semaphore/Latch
+     * 非零主张）。语义降级/增强清单见 {@link OBarrier} 接口注释。
+     *
+     * @param key     屏障键
+     * @param parties 定型许可数（{@code > 0}）
+     * @return 循环屏障句柄
+     * @throws IllegalArgumentException {@code parties <= 0}
+     */
+    public OBarrier newBarrier(String key, long parties) {
+        Objects.requireNonNull(key);
+        if (parties <= 0) {
+            throw new IllegalArgumentException("parties must be > 0");
+        }
+        return new RemoteBarrier(this, key, parties, null);
+    }
+
+    /**
+     * 创建跨进程循环屏障句柄（携带 barrierAction 的创建者形态）：每世代
+     * 合拢时由当次最后到场方在其进程内执行动作，动作完成回报前其余到场
+     * 方不放行；动作抛异常则同世代全体破障（见 {@link OBarrier} 契约）。
+     *
+     * @param key     屏障键
+     * @param parties 定型许可数（{@code > 0}）
+     * @param action  动作（非空；执行线程为最后到场方的等待线程）
+     * @return 循环屏障句柄
+     * @throws IllegalArgumentException {@code parties <= 0} 或 {@code action} 为 null
+     */
+    public OBarrier newBarrier(String key, long parties, Runnable action) {
+        Objects.requireNonNull(key);
+        Objects.requireNonNull(action);
+        if (parties <= 0) {
+            throw new IllegalArgumentException("parties must be > 0");
+        }
+        return new RemoteBarrier(this, key, parties, action);
+    }
+
+    /**
+     * 创建跨进程循环屏障句柄（纯加入形态）：不主张 parties——对已定型的
+     * 屏障直接到场等待；屏障从未定型时被服务端以 {@code INVALID_REQUEST}
+     * 拒绝。{@link OBarrier#getParties()} 在首次应答前回 0（未观测）。
+     *
+     * @param key 屏障键
+     * @return 循环屏障句柄
+     */
+    public OBarrier newBarrier(String key) {
+        return new RemoteBarrier(this, Objects.requireNonNull(key), 0, null);
+    }
+
+    /**
      * 创建跨进程原子 long 句柄（无主张形态）：key 不存在时值以 0 起步。
      * 语义降级/增强清单见 {@link OAtomicLong} 接口注释——每操作一次往返、
      * 值不绑定会话（死亡不回滚）、条目常驻不回收。
@@ -1480,6 +1533,63 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setRequestId(requestId)
                 .setLatchCountDownRequest(LatchCountDownRequest.newBuilder()
                         .setKey(key).setCount(count).setTotal(total))
+                .build();
+    }
+
+    /**
+     * 构造 BARRIER_AWAIT 信封（同 id 重发复用；parties 为定型主张，
+     * 0 为纯加入；carriesAction 标记本句柄携带动作）。
+     *
+     * @param requestId     请求 id
+     * @param key           屏障键
+     * @param parties       定型主张（{@code >= 0}）
+     * @param carriesAction 携带 barrierAction
+     * @return 信封
+     */
+    static Envelope barrierAwaitEnvelope(long requestId, String key, long parties,
+            boolean carriesAction) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_AWAIT)
+                .setRequestId(requestId)
+                .setBarrierAwaitRequest(BarrierAwaitRequest.newBuilder()
+                        .setKey(key).setParties(parties).setCarriesAction(carriesAction))
+                .build();
+    }
+
+    /**
+     * 构造 BARRIER_LEAVE 信封（离场/破障共用通道）。
+     *
+     * @param requestId     请求 id
+     * @param key           屏障键
+     * @param awaitRequestId 被摘除到场项的请求 id（0=纯破障主张）
+     * @return 信封
+     */
+    static Envelope barrierLeaveEnvelope(long requestId, String key, long awaitRequestId) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_LEAVE)
+                .setRequestId(requestId)
+                .setBarrierLeaveRequest(BarrierLeaveRequest.newBuilder()
+                        .setKey(key).setAwaitRequestId(awaitRequestId))
+                .build();
+    }
+
+    /**
+     * 构造 BARRIER_ACTION_DONE 信封（执行者回报，按 (会话, 世代) 幂等）。
+     *
+     * @param requestId  请求 id
+     * @param key        屏障键
+     * @param generation 执行者世代号
+     * @return 信封
+     */
+    static Envelope barrierActionDoneEnvelope(long requestId, String key, long generation) {
+        return Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_ACTION_DONE)
+                .setRequestId(requestId)
+                .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
+                        .setKey(key).setGeneration(generation))
                 .build();
     }
 

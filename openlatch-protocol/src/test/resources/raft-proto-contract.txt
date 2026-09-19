@@ -12,6 +12,9 @@ enum RaftEntryType
   NOOP 7
   LATCH_COUNT_DOWN_ENTRY 8
   ATOMIC_OP_ENTRY 9
+  BARRIER_AWAIT_ENTRY 10
+  BARRIER_LEAVE_ENTRY 11
+  BARRIER_ACTION_DONE_ENTRY 12
 enum ApplyStatus
   APPLY_STATUS_UNKNOWN 0
   OK 1
@@ -23,6 +26,7 @@ enum ApplyStatus
   QUEUE_FULL 7
   INTERNAL_ERROR 8
   INVALID_REQUEST 9
+  BARRIER_BROKEN 10
 message RaftLogEntry
   type 1
   seq 2
@@ -47,6 +51,16 @@ message AtomicOpPayload
   session_id 1
   request_id 2
   request 3
+message BarrierAwaitPayload
+  session_id 1
+  request_id 2
+  request 3
+message BarrierLeavePayload
+  session_id 1
+  request 2
+message BarrierActionDonePayload
+  session_id 1
+  request 2
 message ExpirePayload
   key 1
   lease_token 2
@@ -63,6 +77,11 @@ message ApplyResult
   atomic_old_value 10
   atomic_value 11
   atomic_version 12
+  barrier_generation 13
+  barrier_executor 14
+  barrier_parties 15
+  barrier_settled 16
+  barrier_released_keys 17
 message SnapshotHolder
   session_id 1
   thread_id 2
@@ -86,6 +105,18 @@ message SnapshotLock
   atomic_slot_old_value 16
   atomic_slot_value 17
   atomic_slot_version 18
+  barrier_parties 19
+  barrier_generation 20
+  barrier_current_arrivals 21
+  barrier_action_session 22
+  barrier_action_request 23
+  barrier_completed_generation 24
+  barrier_completed_result 25
+  barrier_completed_arrivals 26
+  barrier_completed_executor 27
+message SnapshotBarrierArrival
+  session_id 1
+  request_id 2
 message SnapshotState
   locks 1
   sessions 2

@@ -16,6 +16,9 @@ enum MessageType
   ADMIN_KEY_DETAIL 12
   ADMIN_LIST_SESSIONS 13
   ATOMIC_OP 14
+  BARRIER_AWAIT 15
+  BARRIER_LEAVE 16
+  BARRIER_ACTION_DONE 17
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -27,6 +30,7 @@ enum LockType
   LOCK_TYPE_ATOMIC_LONG 7
   LOCK_TYPE_ATOMIC_INTEGER 8
   LOCK_TYPE_ATOMIC_BOOLEAN 9
+  LOCK_TYPE_BARRIER 10
 enum StatusCode
   OK 0
   QUEUED 1
@@ -40,6 +44,7 @@ enum StatusCode
   INVALID_REQUEST 9
   NOT_LEADER 10
   INTERNAL_ERROR 11
+  BARRIER_BROKEN 12
 enum AtomicOp
   ATOMIC_GET 0
   ATOMIC_SET 1
@@ -75,6 +80,12 @@ message Envelope
   admin_list_sessions_response 31
   atomic_op_request 32
   atomic_op_response 33
+  barrier_await_request 34
+  barrier_await_response 35
+  barrier_leave_request 36
+  barrier_leave_response 37
+  barrier_action_done_request 38
+  barrier_action_done_response 39
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -157,6 +168,7 @@ message AdminSummaryResponse
   uptime_ms 8
   version 9
   atomic_entries 10
+  barrier_entries 11
 message AdminListKeysRequest
   token 1
   page 2
@@ -170,6 +182,9 @@ message AdminKeyInfo
   waiter_count 5
   atomic_kind 6
   atomic_value 7
+  barrier_parties 8
+  barrier_generation 9
+  barrier_arrived 10
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -207,6 +222,11 @@ message AdminKeyDetailResponse
   atomic_initial 13
   atomic_value 14
   atomic_version 15
+  barrier_parties 16
+  barrier_generation 17
+  barrier_arrived 18
+  barrier_action_pending 19
+  barrier_last_final 20
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -234,3 +254,23 @@ message AtomicOpResponse
   old_value 4
   value 5
   version 6
+message BarrierAwaitRequest
+  key 1
+  parties 2
+  carries_action 3
+message BarrierAwaitResponse
+  status 1
+  queue_position 2
+  generation 3
+  executor 4
+  parties 5
+message BarrierLeaveRequest
+  key 1
+  await_request_id 2
+message BarrierLeaveResponse
+  status 1
+message BarrierActionDoneRequest
+  key 1
+  generation 2
+message BarrierActionDoneResponse
+  status 1

@@ -13,7 +13,7 @@
             <h2 th:text="${row.display}">节点</h2>
             <table class="grid">
                 <tr>
-                    <th>锁持有</th><th>Semaphore</th><th>Latch 条目</th><th>ATOMIC 条目</th>
+                    <th>锁持有</th><th>Semaphore</th><th>Latch 条目</th><th>ATOMIC 条目</th><th>BARRIER 条目</th>
                     <th>等待者</th><th>会话</th><th>角色</th><th>运行时长</th><th>版本</th>
                 </tr>
                 <tr>
@@ -21,6 +21,7 @@
                     <td th:text="${row.value.heldSemaphores}">0</td>
                     <td th:text="${row.value.latchEntries}">0</td>
                     <td th:text="${row.value.atomicEntries}">0</td>
+                    <td th:text="${row.value.barrierEntries}">0</td>
                     <td th:text="${row.value.totalWaiters}">0</td>
                     <td th:text="${row.value.sessionCount}">0</td>
                     <td th:text="${row.value.nodeRole}">SINGLE</td>

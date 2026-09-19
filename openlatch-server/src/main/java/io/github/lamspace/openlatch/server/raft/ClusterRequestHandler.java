@@ -19,6 +19,9 @@ package io.github.lamspace.openlatch.server.raft;
 import com.google.protobuf.ByteString;
 import io.github.lamspace.openlatch.protocol.AcquireResponse;
 import io.github.lamspace.openlatch.protocol.AtomicOpResponse;
+import io.github.lamspace.openlatch.protocol.BarrierActionDoneResponse;
+import io.github.lamspace.openlatch.protocol.BarrierAwaitResponse;
+import io.github.lamspace.openlatch.protocol.BarrierLeaveResponse;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
@@ -26,6 +29,9 @@ import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierAwaitPayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
@@ -527,6 +533,213 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * BARRIER_AWAIT 集群路径（ACQUIRE 车道 + 复制提交）：到场改变复制状态
+     * （到场账簿、合拢与执行者指定、世代号），MUST 经日志——与 Latch
+     * "await 零日志"的边界差异系设计使然（屏障到场是状态迁移事件）。
+     * 角色门同 ACQUIRE 车道（Leader 权威裁决；Leader 侧
+     * {@code onApplied} 完成等待队列登记与合拢/破障广播）。
+     * v5 门控与形状合法性先于提交——非法请求零入日志。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleBarrierAwait(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 5) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getBarrierAwaitRequest();
+        if (req.getParties() < 0) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        ByteString payload = BarrierAwaitPayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequestId(msg.getRequestId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.BARRIER_AWAIT_ENTRY, payload)
+                .whenComplete((r, err) -> {
+                    Envelope resp = err == null ? mapBarrierAwait(msg, r) : commitFailure(msg, err);
+                    if (metrics != null && resp.hasBarrierAwaitResponse()) {
+                        metrics.recordBarrier("await", resp.getBarrierAwaitResponse().getStatus());
+                    }
+                    respondAsync(ctx, session, startNanos, resp);
+                });
+    }
+
+    /**
+     * BARRIER_LEAVE 集群路径（转发车道）：离场/破障是复制状态迁移，
+     * 与 LATCH_COUNT_DOWN 同车道不设角色门——Follower 提交经内部通道由
+     * 当值 Leader 复制执行；破障广播经 Leader 侧 {@code onApplied}。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleBarrierLeave(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, false);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 5) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getBarrierLeaveRequest();
+        if (req.getAwaitRequestId() < 0) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        ByteString payload = BarrierLeavePayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.BARRIER_LEAVE_ENTRY, payload)
+                .whenComplete((r, err) -> {
+                    Envelope resp = err == null ? mapBarrierLeave(msg, r) : commitFailure(msg, err);
+                    if (metrics != null && resp.hasBarrierLeaveResponse()) {
+                        metrics.recordBarrier("leave", resp.getBarrierLeaveResponse().getStatus());
+                    }
+                    respondAsync(ctx, session, startNanos, resp);
+                });
+    }
+
+    /**
+     * BARRIER_ACTION_DONE 集群路径（转发车道）：动作了结裁决在应用点
+     * （执行者指定校验入引擎，非指定执行者拒），合拢广播经 Leader 侧
+     * {@code onApplied}。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封
+     * @param ctx     连接上下文
+     */
+    public void handleBarrierActionDone(ServerSession session, Envelope msg,
+                                        ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, false);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 5) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var req = msg.getBarrierActionDoneRequest();
+        if (req.getGeneration() <= 0) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        ByteString payload = BarrierActionDonePayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.BARRIER_ACTION_DONE_ENTRY, payload)
+                .whenComplete((r, err) -> {
+                    Envelope resp = err == null ? mapBarrierActionDone(msg, r)
+                            : commitFailure(msg, err);
+                    if (metrics != null && resp.hasBarrierActionDoneResponse()) {
+                        metrics.recordBarrier("action_done",
+                                resp.getBarrierActionDoneResponse().getStatus());
+                    }
+                    respondAsync(ctx, session, startNanos, resp);
+                });
+    }
+
+    /**
+     * {@link ApplyResult} → BarrierAwaitResponse（码形与单机对齐；
+     * OK/QUEUED/BARRIER_BROKEN 携带世代/位次/执行者/定型回显）。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapBarrierAwait(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case QUEUE_FULL -> StatusCode.OVERLOADED;
+            case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.BARRIER_AWAIT)
+                .setRequestId(msg.getRequestId())
+                .setBarrierAwaitResponse(BarrierAwaitResponse.newBuilder()
+                        .setStatus(st)
+                        .setQueuePosition(result.getQueuePosition())
+                        .setGeneration(result.getBarrierGeneration())
+                        .setExecutor(result.getBarrierExecutor())
+                        .setParties(result.getBarrierParties()))
+                .build();
+    }
+
+    /**
+     * {@link ApplyResult} → BarrierLeaveResponse。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapBarrierLeave(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.BARRIER_LEAVE)
+                .setRequestId(msg.getRequestId())
+                .setBarrierLeaveResponse(BarrierLeaveResponse.newBuilder().setStatus(st))
+                .build();
+    }
+
+    /**
+     * {@link ApplyResult} → BarrierActionDoneResponse。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    static Envelope mapBarrierActionDone(Envelope msg, ApplyResult result) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.BARRIER_ACTION_DONE)
+                .setRequestId(msg.getRequestId())
+                .setBarrierActionDoneResponse(BarrierActionDoneResponse.newBuilder()
+                        .setStatus(st))
+                .build();
+    }
+
+    /**
      * {@link ApplyResult} → AtomicOpResponse（码形与单机
      * {@code toAtomicOpResponse} 对齐；OK 携带应答四元组，
      * CAS 家族成败经 {@code atomic_applied} 透传）。
@@ -582,6 +795,9 @@ public final class ClusterRequestHandler {
             case LATCH_COUNT_DOWN -> msg.hasLatchCountDownRequest();
             case LATCH_AWAIT -> msg.hasLatchAwaitRequest();
             case ATOMIC_OP -> msg.hasAtomicOpRequest();
+            case BARRIER_AWAIT -> msg.hasBarrierAwaitRequest();
+            case BARRIER_LEAVE -> msg.hasBarrierLeaveRequest();
+            case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -593,6 +809,9 @@ public final class ClusterRequestHandler {
             case LATCH_COUNT_DOWN -> msg.getLatchCountDownRequest().getKey();
             case LATCH_AWAIT -> msg.getLatchAwaitRequest().getKey();
             case ATOMIC_OP -> msg.getAtomicOpRequest().getKey();
+            case BARRIER_AWAIT -> msg.getBarrierAwaitRequest().getKey();
+            case BARRIER_LEAVE -> msg.getBarrierLeaveRequest().getKey();
+            case BARRIER_ACTION_DONE -> msg.getBarrierActionDoneRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -699,6 +918,13 @@ public final class ClusterRequestHandler {
             case ATOMIC_OP -> b.setAtomicOpResponse(AtomicOpResponse.newBuilder()
                     .setStatus(StatusCode.NOT_LEADER)
                     .setOp(msg.getAtomicOpRequest().getOp()));
+            case BARRIER_AWAIT -> b.setBarrierAwaitResponse(BarrierAwaitResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER)
+                    .setQueuePosition(0));
+            case BARRIER_LEAVE -> b.setBarrierLeaveResponse(BarrierLeaveResponse.newBuilder()
+                    .setStatus(StatusCode.NOT_LEADER));
+            case BARRIER_ACTION_DONE -> b.setBarrierActionDoneResponse(
+                    BarrierActionDoneResponse.newBuilder().setStatus(StatusCode.NOT_LEADER));
             default -> b.setAcquireResponse(AcquireResponse.newBuilder()
                     .setStatus(StatusCode.NOT_LEADER)
                     .setLeaderNodeId(leader.leaderNodeId())

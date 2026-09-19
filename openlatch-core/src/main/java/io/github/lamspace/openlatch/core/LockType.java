@@ -70,5 +70,12 @@ public enum LockType {
     /** 原子 int 形态：值落 int32 域（溢出 wrap），其余语义与 {@link #ATOMIC_LONG} 同构。 */
     ATOMIC_INTEGER,
     /** 原子 boolean 形态：值域 {0,1}（0=false、1=true），其余语义与 {@link #ATOMIC_LONG} 同构。 */
-    ATOMIC_BOOLEAN
+    ATOMIC_BOOLEAN,
+    /**
+     * 循环屏障：非锁家族类型，仅作 key 定型判别——屏障操作经门面
+     * 独立入口（{@code barrierAwait}/{@code barrierLeave}/
+     * {@code barrierActionDone}）进入 {@code BarrierEntry}，不经获取/
+     * 释放/续租命令通道。
+     */
+    BARRIER
 }

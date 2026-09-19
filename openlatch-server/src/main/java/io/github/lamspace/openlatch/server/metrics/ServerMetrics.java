@@ -51,8 +51,9 @@ import java.util.function.BooleanSupplier;
  * {@code LATCH_COUNT_DOWN} 计入 {@code release.total{status}}；
  * {@code LEASE_RENEW} 计入 {@code renew.total{status}}；v4 起 {@code ATOMIC_OP}
  * 单独计入 {@code atomic.total{kind,op,status}}（记于分发/受理点而非应答收口——
- * kind/op 维度只在请求侧存在，形状非法的请求不计数）。无应答 payload 的信封
- * （PING 回包、未知类型）不计。
+ * kind/op 维度只在请求侧存在，形状非法的请求不计数）；v5 起三组 BARRIER 消息
+ * 单独计入 {@code barrier.total{op,status}}（同一收口纪律）。无应答 payload 的
+ * 信封（PING 回包、未知类型）不计。
  *
  * <p><b>启停语义</b>：{@code metrics.enabled=false} 仅关闭 {@code /metrics}
  * 对外服务，埋点照常累积进内存注册表（"关闭即不抓取"而非
@@ -87,6 +88,8 @@ public final class ServerMetrics {
     public static final String CLUSTER_IS_LEADER = "openlatch.cluster.is_leader";
     /** v4：原子变量操作计数（按形态/操作/应答状态码维度），counter。 */
     public static final String ATOMIC_TOTAL = "openlatch.server.atomic.total";
+    /** v5：循环屏障操作计数（按操作/应答状态码维度），counter。 */
+    public static final String BARRIER_TOTAL = "openlatch.server.barrier.total";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -252,6 +255,26 @@ public final class ServerMetrics {
                     case ATOMIC_ADD -> "add";
                     case ATOMIC_CAS -> "cas";
                     case ATOMIC_CAS_STAMPED -> "cas_stamped";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
+     * 记录一次已受理（形状合法）的循环屏障操作应答：计数线
+     * {@code barrier_total{op,status}}。破障了结以 {@code status=BARRIER_BROKEN}
+     * 单列可观测；形状非法的请求不计数（杜绝维度伪造）。调用点在单机
+     * {@code RequestDispatcher.dispatchBarrier*} 与集群
+     * {@code ClusterRequestHandler.handleBarrier*}——两形态同一收口口径。
+     *
+     * @param op     操作标签值（{@code await}/{@code leave}/{@code action_done}）
+     * @param status 应答协议状态码
+     */
+    public void recordBarrier(String op, StatusCode status) {
+        Counter.builder(BARRIER_TOTAL)
+                .tag("op", switch (op) {
+                    case "await", "leave", "action_done" -> op;
                     default -> "unknown";
                 })
                 .tag("status", status.name())

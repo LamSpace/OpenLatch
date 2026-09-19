@@ -105,8 +105,8 @@ public final class ConnectionManager {
         CLOSED
     }
 
-    /** v4 协议版本，握手请求固定携带（服务端兼容 v1–v4，应答回显本版本）。 */
-    private static final int PROTOCOL_VERSION = 4;
+    /** v5 协议版本，握手请求固定携带（服务端兼容 v1–v5，应答回显本版本）。 */
+    private static final int PROTOCOL_VERSION = 5;
     /** 入站帧最大长度（1 MiB），与服务端帧长限制一致。 */
     private static final int MAX_FRAME_LENGTH = 1024 * 1024;
     /** 日志器。 */

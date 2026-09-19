@@ -3,9 +3,7 @@
 ## Purpose
 
 为应用提供访问 OpenLatch 锁服务的客户端 SDK：异步内核 + JUC 风格同步包装、全程超时无死等、等待-通知-重发闭环、看门狗续租与锁丢失通知、断连重连与锁丢失裁决、优雅关停。
-
 ## Requirements
-
 ### Requirement: 客户端构建与连接建立
 
 客户端 MUST 通过 builder 构建，必填服务地址：或单一地址（Phase 1 入口，语义为只含一个种子的种子列表），或种子列表（≥1 个 `host:port`）；二者同配时以种子列表为准，皆缺 MUST 构建失败。其余参数（请求超时默认 5s、等待总超时默认 30s、连接超时默认 3s、重连退避初始 200ms/上限 10s、EventLoop 线程数默认 1）未设置时 MUST 使用默认值。首次使用或显式连接时，客户端 MUST 从种子列表建立连接并完成握手，获得服务端分配的会话；握手完成前发出的业务请求 MUST 不被服务端接受（客户端不得跳过握手直接发业务请求）。
@@ -86,6 +84,7 @@
 
 - **WHEN** 同一请求标识的在途请求尚未返回期间，同标识请求再次发出（如通知密集触发两次重发），且第一条始终无响应
 - **THEN** 两条在途项各自在其超时界限内完成（响应或超时异常），无一永久挂起；后一条的响应/超时不误摘前一条的登记，反之亦然
+
 ### Requirement: 等待-通知-重发闭环
 
 排队等待的获取请求在收到服务端的队首通知后，MUST 以原请求标识重发获取请求（服务端幂等，不会二次排队）；重发被授予则完成等待，仍排队则继续挂起等待下一次通知。等待项在等待总时限到达时 MUST 以超时失败；此后到达的通知 MUST 被忽略（不重发）。已超时/已失败的等待若在途重发随后被授予，客户端 MUST 归还该锁（发送释放），不得静默泄漏。重发请求本身超时（无响应）时，MUST 仅结束该次重发、保持挂起等待下一次通知，直到等待总时限到达才整体失败。同一等待收到两次通知而产生的重复授予，MUST 以首个授予为准，重复授予归还。
@@ -158,6 +157,7 @@
 
 - **WHEN** 客户端先后对大量不同 key 注册单锁监听并全部彻底释放
 - **THEN** 已释放的 key 不再保留监听器登记；该 key 再次被获取并丢锁时，先前监听器不触发，需调用方重新注册
+
 ### Requirement: 断连快速失败与重连
 
 连接断开时，所有挂起中的获取/释放/续租操作 MUST 以"服务不可用"异常快速失败。客户端 MUST 自动重连：指数退避（初始 200ms、倍增、上限 10s、每次 ±20% 抖动），直至成功或客户端关停；集群形态下重连目标 MUST 先试原地址，失败后按序轮询种子列表。重连成功 MUST 获得新会话，旧会话标识的残留响应 MUST 被丢弃。等待中的操作不因断连自动重试，由调用方决定重试。
@@ -247,6 +247,7 @@
 
 - **WHEN** 客户端 A 持锁、客户端 B 排队等待，Leader 切换
 - **THEN** B 的等待向新 Leader 重新排队并最终在 A 释放后获授；通知-重发闭环在新 Leader 上生效
+
 ### Requirement: FairLock API
 
 客户端 SHALL 提供 `newFairLock(key)` 创建显式公平承诺的互斥锁：行为与 `newLock`（可重入）逐项等价（互斥、重入、租约、看门狗、丢失通知），并享受服务端公平性承诺（授予顺序等于排队顺序）。
@@ -331,3 +332,43 @@
 
 - **WHEN** 会话 A 写入值后关闭，会话 B 读取同 key
 - **THEN** B 读到 A 写入后的值与推进后的版本戳，无任何回滚
+
+### Requirement: OBarrier API
+
+客户端 SHALL 提供循环屏障 `OBarrier` 与工厂 `OpenLatchClient.newBarrier(String key, int parties)`（创建者句柄，每次请求携带 `parties` 非零定型主张）、`newBarrier(String key, int parties, Runnable barrierAction)`（同前并声明该句柄到场合拢时携带动作）与 `newBarrier(String key)`（纯加入句柄，不主张初值，对从未定型的 barrier 被拒）。方法面：`void await() throws InterruptedException`——阻塞至所属世代的了结，受等待兜底超时约束；`boolean await(long timeout, TimeUnit unit) throws InterruptedException`——限时等待，返回是否以 TRIPPED 了结（`false` = 超时，且超时本身即破障，见下）；`void breakBarrier() throws OpenLatchException`；`boolean isBroken()`；`int getParties()`。异常面遵循库内非受检纪律：破障了结抛 `OBrokenBarrierException`（新增公开异常，继承 `OpenLatchException`；替代 JDK 受检 `BrokenBarrierException`，差异 MUST 在契约 Javadoc 声明）、兜底超时抛 `OpenLatchTimeoutException`、JUC 受检 `TimeoutException` 以 `await(timeout)` 返回 `false` 的 boolean 形态承载（JDK 差异声明同上）。等待编排复用等待-通知-重发闭环：`QUEUED` 后挂起等 `AWAIT_NOTIFY`，通知到达以同 `request_id` 重发按世代了结记录幂等了结；执行者形态（应答 `executor=true`）在**本调用栈内**执行 `barrierAction`，完成（正常返回或抛异常）后以 `BARRIER_ACTION_DONE` 终结本等待——动作正常完成 ⇒ 本方 await 正常返回且同世代他方随后放行；动作抛异常 ⇒ SDK 改发 `BARRIER_LEAVE`（离场即破障），本方以该异常终结且同世代全体收 `OBrokenBarrierException`（对齐 JDK"动作异常使屏障破障"）。超时与中断语义：**离场即破障**——`await(timeout)` 超时、`await()` 兜底超时与本地中断均触发客户端 `BARRIER_LEAVE`，当前世代即时 BROKEN，全体在队他方收 `OBrokenBarrierException`（对齐 JDK 超时/中断破障）；`breakBarrier()` 以 `await_request_id=0` 的 `BARRIER_LEAVE` 表达，无在队身份亦破当前世代（条目不存在时无操作幂等）。**到场是有副作用的请求**：在途 `BARRIER_AWAIT` 遇传输失败/断连/换会话 MUST NOT 自动重发（至多一次纪律，判例 `countDown`），本方 await 以 `OpenLatchException` 裁决；同时该会话旧世代的等待项由服务端会话清理连带破障，他方以 `OBrokenBarrierException` 感知（相对 JDK"线程死亡静默挂起"的增强 MUST 显式声明）。`isBroken()` 返回句柄本地最近一次所见裁决，MUST NOT 发起网络查询（声明非实时跨进程一致）。等待者 MUST NOT 持有租约、MUST NOT 产生续租流量。
+
+#### Scenario: 三方合拢与世代复用
+
+- **WHEN** 三个客户端句柄以同 key 同 parties=3 各自 await，先后到达
+- **THEN** 三方 await 均在到场数达标后正常返回；其后同一批句柄再次 await 进入新世代并再次合拢（世代回卷复用）
+
+#### Scenario: 动作由最后到场者执行且先于放行
+
+- **WHEN** parties=3 携动作，第 3 位到场者被指定执行者
+- **THEN** 其在本 `await()` 调用栈内执行动作；其余两方仅在其 `BARRIER_ACTION_DONE` 提交后才收到放行通知；动作完成前无任何他方从 await 返回
+
+#### Scenario: 动作异常破障
+
+- **WHEN** 执行者的 `barrierAction` 抛出运行时异常
+- **THEN** 执行者的 await 以该异常终结，同世代其余在队方收 `OBrokenBarrierException`，世代号已推进
+
+#### Scenario: 参与者超时连带破障
+
+- **WHEN** parties=3 的世代已有 2 方在队，其中一方 `await(1, SECONDS)` 超时
+- **THEN** 超时方得 `false`，另一在队方收 `OBrokenBarrierException`，该世代不再可能合拢
+
+#### Scenario: 参与者进程死亡他方即时感知
+
+- **WHEN** 世代内一方进程被杀，服务端经会话清理摘除其在队项
+- **THEN** 其余在队方在通知-重发路径内收到 `OBrokenBarrierException`，不无限挂起；随后新到场的 await 进入新世代正常合拢
+
+#### Scenario: await 无看门狗流量
+
+- **WHEN** 客户端长时间 await（超过一个看门狗周期）
+- **THEN** 该会话不因 await 发出任何 LEASE_RENEW 请求
+
+#### Scenario: 换会话不自动重放到场
+
+- **WHEN** 在途 `BARRIER_AWAIT` 遭遇连接闪断致会话切换
+- **THEN** SDK 不以新会话自动重放该到场，本方 await 抛 `OpenLatchException`；旧会话在旧世代的在队项由服务端清理连带破障
+

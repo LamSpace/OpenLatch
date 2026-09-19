@@ -29,7 +29,10 @@ package io.github.lamspace.openlatch.core;
  *   <li>{@link #SEMAPHORE}——许可门闸家族（{@code SemaphoreEntry} 承载）；</li>
  *   <li>{@link #LATCH}——倒计数屏障家族（{@code LatchEntry} 承载）；</li>
  *   <li>{@link #ATOMIC}——原子变量家族（{@code AtomicEntry} 承载）：值为
- *       跨会话共享的常驻状态，不绑定归属、不随会话死亡回滚，条目不回收。</li>
+ *       跨会话共享的常驻状态，不绑定归属、不随会话死亡回滚，条目不回收；</li>
+ *   <li>{@link #BARRIER}——循环屏障家族（{@code BarrierEntry} 承载）：多方
+ *       到场合拢、世代回卷可复用，当前世代的到场者离场（死亡/超时/显式破障）
+ *       即时破障该世代。</li>
  * </ul>
  *
  * <p><b>判定归属</b>：{@link LockType} 到家族的映射由 core 门面
@@ -47,5 +50,7 @@ public enum KeyFamily {
     /** 倒计数屏障家族（{@code LatchEntry}）。 */
     LATCH,
     /** 原子变量家族（{@code AtomicEntry}）：值不绑定会话归属，常驻不回收。 */
-    ATOMIC
+    ATOMIC,
+    /** 循环屏障家族（{@code BarrierEntry}）：世代会合可复用，离场即破障。 */
+    BARRIER
 }
