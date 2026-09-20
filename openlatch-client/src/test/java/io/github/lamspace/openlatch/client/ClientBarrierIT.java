@@ -170,14 +170,47 @@ class ClientBarrierIT {
 
     @Test
     void timeoutLeaveBreaksAndPeersObserveBroken() throws Exception {
+        // 次序回归（CI 曾以 fire-and-forget 离场复现失败）：超时方返回 false
+        // 前离场必须已确认生效——紧随其后的新到场 MUST NOT 落入被打破的世代，
+        // 各自在干净新世代独自超时。三客户端背靠背连跑四拍，零 sleep 制造
+        // 最紧交错。
         OBarrier a = clientA.newBarrier("tl", 3);
         OBarrier b = clientB.newBarrier("tl", 3);
-        assertThat(a.await(1, TimeUnit.SECONDS)).isFalse(); // A 超时离场并破障
-        assertThat(a.isBroken()).isFalse(); // 本方以超时收场，不见破障裁决（JDK 同构）
-        // B 从未到场——他方感知道在破障世代成员侧，此处验证世代自愈：
         OBarrier c = clientC.newBarrier("tl", 3);
-        assertThat(b.await(1, TimeUnit.SECONDS)).isFalse(); // B 进入新世代后同样超时
-        assertThat(c.await(1, TimeUnit.SECONDS)).isFalse(); // C 亦新世代（世代局部）
+        assertThat(a.await(500, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(a.isBroken()).isFalse(); // 本方以超时收场，不见破障裁决（JDK 同构）
+        assertThat(b.await(500, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(c.await(500, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(a.await(500, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(b.isBroken()).isFalse();
+        assertThat(c.isBroken()).isFalse();
+
+        // 他方感知道：同世代在队的同伴收破障裁决。parties=4 下 A、B、C 三方
+        // 到场（未满），C 超时离场连带破该世代，A/B 收破障裁决。
+        AtomicReference<Throwable> errA = new AtomicReference<>();
+        Thread ta = new Thread(() -> {
+            try {
+                clientA.newBarrier("tl2", 4).await(15, TimeUnit.SECONDS);
+            } catch (Throwable t) {
+                errA.set(t);
+            }
+        });
+        AtomicReference<Throwable> errB = new AtomicReference<>();
+        Thread tb = new Thread(() -> {
+            try {
+                clientB.newBarrier("tl2", 4).await(15, TimeUnit.SECONDS);
+            } catch (Throwable t) {
+                errB.set(t);
+            }
+        });
+        ta.start();
+        tb.start();
+        Thread.sleep(400);
+        assertThat(clientC.newBarrier("tl2", 4).await(500, TimeUnit.MILLISECONDS)).isFalse();
+        ta.join(15_000);
+        tb.join(15_000);
+        assertThat(errA.get()).isInstanceOf(OBrokenBarrierException.class);
+        assertThat(errB.get()).isInstanceOf(OBrokenBarrierException.class);
     }
 
     @Test

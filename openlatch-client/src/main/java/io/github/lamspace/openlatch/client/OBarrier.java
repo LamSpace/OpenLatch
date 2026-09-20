@@ -79,7 +79,9 @@ public interface OBarrier {
     /**
      * 限时等待所属世代合拢。超时<b>即破障</b>：本方离场连带打破当前世代，
      * 同世代其余等待者收 {@link OBrokenBarrierException}（对齐 JDK 限时
-     * await 超时的全局破障语义）。
+     * await 超时的全局破障语义）。次序保证：返回 {@code false} 前离场
+     * 已在服务端确认生效——其后新到场 MUST NOT 落入被本次超时打破的世代；
+     * 网络故障时降级为尽力而为（结果不确定，由服务端清扫与会话清理兜底）。
      *
      * @param timeout 等待预算（{@code >= 0}）
      * @param unit    时间单位

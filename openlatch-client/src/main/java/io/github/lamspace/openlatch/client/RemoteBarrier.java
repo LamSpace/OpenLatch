@@ -165,8 +165,8 @@ final class RemoteBarrier implements OBarrier {
                 long remaining = deadline - System.currentTimeMillis();
                 if (remaining <= 0) {
                     if (rid >= 0 && route != null) {
-                        // 超时即破障：离场连带打破所属世代后以超时收场。
-                        leaveQuietly(route, rid);
+                        // 超时即破障：离场确认完成后才返回（"返回即已破"次序）。
+                        leaveAndAwait(route, rid);
                     }
                     return false;
                 }
@@ -221,7 +221,7 @@ final class RemoteBarrier implements OBarrier {
                     registry.remove(envSession, rid);
                     OpenLatchClient.LatchRoute cur = client.latchRoute();
                     if (cur != null) {
-                        leaveQuietly(cur, rid);
+                        leaveAndAwait(cur, rid);
                     }
                     throw e;
                 }
@@ -247,7 +247,7 @@ final class RemoteBarrier implements OBarrier {
                     long left = deadline - System.currentTimeMillis();
                     if (left <= 0) {
                         registry.remove(envSession, rid);
-                        leaveQuietly(route, rid);
+                        leaveAndAwait(route, rid);
                         return false;
                     }
                     try {
@@ -258,7 +258,7 @@ final class RemoteBarrier implements OBarrier {
                     } catch (InterruptedException ie) {
                         // 中断即离场：尽力摘除本方到场项并连带破障，以中断终结。
                         registry.remove(envSession, rid);
-                        leaveQuietly(route, rid);
+                        leaveAndAwait(route, rid);
                         throw ie;
                     } catch (ExecutionException ee) {
                         // arrived 仅被 complete(null)，此分支不可达，防御清场。
@@ -300,8 +300,9 @@ final class RemoteBarrier implements OBarrier {
             }
         }
         if (actionFailure != null) {
-            // 动作异常即破障（纯破障主张，无在队身份）。
-            leaveQuietly(route, 0);
+            // 动作异常即破障（纯破障主张）：确认完成后本方才抛，
+            // 其余世带队成员随放行通知收场，新到场不入已破世代。
+            leaveAndAwait(route, 0);
             if (actionFailure instanceof RuntimeException re) {
                 throw re;
             }
@@ -364,22 +365,33 @@ final class RemoteBarrier implements OBarrier {
     }
 
     /**
-     * 尽力离场（fire-and-forget）：写出失败静默——网络不可达时服务端会话
-     * 清理兜底破障，本方收场不依赖其送达。
+     * 离场并同步确认（超时/中断/动作异常三条收场路径共用）：MUST 在
+     * 本方 return/throw 之前完成 {@code BARRIER_LEAVE} 的应用确认——
+     * "返回即已破"的次序是 JDK 对齐契约的一部分，保证紧随其后的新到场
+     * MUST NOT 滑入一个已被本方离场打破的世代。网络失败/读界超时则降级
+     * 为尽力而为（返回 {@code false}）：破障结果不确定，由服务端已通知
+     * 清扫与会话清理兜底，本方收场不变。
      *
      * @param route     当前路由
      * @param awaitRid  被摘除的到场请求 id（0=纯破障主张）
+     * @return 服务端确认离场为 {@code true}；不确定为 {@code false}
      */
-    private void leaveQuietly(OpenLatchClient.LatchRoute route, long awaitRid) {
+    private boolean leaveAndAwait(OpenLatchClient.LatchRoute route, long awaitRid) {
         try {
             long rid = route.session().nextRequestId();
-            route.mux().sendWithId(OpenLatchClient.barrierLeaveEnvelope(rid, key, awaitRid),
+            Envelope resp = route.mux().sendWithId(
+                            OpenLatchClient.barrierLeaveEnvelope(rid, key, awaitRid),
                             client.config().requestTimeout().toMillis())
-                    .whenComplete((resp, err) -> {
-                        // 送达与否不改变本方收场；失败路径由服务端清扫/会话清理兜底。
-                    });
-        } catch (RuntimeException ignore) {
-            // 路由已失能：无出口可离场，交由服务端侧兜底。
+                    .get(client.config().requestTimeout().toMillis() + SLACK_MS,
+                            TimeUnit.MILLISECONDS);
+            return resp.getBarrierLeaveResponse().getStatus() == StatusCode.OK;
+        } catch (InterruptedException e) {
+            // 中断位恢复后按"结果不确定"收场：登记可能未达，服务端兜底。
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            // 含传输失败/拒绝/读界超时：不确定结果，本方收场不依赖其送达。
+            return false;
         }
     }
 
