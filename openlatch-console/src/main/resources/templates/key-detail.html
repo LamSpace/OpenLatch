@@ -22,6 +22,8 @@
                       th:text="|（屏障计数 ${r.value.latchRemaining}/${r.value.latchTotal}）|"></span>
                 <span th:if="${r.value.family == 'atomic'}"
                       th:text="|（形态 ${r.value.atomicKind} · 初值 ${r.value.atomicInitial} · 当前值 ${r.value.atomicValue} · 版本戳 ${r.value.atomicVersion}）|"></span>
+                <span th:if="${r.value.family == 'barrier'}"
+                      th:text="|（parties ${r.value.barrierParties} · 当前世代 ${r.value.barrierGeneration} · 到场 ${r.value.barrierArrived}${r.value.barrierActionPending ? ' · 动作待决' : ''} · 最近了结 ${r.value.barrierLastFinal}）|"></span>
             </div>
 
             <h3>持有者</h3>
@@ -35,7 +37,7 @@
                 </tr>
                 <tr th:if="${r.value.holdersList.isEmpty()}">
                     <td colspan="4" class="empty"
-                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : '无持有者'}">无持有者</td>
+                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : '无持有者')}">无持有者</td>
                 </tr>
             </table>
 

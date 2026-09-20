@@ -357,4 +357,95 @@ class ProtocolCodecTest {
                 .build();
         assertThat(roundTrip(renew)).isEqualTo(renew);
     }
+
+    /** 场景：v5 BARRIER 三对消息回环——到场请求/应答（含执行者标记与世代）、离场、动作了结全字段等值。 */
+    @Test
+    void v5BarrierMessagesRoundTrip() {
+        Envelope awaitReq = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_AWAIT)
+                .setRequestId(11L)
+                .setBarrierAwaitRequest(BarrierAwaitRequest.newBuilder()
+                        .setKey("phase")
+                        .setParties(3L)
+                        .setCarriesAction(true)
+                        .build())
+                .build();
+        Envelope awaitParsed = roundTrip(awaitReq);
+        assertThat(awaitParsed).isEqualTo(awaitReq);
+        assertThat(awaitParsed.hasBarrierAwaitRequest()).isTrue();
+        assertThat(MessageType.BARRIER_AWAIT.getNumber()).isEqualTo(15);
+        assertThat(LockType.LOCK_TYPE_BARRIER.getNumber()).isEqualTo(10);
+        assertThat(StatusCode.BARRIER_BROKEN.getNumber()).isEqualTo(12);
+
+        Envelope awaitResp = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_AWAIT)
+                .setRequestId(11L)
+                .setBarrierAwaitResponse(BarrierAwaitResponse.newBuilder()
+                        .setStatus(StatusCode.QUEUED)
+                        .setQueuePosition(2)
+                        .setGeneration(4L)
+                        .setExecutor(true)
+                        .setParties(3L)
+                        .build())
+                .build();
+        assertThat(roundTrip(awaitResp)).isEqualTo(awaitResp);
+
+        Envelope brokenResp = awaitResp.toBuilder()
+                .setBarrierAwaitResponse(awaitResp.getBarrierAwaitResponse().toBuilder()
+                        .setStatus(StatusCode.BARRIER_BROKEN)
+                        .setQueuePosition(0)
+                        .setExecutor(false))
+                .build();
+        assertThat(roundTrip(brokenResp).getBarrierAwaitResponse().getStatus())
+                .isEqualTo(StatusCode.BARRIER_BROKEN);
+
+        Envelope leaveReq = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_LEAVE)
+                .setRequestId(12L)
+                .setBarrierLeaveRequest(BarrierLeaveRequest.newBuilder()
+                        .setKey("phase")
+                        .setAwaitRequestId(11L)
+                        .build())
+                .build();
+        assertThat(roundTrip(leaveReq)).isEqualTo(leaveReq);
+        assertThat(roundTrip(leaveReq.toBuilder()
+                .setBarrierLeaveRequest(BarrierLeaveRequest.newBuilder()
+                        .setKey("phase").setAwaitRequestId(0L).build())
+                .build())
+                .getBarrierLeaveRequest().getAwaitRequestId()).isZero();
+
+        Envelope leaveResp = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_LEAVE)
+                .setRequestId(12L)
+                .setBarrierLeaveResponse(BarrierLeaveResponse.newBuilder()
+                        .setStatus(StatusCode.OK)
+                        .build())
+                .build();
+        assertThat(roundTrip(leaveResp)).isEqualTo(leaveResp);
+
+        Envelope doneReq = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_ACTION_DONE)
+                .setRequestId(13L)
+                .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
+                        .setKey("phase")
+                        .setGeneration(4L)
+                        .build())
+                .build();
+        assertThat(roundTrip(doneReq)).isEqualTo(doneReq);
+
+        Envelope doneResp = Envelope.newBuilder()
+                .setProtocolVersion(5)
+                .setType(MessageType.BARRIER_ACTION_DONE)
+                .setRequestId(13L)
+                .setBarrierActionDoneResponse(BarrierActionDoneResponse.newBuilder()
+                        .setStatus(StatusCode.BARRIER_BROKEN)
+                        .build())
+                .build();
+        assertThat(roundTrip(doneResp)).isEqualTo(doneResp);
+    }
 }

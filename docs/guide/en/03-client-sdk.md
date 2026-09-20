@@ -129,6 +129,41 @@ Semantic boundaries (details in [01 Concepts §7](01-concepts.md)):
    a mismatching claim on an existing entry makes the handle's first operation throw
    `OpenLatchException` (same rule as the latch total).
 
+## Cyclic barrier (OBarrier, v5)
+
+```java
+OBarrier gate = client.newBarrier("phase:ingest", 3);          // creator handle: fixes parties=3
+gate.await();                                                  // blocks until its generation trips
+boolean met = gate.await(10, TimeUnit.SECONDS);                // timed: expiry = you leave AND break -> false
+
+OBarrier worker = client.newBarrier("phase:ingest");           // join-only handle (no parties claim)
+OBarrier withAction = client.newBarrier("phase:ingest", 3, () -> flushBuffers());
+// whoever completes the generation runs flushBuffers() inside their own await() call;
+// nobody else is released until the action reports done.
+
+OBarrier any = client.newBarrier("phase:ingest", 3);
+any.breakBarrier();                                            // break the current generation (idempotent; no reset)
+if (any.isBroken()) { ... }                                    // handle-local last-seen verdict (no network)
+```
+
+Semantic boundaries (details in [01 Core concepts §8](01-concepts.md)):
+
+1. meeting, action release and breaking are majority-replicated decisions — each
+   arrival/report costs a round trip;
+2. **leaving breaks the generation** (stronger than the JDK): any arrived party's
+   timeout/interruption/death/explicit break instantly breaks its generation and
+   all its waiters throw `OBrokenBarrierException`;
+3. **breakage is generation-local, not sticky**: next arrivals open a fresh
+   generation and meet normally; there is deliberately **no `reset()`**, and
+   `isBroken()` is a handle-local last-seen reading, not a live cross-process query;
+4. the action runs in the last arriver's process; if it throws, that await fails
+   with the action's exception and the generation breaks for everyone;
+5. `await(timeout)` expiry breaks the barrier for the whole generation — over flaky
+   networks prefer `await()` with external supervision, or raise the budget;
+6. an in-flight arrival is never replayed across a session switch (arrivals are
+   stateful) — that await throws `OpenLatchException` while the old generation has
+   already broken via session cleanup; awaits hold no lease and emit no renewals.
+
 ## Async usage
 
 ```java

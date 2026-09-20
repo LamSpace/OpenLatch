@@ -170,13 +170,16 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     registry.remove(envSession, rid);
                     continue;
                 }
-                registry.remove(envSession, rid);
                 if (status == StatusCode.OK) {
+                    registry.remove(envSession, rid);
                     return true;
                 }
                 if (status == StatusCode.QUEUED) {
+                    // 保持登记直到本等待收场：推送到达即唤醒重发；此前在应答后
+                    // 立即摘登记会使所有通知落空、逐次退化为超时兜底重发（缺陷修复）。
                     long left = deadline - System.currentTimeMillis();
                     if (left <= 0) {
+                        registry.remove(envSession, rid);
                         return false;
                     }
                     try {
@@ -192,6 +195,7 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     }
                     continue;
                 }
+                registry.remove(envSession, rid);
                 throw new OpenLatchException(status, "await of latch '" + key + "' rejected: " + status);
             }
         } finally {

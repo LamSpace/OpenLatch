@@ -26,6 +26,7 @@ import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyInfo;
 import io.github.lamspace.openlatch.protocol.AdminListKeysResponse;
@@ -302,6 +303,54 @@ class AdminProtocolTest {
         assertThat(plain.getFamily()).isEqualTo("lock");
         assertThat(plain.getAtomicKind()).isEmpty();
         assertThat(plain.getAtomicVersion()).isZero();
+    }
+
+    @Test
+    void barrierEntriesVisibleInSummaryListAndDetail() {
+        long w = core.sessionOpened();
+        core.acquire(new AcquireCommand(w, 432, "plain", LockType.REENTRANT, 22, 30_000, true));
+        // 两方 barrier：一方在队挂起、执行者挂账——观察面读数完整。
+        core.barrierAwait(new BarrierAwaitCommand(sessionId, 430, "stage", 2, false));
+        core.barrierAwait(new BarrierAwaitCommand(w, 431, "stage", 0, true));
+
+        AdminSummaryResponse s = admin(adminSummary(8, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getBarrierEntries()).isEqualTo(1);
+
+        AdminKeyInfo row = admin(adminListKeys(9, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("stage")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("barrier");
+        assertThat(row.getHolders()).isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getWaiterCount()).isEqualTo(1); // 仅普通到场者在队（执行者已摘队）
+        assertThat(row.getBarrierParties()).isEqualTo(2);
+        assertThat(row.getBarrierGeneration()).isEqualTo(1);
+        assertThat(row.getBarrierArrived()).isEqualTo(2);
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(10, TOKEN, "stage"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getFamily()).isEqualTo("barrier");
+        assertThat(d.getBarrierParties()).isEqualTo(2);
+        assertThat(d.getBarrierGeneration()).isEqualTo(1);
+        assertThat(d.getBarrierArrived()).isEqualTo(2);
+        assertThat(d.getBarrierActionPending()).isTrue();
+        assertThat(d.getBarrierLastFinal()).isEqualTo("none");
+        assertThat(d.getHoldersCount()).isZero();
+        assertThat(d.getWaitersCount()).isEqualTo(1);
+        assertThat(d.getWaiters(0).getSessionId()).isEqualTo(sessionId);
+
+        // 合拢后了结形态可见，他家族屏障字段恒缺省。
+        core.barrierLeave(new io.github.lamspace.openlatch.core.command.BarrierLeaveCommand(w, "stage", 0));
+        AdminKeyDetailResponse after = admin(adminKeyDetail(12, TOKEN, "stage"))
+                .getAdminKeyDetailResponse();
+        assertThat(after.getBarrierLastFinal()).isEqualTo("broken");
+        assertThat(after.getBarrierGeneration()).isEqualTo(2);
+        assertThat(after.getBarrierActionPending()).isFalse();
+        AdminKeyDetailResponse plain = admin(adminKeyDetail(13, TOKEN, "plain"))
+                .getAdminKeyDetailResponse();
+        assertThat(plain.getBarrierParties()).isZero();
+        assertThat(plain.getBarrierLastFinal()).isEmpty();
     }
 
     // ===================== ADMIN_LIST_KEYS =====================

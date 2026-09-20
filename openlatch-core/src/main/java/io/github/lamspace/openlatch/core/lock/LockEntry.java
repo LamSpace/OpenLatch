@@ -577,6 +577,7 @@ public final class LockEntry implements KeyEntry {
                 leaseToken, leaseMs, leaseExpiresAtMs, remaining,
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
                 0, 0, 0, 0, List.of(),
-                null, 0, 0, 0);
+                null, 0, 0, 0,
+                0, 0, 0, false, null);
     }
 }

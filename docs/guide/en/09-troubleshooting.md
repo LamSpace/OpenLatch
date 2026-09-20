@@ -10,8 +10,10 @@
 | `NOT_HELD` | server (authoritative verdict) | this session provably does not hold the lock (post-quorum apply) | treat as lock loss: abort, re-compete |
 | `INVALID_TOKEN` | server (authoritative verdict) | credentials don't match current ownership (typical: failover rollback / lease expired) | same — lock-lost handling |
 | `SESSION_EXPIRED` | server | session closed | re-compete after reconnect (automatic; business gets the callback) |
+| `BARRIER_BROKEN` | server (in-band verdict) | the waited generation of a cyclic barrier was broken (a party left/died/timed out or `breakBarrier()`) | treat the rendezvous as failed: abort this round; a fresh generation opens on the next arrivals |
 | `INVALID_REQUEST` | server | protocol violation: bad fields, pre-handshake request, version out of range, auth failure (indistinct) | fix caller/config; auth-related → token config |
 | `INTERNAL_ERROR` | server | unexpected internal failure | retryable; persistent → escalate with logs |
+| `OBrokenBarrierException` | client | the waited barrier generation broke (leave-breaks contract) | abort this rendezvous round; if unintended, hunt participant timeouts under network jitter |
 | `LockAcquisitionTimeoutException` | client | wait budget (default 30s) exhausted | size budgets / shorten sections / degrade |
 | `OpenLatchTimeoutException` | client | one request unanswered for 5s (connection alive) | check node load/clocks; a lone blip is tolerable |
 | `ServerUnavailableException` | client | connection unavailable (incl. failover fast-fail) | retry; verify seed config |

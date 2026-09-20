@@ -458,7 +458,8 @@ public final class SemaphoreEntry implements KeyEntry {
                 leaseToken, leaseMs, leaseExpiresAtMs, remaining,
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
                 permitsTotal, permitsAvailable, 0, 0, List.of(),
-                null, 0, 0, 0);
+                null, 0, 0, 0,
+                0, 0, 0, false, null);
     }
 
     /**

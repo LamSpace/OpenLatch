@@ -123,6 +123,82 @@ class SnapshotFamilyRoundTripTest {
     }
 
     @Test
+    void barrierGenerationsLedgerAndPendingActionSurviveSnapshotInstall() throws Exception {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(61, 1_000, 1).toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(62, 1_000, 2).toByteArray());
+        // 世代 1：两方到场合拢（无动作）。
+        origin.applyEntry(RaftEntrySamples.barrierAwait(61, 101, "br", 2, false, 2_000, 3)
+                .toByteArray());
+        ApplyResult t1 = ApplyResult.parseFrom(origin.applyEntry(
+                RaftEntrySamples.barrierAwait(62, 102, "br", 0, false, 3_000, 4).toByteArray()));
+        assertThat(t1.getStatus())
+                .isEqualTo(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK);
+        // 世代 2：61 到场、62 作为最后到场者携动作 → 动作待决存续。
+        origin.applyEntry(RaftEntrySamples.barrierAwait(61, 201, "br", 0, false, 4_000, 5)
+                .toByteArray());
+        ApplyResult exec = ApplyResult.parseFrom(origin.applyEntry(
+                RaftEntrySamples.barrierAwait(62, 202, "br", 0, true, 5_000, 6).toByteArray()));
+        assertThat(exec.getBarrierExecutor()).isTrue();
+
+        SnapshotState snap = origin.snapshotState();
+        var br = snap.getLocksList().stream()
+                .filter(l -> l.getKey().equals("br")).findFirst().orElseThrow();
+        assertThat(br.getBarrierParties()).isEqualTo(2);
+        assertThat(br.getBarrierGeneration()).isEqualTo(2);
+        assertThat(br.getBarrierCurrentArrivalsCount()).isEqualTo(2);
+        assertThat(br.getBarrierActionSession()).isEqualTo(62);
+        assertThat(br.getBarrierCompletedGeneration()).isEqualTo(1);
+        assertThat(br.getBarrierCompletedResult()).isEqualTo(1); // TRIPPED
+        assertThat(br.getBarrierCompletedArrivalsCount()).isEqualTo(2);
+
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        var view = restored.shadow().adminEntry("br");
+        assertThat(view.barrierGeneration()).isEqualTo(2);
+        assertThat(view.barrierActionPending()).isTrue();
+        assertThat(view.barrierArrived()).isEqualTo(2);
+
+        io.github.lamspace.openlatch.protocol.raft.ApplyStatus ok =
+                io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK;
+        io.github.lamspace.openlatch.protocol.raft.ApplyStatus broken =
+                io.github.lamspace.openlatch.protocol.raft.ApplyStatus.BARRIER_BROKEN;
+        // 重启后旧世代迟到重发：按了结记录幂等了结（TRIPPED，不重复计次）。
+        ApplyResult late = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.barrierAwait(61, 101, "br", 0, false, 6_000, 7).toByteArray()));
+        assertThat(late.getStatus()).isEqualTo(ok);
+        assertThat(late.getBarrierGeneration()).isEqualTo(1);
+        assertThat(restored.shadow().adminEntry("br").barrierArrived()).isEqualTo(2); // 未双计
+        // 执行者回报经恢复存续：合拢生效、世代回卷。
+        ApplyResult done = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.barrierActionDone(62, "br", 2, 7_000, 8).toByteArray()));
+        assertThat(done.getStatus()).isEqualTo(ok);
+        assertThat(done.getBarrierSettled()).isTrue();
+        assertThat(restored.shadow().adminEntry("br").barrierGeneration()).isEqualTo(3);
+        assertThat(restored.shadow().adminEntry("br").barrierActionPending()).isFalse();
+        // 新世代续用：两方到场再次合拢（世代号单调不回退）。
+        restored.applyEntry(RaftEntrySamples.barrierAwait(61, 301, "br", 0, false, 8_000, 9)
+                .toByteArray());
+        ApplyResult t3 = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.barrierAwait(62, 302, "br", 0, false, 9_000, 10).toByteArray()));
+        assertThat(t3.getStatus()).isEqualTo(ok);
+        assertThat(t3.getBarrierGeneration()).isEqualTo(3);
+        // 破障在带裁决路径同样存续：新世代到场后死亡 → 了结 BROKEN 可判。
+        origin.applyEntry(RaftEntrySamples.sessionOpen(63, 1_000, 11).toByteArray());
+        origin.applyEntry(RaftEntrySamples.barrierAwait(63, 401, "br", 0, false, 10_000, 12)
+                .toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionClose(63, 11_000, 13).toByteArray());
+        ApplyResult straggler = ApplyResult.parseFrom(origin.applyEntry(
+                RaftEntrySamples.barrierAwait(61, 401, "br", 0, false, 12_000, 14).toByteArray()));
+        assertThat(straggler.getStatus()).isNotEqualTo(broken); // 61 非破障世代成员
+        // 61/401 属存续世代（3 合拢后的 4）：其到场仍挂起。
+        assertThat(straggler.getStatus()).isEqualTo(
+                io.github.lamspace.openlatch.protocol.raft.ApplyStatus.QUEUED);
+        assertThat(origin.digest()).isNotEqualTo(restored.digest()); // 后续条目已推进 origin
+    }
+
+    @Test
     void lockEntrySerializationBytesUnchangedByV3Fields() throws Exception {
         LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
         origin.applyEntry(RaftEntrySamples.sessionOpen(41, 1_000, 1).toByteArray());

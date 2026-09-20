@@ -37,6 +37,16 @@ package io.github.lamspace.openlatch.core.result;
  * （{@link #REJECT_ATOMIC_RANGE}）→ 初值断言（{@link #REJECT_ATOMIC_INIT}）→
  * 去重槽重放或操作执行（结果恒 {@link #GRANTED}，CAS 家族成败由
  * {@code applied} 承载、不占用本枚举判别位）。
+ *
+ * <p><b>屏障通道口径</b>：BARRIER 家族的判定顺序为会话预检 → key 校验 →
+ * 家族判定（{@link #REJECT_TYPE_MISMATCH}）→ parties 断言
+ * （{@link #REJECT_BARRIER_PARTIES}）→ 世代了结记录重发判定（已了结即回
+ * {@link #GRANTED} 或 {@link #BARRIER_BROKEN}）→ 队列满护栏
+ * （{@link #REJECT_QUEUE_FULL}）→ 到场入队（{@link #QUEUED}，当回合拢时
+ * 无动作形态回 {@link #GRANTED}、动作形态以执行者标记回 {@link #QUEUED}）。
+ * 动作了结的非指定执行者/未知世代回报回 {@link #REJECT_BARRIER_ACTION}。
+ * {@link #BARRIER_BROKEN} 是在带裁决（等待项所属世代已破障）而非请求错误，
+ * server 层映射协议同名状态码。
  */
 public enum Outcome {
     /** 授予：携带租约凭证与实际租约。重入/快路径/队首重发命中均返回此值。 */
@@ -89,5 +99,26 @@ public enum Outcome {
      * {0,1}，或布尔形态携带 ADD 操作；条目状态零扰动，server 层
      * 映射协议 {@code INVALID_REQUEST}。
      */
-    REJECT_ATOMIC_RANGE
+    REJECT_ATOMIC_RANGE,
+    /**
+     * 拒绝：循环屏障许可数断言不成立——屏障不存在且请求未携带
+     * {@code > 0} 的 {@code parties}（含对不存在屏障的无主张离场外操作），
+     * 或既有屏障上非零主张与定型值不符；条目状态零扰动，server 层
+     * 映射协议 {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
+     * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
+     */
+    REJECT_BARRIER_PARTIES,
+    /**
+     * 拒绝：循环屏障动作了结回报不被受理——回报者非该世代指定执行者、
+     * 世代号未知或已滚出窗口、或该世代并未处于动作待决态；条目状态
+     * 零扰动，server 层映射协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_BARRIER_ACTION,
+    /**
+     * 在带裁决：循环屏障等待项所属世代已破障（离场即破障：在队到场者
+     * 超时离场/本地中断/会话死亡/显式 {@code breakBarrier()} 任一触发）；
+     * 非请求错误，连接与会话不受影响，server 层映射协议同名状态码
+     * {@code BARRIER_BROKEN}。
+     */
+    BARRIER_BROKEN
 }

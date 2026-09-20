@@ -19,8 +19,16 @@ package io.github.lamspace.openlatch.server.raft;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.lamspace.openlatch.core.CoreConfig;
 import io.github.lamspace.openlatch.core.CoreEngine;
+import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.AtomicOp;
+import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
+import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
+import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
+import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
+import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
+import io.github.lamspace.openlatch.core.result.BarrierFinal;
+import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
@@ -40,9 +48,13 @@ import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
 import io.github.lamspace.openlatch.protocol.raft.RenewPayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierAwaitPayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
@@ -127,15 +139,116 @@ public final class LockStateMachineCore {
     }
 
     /**
-     * 装配一个零状态引擎：集群引擎恒不登记等待项，
-     * {@code notifyHead} 事件源只存在于单机路径，此处收到即说明集群路径
-     * 误登记了等待项，记 WARN。{@link #installSnapshot} 换入新引擎时复用。
+     * 装配一个零状态引擎：集群引擎对锁/Semaphore/Latch 恒不登记等待项
+     * （其 {@code notifyHead} 事件源只存在于单机路径，收到即违例记 WARN）；
+     * BARRIER 家族是唯一豁免——其到场是进日志的复制态命令，各副本引擎
+     * 确定性建队并以队列作账簿投影，放行/破障的推送职责在 Leader 侧
+     * 网关，该家族在此收到 notify 属按设计吞声。{@link #installSnapshot}
+     * 换入新引擎时复用。
      *
      * @return 全新 {@link CoreEngine}（config/clock 同源）
      */
     private CoreEngine newEngine() {
-        return new CoreEngine(config, clock, (sid, rid, key) ->
-                log.warn("unexpected notifyHead from cluster engine: sid={}, key={}", sid, key));
+        return new CoreEngine(config, clock, (sid, rid, key) -> {
+            // 循环屏障例外：其到场经日志重放在各副本引擎内确定性建队，
+            // 合拢/破障广播的推送职责在 Leader 侧网关（WaitQueue 簿记），
+            // 引擎监听点对该家族的 notify 事件按设计吞声；其余家族的
+            // 等待项登记仍属"集群引擎恒不登记等待项"不变式的违例。
+            if (familyOfKey(key) == KeyFamily.BARRIER) {
+                return;
+            }
+            log.warn("unexpected notifyHead from cluster engine: sid={}, key={}", sid, key);
+        });
+    }
+
+    /**
+     * key 当前条目的家族（监听器吞声判定用；引擎装配未完成或条目不存在
+     * 回 {@code null}）。只读，零扰动。
+     *
+     * @param key 锁键
+     * @return 条目家族；不存在为 {@code null}
+     */
+    private KeyFamily familyOfKey(String key) {
+        CoreEngine e = engine;
+        if (e == null || key == null) {
+            return null;
+        }
+        var snap = e.inspectKey(key);
+        return snap == null ? null : snap.family();
+    }
+
+    /**
+     * 自引擎导出指定 key 的 BARRIER 复制态并折算为影子表镜像输入
+     * （(内部 sid→逻辑 id) 经 {@code sidMap} 反向映射；引擎内部 sid
+     * 不出本节点，digest 以逻辑 id 表达）。条目不存在或非屏障回
+     * {@code null}（调用方零扰动）。
+     *
+     * @param key 屏障键
+     * @return 镜像输入；不可得为 {@code null}
+     */
+    private ShadowTable.BarrierMirrorData barrierMirrorOf(String key) {
+        return barrierMirrorOf(key, null);
+    }
+
+    /**
+     * {@link #barrierMirrorOf(String)} 的映射覆写形态：SESSION_CLOSE 应用点
+     * 必须传入摘除 {@code sidMap} 条目<strong>之前</strong>拍下的
+     * 内部 sid→逻辑 id 快照——否则死亡会话在账簿中的内部 sid 无从折算，
+     * 随机引擎 sid 会泄入镜像并撕裂 digest（跨副本回放不一致）。
+     *
+     * @param key         屏障键
+     * @param toLogicalBy 预置折算表；{@code null} 表示现场自 {@code sidMap} 构建
+     * @return 镜像输入；不可得为 {@code null}
+     */
+    private ShadowTable.BarrierMirrorData barrierMirrorOf(String key,
+            Map<Long, Long> toLogicalBy) {
+        var st = engine.barrierReplicatedState(key);
+        if (st == null) {
+            return null;
+        }
+        java.util.Map<Long, Long> toLogical = toLogicalBy != null
+                ? toLogicalBy : new HashMap<>();
+        if (toLogicalBy == null) {
+            for (var en : sidMap.entrySet()) {
+                toLogical.put(en.getValue(), en.getKey());
+            }
+        }
+        java.util.function.Function<io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival,
+                ShadowTable.ArrivalRef> ref = a -> new ShadowTable.ArrivalRef(
+                        toLogical.getOrDefault(a.sessionId(), a.sessionId()), a.requestId());
+        long actionLogical = st.actionSession() == 0 ? 0
+                : toLogical.getOrDefault(st.actionSession(), st.actionSession());
+        long execLogical = st.completedExecutor() == 0 ? 0
+                : toLogical.getOrDefault(st.completedExecutor(), st.completedExecutor());
+        int resultCode = st.completedResult() == BarrierFinal.TRIPPED ? 1
+                : st.completedResult() == BarrierFinal.BROKEN ? 2 : 0;
+        return new ShadowTable.BarrierMirrorData(st.parties(), st.generation(),
+                st.currentArrivals().stream().map(ref).toList(), actionLogical, st.actionRequest(),
+                st.completedGeneration(), resultCode,
+                st.completedArrivals().stream().map(ref).toList(), execLogical);
+    }
+
+    /**
+     * 镜像指定 key 的屏障复制态（各 BARRIER 应用点与破障传播后的统一
+     * 刷新落点；导出不可得时零扰动）。
+     *
+     * @param key 屏障键
+     */
+    private void mirrorBarrier(String key) {
+        mirrorBarrier(key, null);
+    }
+
+    /**
+     * 镜像指定 key 的屏障复制态（映射表覆写形态，SESSION_CLOSE 传播专用）。
+     *
+     * @param key         屏障键
+     * @param toLogicalBy 预置内部→逻辑折算表，可为 {@code null}
+     */
+    private void mirrorBarrier(String key, Map<Long, Long> toLogicalBy) {
+        ShadowTable.BarrierMirrorData d = barrierMirrorOf(key, toLogicalBy);
+        if (d != null) {
+            shadow.barrierMirror(key, d);
+        }
     }
 
     /**
@@ -164,6 +277,9 @@ public final class LockStateMachineCore {
                     case LEASE_EXPIRE_ENTRY -> applyExpire(entry, t);
                     case LATCH_COUNT_DOWN_ENTRY -> applyLatchCountDown(entry);
                     case ATOMIC_OP_ENTRY -> applyAtomicOp(entry);
+                    case BARRIER_AWAIT_ENTRY -> applyBarrierAwait(entry);
+                    case BARRIER_LEAVE_ENTRY -> applyBarrierLeave(entry);
+                    case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -222,17 +338,31 @@ public final class LockStateMachineCore {
         SessionPayload p = SessionPayload.parseFrom(entry.getCommandPayload());
         long sid = p.getSessionId();
         java.util.List<String> freed;
+        List<String> brokenBarriers = List.of();
+        Map<Long, Long> toLogical = new HashMap<>();
         if (shadow.hasSession(sid)) {
+            // 折算表快照 MUST 先于 sidMap 摘除——死亡会话的内部 sid 仍需按
+            // 逻辑 id 入镜像（账簿残留到世代滚出为止，digest 不得携带随机 sid）。
+            for (var en : sidMap.entrySet()) {
+                toLogical.put(en.getValue(), en.getKey());
+            }
             shadow.removeSession(sid);
             Long local = sidMap.remove(sid);
             if (local != null) {
-                engine.sessionClosed(local);
+                brokenBarriers = engine.sessionClosed(local);
             }
             freed = shadow.dropSessionHolders(sid);
         } else {
             freed = List.of();
         }
-        return ok(0).addAllFreedKeys(freed).build();
+        ApplyResult.Builder b = ok(0).addAllFreedKeys(freed);
+        // 离场即破障经 SESSION_CLOSE 传播：破障世代已入引擎了结记录，
+        // 镜像刷新 + 回执携带被破 key 供 Leader 向存活等待者广播。
+        for (String bk : brokenBarriers) {
+            mirrorBarrier(bk, toLogical);
+            b.addBarrierReleasedKeys(bk);
+        }
+        return b.build();
     }
 
     /**
@@ -506,6 +636,126 @@ public final class LockStateMachineCore {
     }
 
     /**
+     * BARRIER_AWAIT_ENTRY：引擎到场（parties 断言、世代了结记录幂等、
+     * 合拢与执行者指定全在引擎内——重放与同槽去重在条目内复制状态上
+     * 得出，跨副本一致），随后镜像影子表。回执携带世代/位次/执行者/
+     * settled 广播标志；{@code REJECT_QUEUE_FULL} 映射
+     * {@link ApplyStatus#QUEUE_FULL}（Leader 侧据此不登记等待队列项），
+     * parties 断言与家族误用拒回 {@link ApplyStatus#INVALID_REQUEST}。
+     *
+     * @param entry 条目（载荷为 {@link BarrierAwaitPayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyBarrierAwait(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        BarrierAwaitPayload p = BarrierAwaitPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        BarrierAwaitResult r = engine.barrierAwait(new BarrierAwaitCommand(
+                local, p.getRequestId(), req.getKey(), req.getParties(), req.getCarriesAction()));
+        return switch (r.outcome()) {
+            case GRANTED, QUEUED, BARRIER_BROKEN, REJECT_QUEUE_FULL -> {
+                if (r.outcome() != io.github.lamspace.openlatch.core.result.Outcome.REJECT_QUEUE_FULL) {
+                    mirrorBarrier(req.getKey());
+                }
+                ApplyStatus st = switch (r.outcome()) {
+                    case GRANTED -> ApplyStatus.OK;
+                    case QUEUED -> ApplyStatus.QUEUED;
+                    case BARRIER_BROKEN -> ApplyStatus.BARRIER_BROKEN;
+                    default -> ApplyStatus.QUEUE_FULL;
+                };
+                yield ApplyResult.newBuilder()
+                        .setStatus(st)
+                        .setQueuePosition(r.queuePosition())
+                        .setBarrierGeneration(r.generation())
+                        .setBarrierExecutor(r.executor())
+                        .setBarrierParties(r.parties())
+                        .setBarrierSettled(r.settled())
+                        .build();
+            }
+            case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_BARRIER_PARTIES, REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY,
+                    REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable barrier await outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * BARRIER_LEAVE_ENTRY：引擎离场（超时/中断/显式破障的统一通道，
+     * 离场即破障的裁决在引擎内），镜像刷新后回执。
+     * {@code generationBroke} 经 {@code barrier_settled} 位透传供 Leader
+     * 广播；幂等无操作亦回 OK（在带语义，非错误）。
+     *
+     * @param entry 条目（载荷为 {@link BarrierLeavePayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyBarrierLeave(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        BarrierLeavePayload p = BarrierLeavePayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        BarrierLeaveResult r = engine.barrierLeave(new BarrierLeaveCommand(
+                local, req.getKey(), req.getAwaitRequestId()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                mirrorBarrier(req.getKey());
+                yield ApplyResult.newBuilder()
+                        .setStatus(ApplyStatus.OK)
+                        .setBarrierSettled(r.generationBroke())
+                        .build();
+            }
+            case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable barrier leave outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * BARRIER_ACTION_DONE_ENTRY：引擎动作了结（执行者指定校验、世代定型
+     * 合拢与幂等在引擎内），镜像刷新后回执。非指定执行者或未知世代
+     * 拒回 {@link ApplyStatus#INVALID_REQUEST}；执行者动作期间世代已破
+     * 回在带裁决 {@link ApplyStatus#BARRIER_BROKEN}。
+     *
+     * @param entry 条目（载荷为 {@link BarrierActionDonePayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyBarrierActionDone(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        BarrierActionDonePayload p = BarrierActionDonePayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        BarrierActionDoneResult r = engine.barrierActionDone(new BarrierActionDoneCommand(
+                local, req.getKey(), req.getGeneration()));
+        return switch (r.outcome()) {
+            case GRANTED, BARRIER_BROKEN -> {
+                mirrorBarrier(req.getKey());
+                yield ApplyResult.newBuilder()
+                        .setStatus(r.outcome() == io.github.lamspace.openlatch.core.result.Outcome.GRANTED
+                                ? ApplyStatus.OK : ApplyStatus.BARRIER_BROKEN)
+                        .setBarrierGeneration(r.generation())
+                        .setBarrierSettled(r.settled())
+                        .build();
+            }
+            case REJECT_SESSION -> ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_BARRIER_ACTION, REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY,
+                    REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable barrier actionDone outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
      * 协议形态数值 → core 原子形态；非三原子类型（0–6 与越界）回
      * {@code null}（调用方以形状非法拒绝）。两侧枚举序对齐。
      *
@@ -660,6 +910,38 @@ public final class LockStateMachineCore {
                 }
                 // v4：原子条目携状态组重建（值/版本戳/去重槽直写，断言不变量
                 // 在 CoreStateRestore.Entry 构造内复核）；其余家族状态组恒 null。
+                // v5：屏障状态组重建——账簿逻辑 id 折算内部 sid；了结记录中
+                // 未登记（已消亡）会话的账簿项剔除（其重发在会话校验即拒，
+                // 引擎侧永不触达，保留反而引入悬空身份）。
+                CoreStateRestore.BarrierState barrier = null;
+                if (l.getLockTypeValue() == io.github.lamspace.openlatch.protocol.LockType
+                        .LOCK_TYPE_BARRIER_VALUE) {
+                    java.util.function.Function<SnapshotBarrierArrival,
+                            io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival> conv =
+                            a -> new io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival(
+                                    newSidMap.get(a.getSessionId()), a.getRequestId());
+                    List<io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival> cur =
+                            new ArrayList<>();
+                    for (SnapshotBarrierArrival a : l.getBarrierCurrentArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            cur.add(conv.apply(a));
+                        }
+                    }
+                    List<io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival> comp =
+                            new ArrayList<>();
+                    for (SnapshotBarrierArrival a : l.getBarrierCompletedArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            comp.add(conv.apply(a));
+                        }
+                    }
+                    long completedExecutor = l.getBarrierCompletedExecutor() == 0 ? 0
+                            : newSidMap.getOrDefault(l.getBarrierCompletedExecutor(), 0L);
+                    barrier = new CoreStateRestore.BarrierState(l.getBarrierParties(),
+                            l.getBarrierGeneration(), cur,
+                            newSidMap.getOrDefault(l.getBarrierActionSession(), 0L),
+                            l.getBarrierActionRequest(), l.getBarrierCompletedGeneration(),
+                            l.getBarrierCompletedResult(), comp, completedExecutor);
+                }
                 CoreStateRestore.AtomicState atomic = null;
                 if (ShadowTable.isAtomicType(l.getLockTypeValue())) {
                     atomic = new CoreStateRestore.AtomicState(l.getAtomicInitial(),
@@ -670,7 +952,8 @@ public final class LockStateMachineCore {
                 }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
-                        l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(), atomic));
+                        l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(),
+                        atomic, barrier));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

@@ -25,6 +25,12 @@ enum RaftEntryType {
   NOOP                 = 7;  // Leader 当选后确认提交位点；亦作失联探针载体
   LATCH_COUNT_DOWN_ENTRY = 8; // v3：屏障倒计数（计数变更进日志，等待队列不入，详设 §2.4）
   ATOMIC_OP_ENTRY        = 9; // v4：原子变量操作（读写皆进日志；GET 应用为零迁移）
+  // v5：循环屏障三命令——到场/离场/动作了结皆改变复制侧世代状态
+  // （到场账簿、合拢与破障裁决、执行者指定、世代号），一律进日志；
+  // 在队位次与通知时序仍是 Leader 本地态，不入日志与快照。
+  BARRIER_AWAIT_ENTRY       = 10;
+  BARRIER_LEAVE_ENTRY       = 11;
+  BARRIER_ACTION_DONE_ENTRY = 12;
 }
 
 // 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
@@ -78,6 +84,24 @@ message AtomicOpPayload {
   openlatch.AtomicOpRequest  request     = 3;
 }
 
+// v5：循环屏障命令载荷。到场与了结的幂等判定（(会话,请求) 到场账簿、
+// 了结记录、执行者挂账）全在应用侧条目内状态完成，跨副本回放得出一致裁决。
+message BarrierAwaitPayload {
+  int64                        session_id  = 1;
+  int64                        request_id  = 2;  // 原 BARRIER_AWAIT 信封 request_id（等待项身份位）
+  openlatch.BarrierAwaitRequest request    = 3;
+}
+
+message BarrierLeavePayload {
+  int64                        session_id = 1;
+  openlatch.BarrierLeaveRequest request   = 2;  // 内含 await_request_id（0=纯破障）
+}
+
+message BarrierActionDonePayload {
+  int64                              session_id = 1;
+  openlatch.BarrierActionDoneRequest request    = 2;
+}
+
 // LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
 // wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
 message ExpirePayload {
@@ -97,6 +121,7 @@ enum ApplyStatus {
   QUEUE_FULL           = 7;  // 触发单 key 等待深度限额
   INTERNAL_ERROR       = 8;  // 条目无法解析或应用异常
   INVALID_REQUEST      = 9;  // v3：参数形状非法（家族误用/总量断言不成立），P3-04 码形接正
+  BARRIER_BROKEN       = 10; // v5：在带裁决——等待项所属世代已破障（非应用失败）
 }
 
 // 应用回执载荷。字段按条目类型择用：
@@ -119,6 +144,13 @@ message ApplyResult {
   sint64      atomic_old_value    = 10; // 操作前值
   sint64      atomic_value        = 11; // 操作后（或当前）值
   int64       atomic_version      = 12; // 操作后版本戳（GET/失败不推）
+  // v5：BARRIER_*_ENTRY 回执（status=OK/QUEUED/BARRIER_BROKEN 时择用；
+  // queue_position 复用既有 5 号位）。generation 为等待项所属/被裁决的世代号。
+  int64       barrier_generation  = 13; // 本回执针对的世代号
+  bool        barrier_executor    = 14; // true=本到场被指定为动作执行者（挂起待回报）
+  int64       barrier_parties     = 15; // 条目定型许可数回显
+  bool        barrier_settled     = 16; // v5：本条目应用点使一个世代到达终态——Leader 据此对该 key 广播放行
+  repeated string barrier_released_keys = 17; // v5：SESSION_CLOSE 打破世代的屏障 key 集（Leader 逐一广播破障）
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -152,6 +184,23 @@ message SnapshotLock {
   int64  atomic_slot_old_value = 16;  // 去重槽：应答 old_value
   int64  atomic_slot_value     = 17;  // 去重槽：应答 value
   int64  atomic_slot_version   = 18;  // 去重槽：应答 version
+  // v5 扩展（BARRIER 家族，lock_type = LOCK_TYPE_BARRIER；其余家族不出现）。
+  // 到场身份以 (会话, 请求) 表达，列表序即账簿插入序（序列化确定性）。
+  int64  barrier_parties             = 19;  // 定型许可数
+  int64  barrier_generation          = 20;  // 当前世代号（自 1 起单调递增，恢复不回退）
+  repeated SnapshotBarrierArrival barrier_current_arrivals = 21;  // 当前世代到场账簿
+  int64  barrier_action_session      = 22;  // 动作挂账会话（0=无挂账）
+  int64  barrier_action_request      = 23;  // 动作挂账请求 id
+  int64  barrier_completed_generation = 24; // 最近完结世代号（0=尚无）
+  int32  barrier_completed_result    = 25;  // 完结形态：1=TRIPPED、2=BROKEN
+  repeated SnapshotBarrierArrival barrier_completed_arrivals = 26;  // 完结世代到场账簿
+  int64  barrier_completed_executor  = 27;  // 完结世代执行者会话（0=无）
+}
+
+// v5：循环屏障到场身份（(会话, 请求) 二元组，快照内列表项）。
+message SnapshotBarrierArrival {
+  int64 session_id = 1;
+  int64 request_id = 2;  // 等待项请求 id（与 session_id 合成到场身份）
 }
 
 // next_lease_token 为 S4 增补（发号水位）：快照后新副本的租约凭证发号器从该

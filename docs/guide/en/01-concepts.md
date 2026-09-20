@@ -106,6 +106,28 @@ The semantic differences from locks must be known item by item:
 - **Entries are never reclaimed**: there is no delete; govern key cardinality yourself.
 - Overflow matches the JDK (wrap within long/int32 domains; boolean restricted to {0,1}).
 
+## 8. Cyclic barrier and generations
+
+`OBarrier` (protocol v5) mirrors the JDK `CyclicBarrier`: N parties meet, and the
+barrier rewraps for the next round. Three contract deltas you must know:
+
+- **Leaving breaks the generation (stronger than the JDK)** — in the JDK a dead
+  thread simply never arrives and the barrier waits forever. Here any *arrived*
+  participant leaving — `await(timeout)` expiry, interruption, explicit
+  `breakBarrier()`, an action that throws, or **process death / session expiry**
+  (adjudicated at the replicated `SESSION_CLOSE`) — instantly breaks the current
+  generation; every waiter in it gets `OBrokenBarrierException`.
+- **Breakage is generation-local (weaker than the JDK)** — the JDK keeps a broken
+  barrier until `reset()`; OpenLatch's next arrivals simply open a fresh
+  generation, so there is **no `reset()`**.
+- **barrierAction runs inside the last arriver's own await** — no one is released
+  until the action reports done (faithful to the JDK's "closed until opened");
+  an action failure breaks the generation for everyone.
+
+Generation numbers increase monotonically per key; responses echo them so a
+resend settles against its own generation. Arrival is a stateful request: on a
+session switch an in-flight await is abandoned, never replayed.
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -117,6 +139,7 @@ The semantic differences from locks must be known item by item:
 | Semaphore | — | N-permit gate; releasing more than held throws `IllegalMonitorStateException` |
 | Count-down latch | — | one-shot: `init` fixes total, `countDown` to zero releases all `await`s; entry lives until node restart |
 | Atomic variables | — | value has no owner (death never rolls back); every write bumps the version stamp by 1; ABA only eliminated by `*Stamped` forms; entries never reclaimed (v4) |
+| Cyclic barrier | — | N-party rendezvous, reusable generations; **leaving breaks the current generation** (death/timeout/interrupt/break — stronger than the JDK); no sticky broken state, no `reset()`; the last arriver runs the action (v5) |
 
 ## Next
 

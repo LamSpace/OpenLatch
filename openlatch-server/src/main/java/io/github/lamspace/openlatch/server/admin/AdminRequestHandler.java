@@ -235,15 +235,19 @@ public final class AdminRequestHandler {
             CoreStats st = standaloneCore.stats();
             int latchEntries = 0;
             int atomicEntries = 0;
+            int barrierEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
                 } else if (k.family() == KeyFamily.ATOMIC) {
                     atomicEntries++;
+                } else if (k.family() == KeyFamily.BARRIER) {
+                    barrierEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
+                    .setBarrierEntries(barrierEntries)
                     .setTotalWaiters(st.totalWaiters())
                     .setNodeRole("SINGLE");
         } else {
@@ -251,15 +255,19 @@ public final class AdminRequestHandler {
             int[] held = shadow.heldFamilyCounts();
             int latchEntries = 0;
             int atomicEntries = 0;
+            int barrierEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
                 } else if (ShadowTable.isAtomicType(v.lockType())) {
                     atomicEntries++;
+                } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                    barrierEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
+                    .setBarrierEntries(barrierEntries)
                     .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
                     .setNodeRole(currentRole());
         }
@@ -322,6 +330,11 @@ public final class AdminRequestHandler {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
                         row.setAtomicKind(atomicKindNameOfCore(k.atomicKind()))
                                 .setAtomicValue(k.atomicValue());
+                    } else if (k.family() == KeyFamily.BARRIER) {
+                        // v5：屏障行呈现 parties/世代/到场数（holders/租约恒零）。
+                        row.setBarrierParties(k.barrierParties())
+                                .setBarrierGeneration(k.barrierGeneration())
+                                .setBarrierArrived(k.barrierArrived());
                     }
                     rows.add(row.build());
                 }
@@ -344,6 +357,10 @@ public final class AdminRequestHandler {
                 if (ShadowTable.isAtomicType(v.lockType())) {
                     row.setAtomicKind(atomicKindNameOf(v.lockType()))
                             .setAtomicValue(v.atomicValue());
+                } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                    row.setBarrierParties(v.barrierParties())
+                            .setBarrierGeneration(v.barrierGeneration())
+                            .setBarrierArrived(v.barrierArrived());
                 }
                 rows.add(row.build());
             }
@@ -405,6 +422,14 @@ public final class AdminRequestHandler {
                     .setAtomicInitial(snap.atomicInitial())
                     .setAtomicValue(snap.atomicValue())
                     .setAtomicVersion(snap.atomicVersion());
+            if (snap.family() == KeyFamily.BARRIER) {
+                b.setBarrierParties(snap.barrierParties())
+                        .setBarrierGeneration(snap.barrierGeneration())
+                        .setBarrierArrived(snap.barrierArrived())
+                        .setBarrierActionPending(snap.barrierActionPending())
+                        .setBarrierLastFinal(snap.barrierLastFinal() == null
+                                ? "none" : barrierFinalWord(snap.barrierLastFinal().ordinal()));
+            }
             for (CoreInspection.HolderSnapshot h : snap.holders()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.sessionId()).setThreadId(h.threadId())
@@ -434,6 +459,14 @@ public final class AdminRequestHandler {
                     .setAtomicInitial(v.atomicInitial())
                     .setAtomicValue(v.atomicValue())
                     .setAtomicVersion(v.atomicVersion());
+            if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
+                b.setBarrierParties(v.barrierParties())
+                        .setBarrierGeneration(v.barrierGeneration())
+                        .setBarrierArrived(v.barrierArrived())
+                        .setBarrierActionPending(v.barrierActionPending())
+                        .setBarrierLastFinal(v.barrierCompletedResult() == 0
+                                ? "none" : barrierFinalWord(v.barrierCompletedResult() - 1));
+            }
             for (Map.Entry<ShadowTable.Holder, Integer> h : v.holders().entrySet()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.getKey().sessionId()).setThreadId(h.getKey().threadId())
@@ -525,6 +558,7 @@ public final class AdminRequestHandler {
             case SEMAPHORE -> "semaphore";
             case LATCH -> "latch";
             case ATOMIC -> "atomic";
+            case BARRIER -> "barrier";
         };
     }
 
@@ -543,6 +577,9 @@ public final class AdminRequestHandler {
         }
         if (ShadowTable.isAtomicType(lockTypeValue)) {
             return "atomic";
+        }
+        if (lockTypeValue == LockType.LOCK_TYPE_BARRIER_VALUE) {
+            return "barrier";
         }
         return "lock";
     }
@@ -581,6 +618,23 @@ public final class AdminRequestHandler {
             case ATOMIC_LONG -> "long";
             case ATOMIC_INTEGER -> "integer";
             case ATOMIC_BOOLEAN -> "boolean";
+            default -> "";
+        };
+    }
+
+    /**
+     * 屏障了结形态词表（管理观察面：tripped/broken；0=无完结记录回
+     * {@code none}，越界数值回空串——proto3 缺省即"不适用"）。
+     * 编码口径：{@code BarrierFinal.ordinal()}（0=TRIPPED、1=BROKEN）与
+     * 影子表镜像存储值（1=TRIPPED、2=BROKEN）经调用方折算对齐。
+     *
+     * @param code 了结形态编码（0=TRIPPED、1=BROKEN）
+     * @return 形态词或空串
+     */
+    private static String barrierFinalWord(int code) {
+        return switch (code) {
+            case 0 -> "tripped";
+            case 1 -> "broken";
             default -> "";
         };
     }

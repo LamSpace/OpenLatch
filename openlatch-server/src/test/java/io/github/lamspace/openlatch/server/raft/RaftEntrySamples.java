@@ -8,6 +8,9 @@ import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierAwaitPayload;
+import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
@@ -117,6 +120,47 @@ final class RaftEntrySamples {
                                 .setOperand(operand).setExpected(expected)
                                 .setExpectedVersion(expectedVersion).setInitialValue(initialValue)
                                 .setOpSeq(opSeq))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** 循环屏障到场条目（v5）。 */
+    static RaftLogEntry barrierAwait(long sessionId, long requestId, String key, long parties,
+                                     boolean carriesAction, long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.BARRIER_AWAIT_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(BarrierAwaitPayload.newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId)
+                        .setRequest(io.github.lamspace.openlatch.protocol.BarrierAwaitRequest
+                                .newBuilder().setKey(key).setParties(parties)
+                                .setCarriesAction(carriesAction))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** 循环屏障离场条目（v5；awaitRequestId=0 为纯破障主张）。 */
+    static RaftLogEntry barrierLeave(long sessionId, String key, long awaitRequestId,
+                                     long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.BARRIER_LEAVE_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(BarrierLeavePayload.newBuilder()
+                        .setSessionId(sessionId)
+                        .setRequest(io.github.lamspace.openlatch.protocol.BarrierLeaveRequest
+                                .newBuilder().setKey(key).setAwaitRequestId(awaitRequestId))
+                        .build().toByteString())
+                .build();
+    }
+
+    /** 循环屏障动作了结条目（v5）。 */
+    static RaftLogEntry barrierActionDone(long sessionId, String key, long generation,
+                                          long wallMs, long seq) {
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.BARRIER_ACTION_DONE_ENTRY)
+                .setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(BarrierActionDonePayload.newBuilder()
+                        .setSessionId(sessionId)
+                        .setRequest(io.github.lamspace.openlatch.protocol.BarrierActionDoneRequest
+                                .newBuilder().setKey(key).setGeneration(generation))
                         .build().toByteString())
                 .build();
     }

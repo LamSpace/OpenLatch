@@ -45,9 +45,10 @@ public record CoreInspection(
         long sampledAtMs) {
 
     /**
-     * 单 key 条目的明细快照——四家族共用一个值形态，家族外字段取零值
+     * 单 key 条目的明细快照——五家族共用一个值形态，家族外字段取零值
      * （锁家族无许可/屏障字段，Semaphore 家族无屏障字段，Latch 家族无租约
-     * 与持有者，ATOMIC 家族无租约/持有者/等待者、仅原子四字段有效）。
+     * 与持有者，ATOMIC 家族无租约/持有者/等待者、仅原子四字段有效，
+     * BARRIER 家族无租约/持有者、仅循环屏障五字段有效）。
      * 不可变值对象。
      *
      * @param key              锁键
@@ -70,6 +71,12 @@ public record CoreInspection(
      * @param atomicInitial    ATOMIC 定型初值（非该家族为 0）
      * @param atomicValue      ATOMIC 当前值（非该家族为 0）
      * @param atomicVersion    ATOMIC 版本戳（非该家族为 0）
+     * @param barrierParties   BARRIER 定型许可数（非该家族为 0）
+     * @param barrierGeneration BARRIER 当前世代号（非该家族为 0）
+     * @param barrierArrived   BARRIER 当前世代到场数（非该家族为 0）
+     * @param barrierActionPending BARRIER 是否处于动作待决态（非该家族为 {@code false}）
+     * @param barrierLastFinal BARRIER 最近完结世代的了结形态
+     *                         （非该家族或尚无完结记录为 {@code null}）
      */
     public record KeySnapshot(
             String key,
@@ -89,7 +96,12 @@ public record CoreInspection(
             io.github.lamspace.openlatch.core.LockType atomicKind,
             long atomicInitial,
             long atomicValue,
-            long atomicVersion) {
+            long atomicVersion,
+            long barrierParties,
+            long barrierGeneration,
+            int barrierArrived,
+            boolean barrierActionPending,
+            io.github.lamspace.openlatch.core.result.BarrierFinal barrierLastFinal) {
     }
 
     /**

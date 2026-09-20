@@ -239,6 +239,49 @@ class MessageLegalityTest {
     }
 
     @Test
+    void barrier_message_payload_matrix_rejected_without_disconnect() {
+        EmbeddedChannel ch = channel(null);
+        ch.pipeline().fireChannelActive();
+        // v5 握手（低版本会话的 BARRIER 拒绝语义已在 BarrierGatingTest 钉死，
+        // 此处只验载荷合法性维度）。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(5).setType(MessageType.HELLO)
+                .setRequestId(1)
+                .setHelloRequest(io.github.lamspace.openlatch.protocol.HelloRequest
+                        .newBuilder().setClientProtocolVersion(5))
+                .build());
+        readOut(ch);
+
+        // 三组 BARRIER 消息：无 payload 与错挂他种 payload 均消息级拒绝。
+        for (MessageType t : new MessageType[] {MessageType.BARRIER_AWAIT,
+                MessageType.BARRIER_LEAVE, MessageType.BARRIER_ACTION_DONE}) {
+            ch.writeInbound(Envelope.newBuilder().setProtocolVersion(5)
+                    .setType(t).setRequestId(2).build());
+            Envelope noPayload = readOut(ch);
+            assertThat(noPayload.getType()).isEqualTo(t);
+            assertThat(switch (t) {
+                case BARRIER_AWAIT -> noPayload.getBarrierAwaitResponse().getStatus();
+                case BARRIER_LEAVE -> noPayload.getBarrierLeaveResponse().getStatus();
+                default -> noPayload.getBarrierActionDoneResponse().getStatus();
+            }).isEqualTo(StatusCode.INVALID_REQUEST);
+
+            ch.writeInbound(Envelope.newBuilder().setProtocolVersion(5)
+                    .setType(t).setRequestId(3)
+                    .setReleaseRequest(ReleaseRequest.newBuilder().setKey("k"))
+                    .build());
+            readOut(ch);
+        }
+        assertThat(ch.isOpen()).isTrue();
+
+        // 同连接继续正常服务：锁获取照常。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(5)
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(4)
+                .setAcquireRequest(AcquireRequest.newBuilder().setKey("ok").setWaitMs(0))
+                .build());
+        assertThat(readOut(ch).getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
     void dispatch_failure_becomes_internal_error_response_not_silent_hang() {
         AtomicBoolean notifyThrows = new AtomicBoolean(false);
         CoreEngine core = new CoreEngine(new CoreConfig(), new SystemClock(),

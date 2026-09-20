@@ -84,11 +84,13 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      * @param latchCount  Latch 条目的当前剩余计数（非 Latch 恒 0）
      * @param atomic      ATOMIC 条目的状态组（形态合法值、版本戳与去重槽；
      *                    非 ATOMIC 恒 {@code null}）
+     * @param barrier     BARRIER 条目的状态组（parties/世代/到场账簿/挂账/
+     *                    了结记录；非 BARRIER 恒 {@code null}）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
-                        AtomicState atomic) {
+                        AtomicState atomic, BarrierState barrier) {
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -102,7 +104,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          */
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
-            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0, null);
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0, null, null);
         }
 
         /**
@@ -122,7 +124,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 long expiresAtMs, List<Holder> holders, int permitsTotal,
                 long latchTotal, long latchCount) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    permitsTotal, latchTotal, latchCount, null);
+                    permitsTotal, latchTotal, latchCount, null, null);
         }
 
         /**
@@ -131,7 +133,9 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
          * 计数须在 {@code [0, total]} 内且 {@code total >= 1}；ATOMIC 条目
          * 无租约与持有者、MUST 携带原子状态组且初值/当前值/槽应答属形态
-         * 值域（integer 截断域、boolean 限 {0,1}）。
+         * 值域（integer 截断域、boolean 限 {0,1}）；BARRIER 条目无租约与
+         * 持有者、MUST 携带屏障状态组且 parties/generation 为正、了结编码
+         * 在值域内。
          *
          * @throws IllegalArgumentException 家族自洽性违例
          */
@@ -143,6 +147,19 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 throw new IllegalArgumentException("entry lockType must be non-null");
             }
             holders = List.copyOf(holders);
+            if (lockType == LockType.BARRIER) {
+                if (barrier == null) {
+                    throw new IllegalArgumentException(
+                            "barrier entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "barrier entry carries lease or holders: key=" + key);
+                }
+            } else if (barrier != null) {
+                throw new IllegalArgumentException(
+                        "non-barrier entry carries barrier state: key=" + key);
+            }
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
                     || lockType == LockType.ATOMIC_BOOLEAN;
@@ -170,6 +187,12 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 }
                 if (!holders.isEmpty()) {
                     throw new IllegalArgumentException("latch entry must have no holders: key=" + key);
+                }
+            } else if (lockType == LockType.BARRIER) {
+                // 屏障自洽性已在家族首检完成；此处只拦他族字段携带。
+                if (atomic != null || permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                    throw new IllegalArgumentException(
+                            "barrier entry must not carry other-family state: key=" + key);
                 }
             } else {
                 if (atomic != null) {
@@ -201,7 +224,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 }
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
-                    && lockType != LockType.SEMAPHORE && !atomicKind && holders.size() != 1) {
+                    && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
+                    && !atomicKind && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -246,6 +270,53 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (slotSession != 0 && slotOpSeq < 1) {
                 throw new IllegalArgumentException("occupied dedup slot must carry seq >= 1");
+            }
+        }
+    }
+
+    /**
+     * 循环屏障条目的复制态状态组（快照/重建直写通道）：
+     * parties 定型、当前世代号与到场账簿、动作挂账 (会话, 请求)、
+     * 最近完结世代的了结记录（形态 0=无、1=TRIPPED、2=BROKEN）。
+     *
+     * @param parties             定型许可数（{@code >= 1}）
+     * @param generation          当前世代号（{@code >= 1}）
+     * @param arrivals            当前世代到场账簿（引擎内部会话 id，插入序）
+     * @param actionSession       动作挂账会话（0=无挂账）
+     * @param actionRequest       动作挂账请求 id
+     * @param completedGeneration 最近完结世代号（0=无完结记录）
+     * @param completedResult     完结形态编码（0=无、1=TRIPPED、2=BROKEN）
+     * @param completedArrivals   完结世代到场账簿（插入序；已消亡会话的
+     *                            条目由装配侧剔除，见重建工厂注释）
+     * @param completedExecutor   完结世代执行者会话（0=无）
+     */
+    public record BarrierState(long parties, long generation,
+                               java.util.List<io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival> arrivals,
+                               long actionSession, long actionRequest,
+                               long completedGeneration, int completedResult,
+                               java.util.List<io.github.lamspace.openlatch.core.lock.BarrierEntry.Arrival> completedArrivals,
+                               long completedExecutor) {
+
+        /**
+         * 构造并校验世代自洽性：parties/generation 正、了结编码值域、
+         * 无完结记录时账簿必空。
+         *
+         * @throws IllegalArgumentException 自洽性违例
+         */
+        public BarrierState {
+            if (parties < 1) {
+                throw new IllegalArgumentException("barrier parties must be >= 1: " + parties);
+            }
+            if (generation < 1) {
+                throw new IllegalArgumentException("barrier generation must be >= 1: " + generation);
+            }
+            if (completedResult < 0 || completedResult > 2) {
+                throw new IllegalArgumentException("unknown completed result code: " + completedResult);
+            }
+            arrivals = java.util.List.copyOf(arrivals);
+            completedArrivals = java.util.List.copyOf(completedArrivals);
+            if (completedGeneration == 0 && !completedArrivals.isEmpty()) {
+                throw new IllegalArgumentException("completed arrivals without completed generation");
             }
         }
     }

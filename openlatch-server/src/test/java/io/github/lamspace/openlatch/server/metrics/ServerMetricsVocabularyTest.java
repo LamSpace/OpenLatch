@@ -54,6 +54,8 @@ class ServerMetricsVocabularyTest {
         metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_LONG, AtomicOp.ATOMIC_CAS, StatusCode.OK);
         metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_INTEGER, AtomicOp.ATOMIC_GET, StatusCode.OK);
         metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_BOOLEAN, AtomicOp.ATOMIC_SET, StatusCode.INVALID_REQUEST);
+        metrics.recordBarrier("await", StatusCode.QUEUED);
+        metrics.recordBarrier("action_done", StatusCode.BARRIER_BROKEN);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -78,6 +80,8 @@ class ServerMetricsVocabularyTest {
         assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"long\",op=\"cas\",status=\"OK\"} 1");
         assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"integer\",op=\"get\",status=\"OK\"} 1");
         assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"boolean\",op=\"set\",status=\"INVALID_REQUEST\"} 1");
+        assertThat(scrape).contains("openlatch_server_barrier_total{op=\"await\",status=\"QUEUED\"} 1");
+        assertThat(scrape).contains("openlatch_server_barrier_total{op=\"action_done\",status=\"BARRIER_BROKEN\"} 1");
         // 不得出现 *_total_total 双后缀。
         assertThat(scrape).doesNotContain("_total_total");
     }

@@ -3,9 +3,7 @@
 ## Purpose
 
 提供 OpenLatch 单节点锁服务器：将锁语义核心经线路协议暴露为 TCP 长连接服务，负责会话握手、请求分发与错误码映射、队首通知推送、租约到期扫描驱动、断连与空闲会话清理、自我保护限额，以及可执行交付形态。
-
 ## Requirements
-
 ### Requirement: 服务启动与配置加载
 
 服务器 MUST 从 `-Dopenlatch.config=<path>` 指定的 Java Properties 文件加载配置；未指定时 MUST 使用内置默认值启动。配置项 MUST 覆盖：监听端口（默认 9410，允许 0 表示由操作系统分配临时端口）、Worker 线程数（默认 2×CPU）、空闲断连时限、默认租约与租约钳制区间、扫描周期、队首响应时限、key 长度上限、单 key 队列深度上限、单连接未完成请求上限。非法配置值 MUST 在启动时快速失败并给出明确错误信息。启动成功后 MUST 监听配置端口（port=0 时监听实际分配端口），并在启动日志中打印端口、协议版本与关键限额配置。
@@ -29,6 +27,7 @@
 
 - **WHEN** 配置端口已被其他进程占用
 - **THEN** 服务器启动失败，进程退出并给出明确错误信息，不进入半启动状态
+
 ### Requirement: 关停序列
 
 收到关停信号（JVM 退出钩子）时，服务器 MUST 依次执行：停止租约扫描调度 → 关闭全部连接 → 等待资源终止回收。关停过程中 MUST 不再产生新的队首通知推送。
@@ -40,7 +39,7 @@
 
 ### Requirement: 会话握手
 
-连接建立后的第一条消息 MUST 是 HELLO。握手成功前到达的任何业务请求 MUST 被回以 `INVALID_REQUEST`（不断连）。HELLO 的 `auth_token` 判定按业务令牌认证开关门控（语义见 transport-security"业务令牌认证与默认兼容守卫"）：认证关闭（默认）时维持 Phase 1 兼容守卫——HELLO 携带非空 `auth_token` MUST 回以 `INVALID_REQUEST` 并断连；认证开启时——HELLO 的 `auth_token` MUST 命中服务端配置的业务令牌之一，否则（缺失/为空/不符/未配置）统一回以 `INVALID_REQUEST` 并断连，不泄露原因。HELLO 的协议版本号不在支持区间 [1,4] 时 MUST 回以 `INVALID_REQUEST` 并断连（不做隐式兼容）。认证与版本判定 MUST 发生在会话分配、注册表登记或集群 `SESSION_OPEN` 复制之前（单机与集群同一门闩），被拒 HELLO 不得产生可观察状态副作用。握手成功时服务器 MUST 分配在连接生命周期内唯一的 `session_id`，并回以包含 `session_id`、服务端协议版本与默认租约时长的响应。同一连接上的重复 HELLO MUST 被回以 `INVALID_REQUEST`。
+连接建立后的第一条消息 MUST 是 HELLO。握手成功前到达的任何业务请求 MUST 被回以 `INVALID_REQUEST`（不断连）。HELLO 的 `auth_token` 判定按业务令牌认证开关门控（语义见 transport-security"业务令牌认证与默认兼容守卫"）：认证关闭（默认）时维持 Phase 1 兼容守卫——HELLO 携带非空 `auth_token` MUST 回以 `INVALID_REQUEST` 并断连；认证开启时——HELLO 的 `auth_token` MUST 命中服务端配置的业务令牌之一，否则（缺失/为空/不符/未配置）统一回以 `INVALID_REQUEST` 并断连，不泄露原因。HELLO 的协议版本号不在支持区间 [1,5] 时 MUST 回以 `INVALID_REQUEST` 并断连（不做隐式兼容）。认证与版本判定 MUST 发生在会话分配、注册表登记或集群 `SESSION_OPEN` 复制之前（单机与集群同一门闩），被拒 HELLO 不得产生可观察状态副作用。握手成功时服务器 MUST 分配在连接生命周期内唯一的 `session_id`，并回以包含 `session_id`、服务端协议版本与默认租约时长的响应。同一连接上的重复 HELLO MUST 被回以 `INVALID_REQUEST`。
 
 #### Scenario: 握手前业务请求被拒
 
@@ -49,7 +48,7 @@
 
 #### Scenario: 协议版本越界断连
 
-- **WHEN** HELLO 携带不在支持区间 [1,4] 内的协议版本号
+- **WHEN** HELLO 携带不在支持区间 [1,5] 内的协议版本号
 - **THEN** 服务器回以 `INVALID_REQUEST` 并断开连接
 
 #### Scenario: 认证关闭时非空令牌被拒（兼容守卫）
@@ -114,6 +113,7 @@
 
 - **WHEN** 连接上收到无法按协议解析的字节序列
 - **THEN** 服务器记录日志并断开该连接
+
 ### Requirement: 队首通知推送
 
 锁语义引擎发出队首通知事件时，服务器 MUST 向该队首等待者所属连接推送 `AWAIT_NOTIFY`；推送信封的 `request_id` MUST 为 0，`request_id_ref` MUST 指向原获取请求的 `request_id`。若目标连接已不存在，推送 MUST 被静默丢弃，不影响其他连接与服务稳定性（队列位置由引擎的队首响应超时机制兜底回收）。
@@ -178,3 +178,23 @@
 
 - **WHEN** 以 `java -jar` 启动可执行 jar，随后依次执行 HELLO、获取、续租、释放的完整请求序列
 - **THEN** 各响应状态正确（授予携带凭证、续租成功、完全释放），服务全程无异常
+
+### Requirement: v5 屏障门控与结果映射
+
+服务器 SHALL 对 `BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` 三类消息实施 v5 门控：握版本 <5 的会话发送任一 BARRIER 消息 MUST 以 `INVALID_REQUEST` 消息级拒绝且不断连（判例：LATCH 消息对 v3 门、ATOMIC 消息对 v4 门），该会话既有版本能力照常服务。核心结果到协议状态码的映射 MUST 遵循：parties 断言不成立（`REJECT_BARRIER_PARTIES`）与家族/形态不匹配（`REJECT_TYPE_MISMATCH`）映射 `INVALID_REQUEST`；会话不存在映射 `SESSION_EXPIRED`；等待队列深度超限沿用 LATCH await 对 `REJECT_QUEUE_FULL` 的现行映射（不新增映射）；等待项所属世代已破障映射 `BARRIER_BROKEN`；动作了结的非指定执行者回报、或携带未知世代号映射 `INVALID_REQUEST`。屏障操作 MUST NOT 进入 ACQUIRE/RELEASE/LEASE_RENEW 通道，`AWAIT_NOTIFY` 推送通道复用不新建。
+
+#### Scenario: v4 会话发屏障消息被拒不不断连
+
+- **WHEN** 握版本 4 的会话发送 `BARRIER_AWAIT`
+- **THEN** 收到 `INVALID_REQUEST` 应答且连接保持，该会话的锁/Semaphore/Latch/原子操作全部照常可用
+
+#### Scenario: ACQUIRE 携带屏障定型值被拒
+
+- **WHEN** 会话发送 `lock_type = LOCK_TYPE_BARRIER` 的 ACQUIRE 请求
+- **THEN** 以 `INVALID_REQUEST` 消息级拒绝且不断连，不产生日志条目（与三原子类型与 `LOCK_TYPE_LATCH` 同规则）
+
+#### Scenario: 破障等待项重发得在带裁决
+
+- **WHEN** 等待者以原 `request_id` 重发 `BARRIER_AWAIT`，服务端判定其世代已破障
+- **THEN** 应答 `status = BARRIER_BROKEN`，连接与会话不受影响
+

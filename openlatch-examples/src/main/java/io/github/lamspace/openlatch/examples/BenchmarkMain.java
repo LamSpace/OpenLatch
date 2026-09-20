@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.lamspace.openlatch.client.OAtomicLong;
+import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
@@ -61,6 +62,8 @@ public final class BenchmarkMain {
     private static final int[] CONTENDED_LEVELS = {16, 64};
     /** 原子 CAS 争用档位（线程数）。 */
     private static final int[] ATOMIC_CAS_LEVELS = {16};
+    /** 循环屏障合拢档位（parties = 会合线程数）。 */
+    private static final int[] BARRIER_LEVELS = {2, 4};
 
     /**
      * 私有构造：入口类。
@@ -122,6 +125,19 @@ public final class BenchmarkMain {
                 casThroughput.add(new ArrayList<>());
                 casLatencies.add(new ArrayList<>());
             }
+            // 屏障相：热身（无动作两档 + 动作档）。
+            for (int level : BARRIER_LEVELS) {
+                runBarrierTrips(client, level, false, "bench:barrier:warm:" + level, WARMUP_MS);
+            }
+            runBarrierTrips(client, 2, true, "bench:barrier:warm:act", WARMUP_MS);
+            List<List<long[]>> barrierThroughput = new ArrayList<>();
+            List<List<double[]>> barrierLatencies = new ArrayList<>();
+            List<long[]> actionThroughput = new ArrayList<>();
+            List<double[]> actionLatencies = new ArrayList<>();
+            for (int level : BARRIER_LEVELS) {
+                barrierThroughput.add(new ArrayList<>());
+                barrierLatencies.add(new ArrayList<>());
+            }
             for (int b = 0; b < BATCHES; b++) {
                 Result add = runAtomicAdd(client, SAMPLE_MS);
                 addThroughput.add(new long[] {add.opsPerSec});
@@ -134,10 +150,22 @@ public final class BenchmarkMain {
                     casThroughput.get(i).add(new long[] {r.opsPerSec});
                     casLatencies.get(i).add(r.latencies);
                 }
+                for (int i = 0; i < BARRIER_LEVELS.length; i++) {
+                    // 每批用新 key：采样窗尾部未集齐世代的破障收场不污染后续批次。
+                    Result br = runBarrierTrips(client, BARRIER_LEVELS[i], false,
+                            "bench:barrier:" + BARRIER_LEVELS[i] + ":" + b, SAMPLE_MS);
+                    barrierThroughput.get(i).add(new long[] {br.opsPerSec});
+                    barrierLatencies.get(i).add(br.latencies);
+                }
+                Result ba = runBarrierTrips(client, 2, true,
+                        "bench:barrier:act:" + b, SAMPLE_MS);
+                actionThroughput.add(new long[] {ba.opsPerSec});
+                actionLatencies.add(ba.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
-                    getThroughput, getLatencies, casThroughput, casLatencies);
+                    getThroughput, getLatencies, casThroughput, casLatencies,
+                    barrierThroughput, barrierLatencies, actionThroughput, actionLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -375,6 +403,82 @@ public final class BenchmarkMain {
     }
 
     /**
+     * 循环屏障合拢往返：parties 个线程对同一 barrier key 反复会合（世代
+     * 回卷复用直至采样窗耗尽）——吞吐为<b>完成世代数/秒</b>（跨线程合并
+     * 计数除以 parties 向下取整），延迟列为单次 {@code await} 耗时（含等待
+     * 其余到场方，量级即"首到场至全体放行"的合拢延迟）。
+     *
+     * <p>采样窗截止时未集齐的世代按破障收场（离场即破障的正常裁决路径，
+     * 计作失败静默丢弃）；每批使用独立 key 以免跨批污染。
+     *
+     * @param client    客户端
+     * @param parties   会合方数（=线程数）
+     * @param withAction 是否给 0 号线程句柄挂 barrierAction（度量两阶段放行开销）
+     * @param key       屏障 key（调用方保证批次内唯一）
+     * @param millis    采样时长
+     * @return 结果（吞吐=世代/秒，延迟样本为到场等待耗时）
+     * @throws InterruptedException 等待被打断
+     */
+    private static Result runBarrierTrips(OpenLatchClient client, int parties, boolean withAction,
+            String key, long millis) throws InterruptedException {
+        AtomicLong arrivals = new AtomicLong();
+        Reservoir[] reservoirs = new Reservoir[parties];
+        for (int i = 0; i < parties; i++) {
+            reservoirs[i] = new Reservoir();
+        }
+        CountDownLatch ready = new CountDownLatch(parties);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(parties);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < parties; i++) {
+            final int idx = i;
+            futures.add(pool.submit(() -> {
+                OBarrier barrier = withAction && idx == 0
+                        ? client.newBarrier(key, parties, () -> { })
+                        : client.newBarrier(key, parties);
+                ready.countDown();
+                try {
+                    go.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                long deadline2 = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+                while (System.nanoTime() < deadline2) {
+                    long start = System.nanoTime();
+                    try {
+                        if (!barrier.await(20, TimeUnit.SECONDS)) {
+                            break; // 本方超时：世代已破，退出采样
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    } catch (RuntimeException e) {
+                        break; // 采样窗尾破障/拒绝收场：不计世代
+                    }
+                    reservoirs[idx].record(System.nanoTime() - start);
+                    arrivals.incrementAndGet();
+                }
+            }));
+        }
+        ready.await(10, TimeUnit.SECONDS);
+        go.countDown();
+        pool.shutdown();
+        if (!pool.awaitTermination(120, TimeUnit.SECONDS)) {
+            pool.shutdownNow();
+        }
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(1, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new IllegalStateException("barrier bench worker failed", e);
+            }
+        }
+        long generations = arrivals.get() / parties;
+        return new Result(Math.round(generations * 1_000.0 / millis), mergeSorted(reservoirs));
+    }
+
+    /**
      * 合并各线程蓄水池样本并排序（直接拼接各池样本，分位数为近似值，
      * 报告已注明）。
      *
@@ -526,6 +630,10 @@ public final class BenchmarkMain {
      * @param getLatencies   原子读延迟各批样本
      * @param casThroughput  原子 CAS 争用各档位吞吐
      * @param casLatencies   原子 CAS 争用各档位延迟样本批次
+     * @param barrierThroughput 循环屏障各 parties 档位世代吞吐（世代/秒）
+     * @param barrierLatencies  循环屏障各档位到场等待延迟样本批次
+     * @param actionThroughput  携 barrierAction 世代的吞吐各批
+     * @param actionLatencies   携 barrierAction 世代的延迟各批样本
      * @return Markdown 文本
      */
     private static String renderReport(List<long[]> uncThroughput,
@@ -537,7 +645,11 @@ public final class BenchmarkMain {
                                        List<long[]> getThroughput,
                                        List<double[]> getLatencies,
                                        List<List<long[]>> casThroughput,
-                                       List<List<double[]>> casLatencies) {
+                                       List<List<double[]>> casLatencies,
+                                       List<List<long[]>> barrierThroughput,
+                                       List<List<double[]>> barrierLatencies,
+                                       List<long[]> actionThroughput,
+                                       List<double[]> actionLatencies) {
         StringBuilder sb = new StringBuilder();
         sb.append("# OpenLatch 基准基线\n\n");
         sb.append("生成：").append(java.time.LocalDate.now())
@@ -581,8 +693,20 @@ public final class BenchmarkMain {
                     .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.99)))
                     .append(" |\n");
         }
+        for (int i = 0; i < BARRIER_LEVELS.length; i++) {
+            sb.append("| ").append(BARRIER_LEVELS[i])
+                    .append(" 方 barrier 会合（世代回卷） | ").append(medianOps(barrierThroughput.get(i)))
+                    .append(" | ").append(fmt(medianQuantile(barrierLatencies.get(i), 0.5)))
+                    .append(" | ").append(fmt(medianQuantile(barrierLatencies.get(i), 0.99)))
+                    .append(" |\n");
+        }
+        sb.append("| 2 方 barrier 会合携 action（两阶段） | ").append(medianOps(actionThroughput))
+                .append(" | ").append(fmt(medianQuantile(actionLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(actionLatencies, 0.99))).append(" |\n");
         sb.append("\n> 竞争场景延迟列为**授予延迟**（发起到授予，含排队）；")
-                .append("CAS 争用场景为**单次成功的完整耗时**（含重试轮次）。")
+                .append("CAS 争用场景为**单次成功的完整耗时**（含重试轮次）；")
+                .append("barrier 吞吐为**完成世代数/秒**，延迟为单次到场等待耗时")
+                .append("（量级即合拢端到端延迟，携 action 行对照两阶段放行开销）。")
                 .append("本基线仅作防退化参考，不作发布门槛。\n");
         return sb.toString();
     }

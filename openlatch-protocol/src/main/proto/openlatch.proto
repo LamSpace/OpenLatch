@@ -22,6 +22,9 @@ enum MessageType {
   ADMIN_KEY_DETAIL    = 12; // v3：单 key 明细（持有者/等待队列/租约）
   ADMIN_LIST_SESSIONS = 13; // v3：本节点接入会话列表
   ATOMIC_OP        = 14;   // v4：原子变量操作（独立消息对，不走 ACQUIRE）
+  BARRIER_AWAIT       = 15; // v5：循环屏障到场等待（QUEUED/AWAIT_NOTIFY 复用，独立通道）
+  BARRIER_LEAVE       = 16; // v5：循环屏障离场/破障（在队离场、超时、中断、显式 break 共用）
+  BARRIER_ACTION_DONE = 17; // v5：循环屏障动作了结（执行者回报 barrierAction 完成）
 }
 
 // 锁类型。
@@ -36,6 +39,7 @@ enum LockType {
   LOCK_TYPE_ATOMIC_LONG    = 7;  // v4：原子 long 形态判别（仅 ATOMIC_OP 消息携带）
   LOCK_TYPE_ATOMIC_INTEGER = 8;  // v4：原子 int 形态判别（int32 域 wrap）
   LOCK_TYPE_ATOMIC_BOOLEAN = 9;  // v4：原子 boolean 形态判别（值域 {0,1}）
+  LOCK_TYPE_BARRIER        = 10; // v5：循环屏障定型判别（屏障操作经 BARRIER_* 消息）
 }
 
 // 状态码。
@@ -52,6 +56,7 @@ enum StatusCode {
   INVALID_REQUEST = 9;   // 参数非法（如 lease 越界）
   NOT_LEADER      = 10;  // v2 启用（Phase 1 预留）：本节点非当值 Leader 拒绝写请求，随附 leader 提示
   INTERNAL_ERROR  = 11;
+  BARRIER_BROKEN  = 12;  // v5：在带裁决——等待项所属世代已破障（非请求错误，连接与会话不受影响）
 }
 
 // v4：原子变量操作类型（ATOMIC_OP_REQUEST.op）。GET 为读数零迁移；
@@ -95,6 +100,12 @@ message Envelope {
     AdminListSessionsResponse admin_list_sessions_response = 31;
     AtomicOpRequest  atomic_op_request  = 32;  // v4
     AtomicOpResponse atomic_op_response = 33;  // v4
+    BarrierAwaitRequest       barrier_await_request       = 34;  // v5
+    BarrierAwaitResponse      barrier_await_response      = 35;  // v5
+    BarrierLeaveRequest       barrier_leave_request       = 36;  // v5
+    BarrierLeaveResponse      barrier_leave_response      = 37;  // v5
+    BarrierActionDoneRequest  barrier_action_done_request  = 38;  // v5
+    BarrierActionDoneResponse barrier_action_done_response = 39;  // v5
   }
 }
 
@@ -168,7 +179,7 @@ message LeaseRenewResponse {
 
 message AwaitNotify {
   string key            = 1;
-  int64  request_id_ref = 2;  // 指向原 ACQUIRE 的 request_id
+  int64  request_id_ref = 2;  // 指向原 ACQUIRE/LATCH_AWAIT/BARRIER_AWAIT 的 request_id
 }
 
 // v3：屏障倒计数（Phase 3 详设 §2.1/design D1 精化）。count 为本次扣减量；
@@ -235,6 +246,7 @@ message AdminSummaryResponse {
   int64      uptime_ms        = 8;  // 自启动运行时长（应答时刻）
   string     version          = 9;  // 服务端版本
   int32      atomic_entries   = 10; // v4：ATOMIC 条目数（无持有语义，单列，判例 latch_entries）
+  int32      barrier_entries  = 11; // v5：BARRIER 条目数（无持有语义，单列，判例 latch_entries/atomic_entries）
 }
 
 message AdminListKeysRequest {
@@ -247,12 +259,15 @@ message AdminListKeysRequest {
 // ADMIN_LIST_KEYS 列表行。holders 为持有者计数（明细见 ADMIN_KEY_DETAIL）。
 message AdminKeyInfo {
   string key                 = 1;
-  string family              = 2;  // lock/semaphore/latch/atomic
-  int32  holders             = 3;  // 持有者数（Latch/ATOMIC 恒 0）
+  string family              = 2;  // lock/semaphore/latch/atomic/barrier
+  int32  holders             = 3;  // 持有者数（Latch/ATOMIC/BARRIER 恒 0）
   int64  remaining_lease_ms  = 4;  // 剩余租约（受理节点时钟；未持有为 0）
   int32  waiter_count        = 5;  // 等待者数（非 Leader 视角恒 0）
   string atomic_kind         = 6;  // v4：long/integer/boolean（非 ATOMIC 恒空）
   sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0）
+  int64  barrier_parties     = 8;  // v5：定型许可数（非 BARRIER 恒 0）
+  int64  barrier_generation  = 9;  // v5：当前世代号，自 1 起单调递增（非 BARRIER 恒 0）
+  int32  barrier_arrived     = 10; // v5：当前世代已到场数（非 BARRIER 恒 0）
 }
 
 message AdminListKeysResponse {
@@ -276,7 +291,7 @@ message AdminKeyHolderInfo {
   string role       = 4;
 }
 
-// 等待队列项（仅 Leader 应答非空）。notified=已通知待重发；latch 等待者
+// 等待队列项（仅 Leader 应答非空）。notified=已通知待重发；latch/barrier 等待者
 // thread_id 恒 0（await 无归属线程概念，身份=(会话,请求)）。
 message AdminKeyWaiterInfo {
   int32  position    = 1;  // 1 起位次
@@ -304,6 +319,12 @@ message AdminKeyDetailResponse {
   int64  atomic_initial  = 13;
   sint64 atomic_value    = 14;
   int64  atomic_version  = 15;
+  // v5：BARRIER 专属五字段（其余家族恒空/0；last_final 取 tripped/broken/none 词表）。
+  int64  barrier_parties        = 16;
+  int64  barrier_generation     = 17;
+  int32  barrier_arrived        = 18;
+  bool   barrier_action_pending = 19;  // true=当前世代处于动作待决态（执行者尚未回报）
+  string barrier_last_final     = 20;  // 最近完结世代的了结形态：tripped/broken/none
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -351,4 +372,52 @@ message AtomicOpResponse {
   sint64     old_value = 4;
   sint64     value     = 5;
   sint64     version   = 6;
+}
+
+// v5：循环屏障到场（BARRIER_AWAIT）。parties 为定型断言（>= 0，0 为不主张——
+// 不存在即 INVALID_REQUEST 映射，判例 Latch total）；到场数达 parties 的当次调用
+// 合拢该世代。carries_action 标记调用方携带 barrierAction：若其被指定为最后到场
+// 执行者（应答 executor=true），需在本调用栈内执行动作并以 BARRIER_ACTION_DONE
+// 回报，回报应答即本等待的终结。未集齐 → QUEUED（复用 AWAIT_NOTIFY 通知后同
+// request_id 重发，按世代幂等了结，MUST NOT 重复计次）；所属世代已 TRIPPED → OK
+// 了结；已破障 → BARRIER_BROKEN。等待者无租约。
+message BarrierAwaitRequest {
+  string key     = 1;
+  int64  parties = 2;   // 定型断言（>= 0，0 为不主张）
+  bool   carries_action = 3;  // 调用方携带 barrierAction
+}
+
+message BarrierAwaitResponse {
+  StatusCode status         = 1;  // OK=了结放行 / QUEUED=挂起等待 / BARRIER_BROKEN=世代已破 / 错误码
+  int32      queue_position = 2;  // QUEUED 时有效（1 起）
+  int64      generation     = 3;  // 本等待项加入（或所属）的世代号，自 1 起每 key 单调递增
+  bool       executor       = 4;  // QUEUED+true=你是最后到场执行者，动作待决，回报后终结；OK+true=本方以执行者身份合拢
+  int64      parties        = 5;  // 条目定型值回显（0=未定型，仅拒绝路径可能）
+}
+
+// v5：循环屏障离场（BARRIER_LEAVE）。await_request_id 指向本会话原 BARRIER_AWAIT
+// 信封的 request_id（>0 = 在队项离场）；0 = 无在队身份的纯破障主张（breakBarrier
+// 路径）。任一处方的当前世代离场（超时/中断/显式破障）MUST 使该世代即时 BROKEN，
+// 全体在队者经通知-重发以 BARRIER_BROKEN 了结；世代号推进，后续到场进入新世代。
+// 对已终结世代或无对应到场记录幂等无操作（OK）。
+message BarrierLeaveRequest {
+  string key                = 1;
+  int64  await_request_id   = 2;  // 原 BARRIER_AWAIT 信封 request_id；0=纯破障
+}
+
+message BarrierLeaveResponse {
+  StatusCode status = 1;  // OK=已离场/已破障（幂等）/ 错误码
+}
+
+// v5：循环屏障动作了结（BARRIER_ACTION_DONE）。仅接受该世代指定执行者的回报
+// （非指定执行者或未知世代 → INVALID_REQUEST 映射）；生效后世代定型 TRIPPED、
+// 回卷新世代、其余等待者进入放行通知。重复回报幂等成功；对已破障世代的回报
+// 回 BARRIER_BROKEN（执行者动作期间世代已破，本方 await 以破障终结）。
+message BarrierActionDoneRequest {
+  string key          = 1;
+  int64  generation   = 2;  // 执行者持有（await 应答回显）的世代号
+}
+
+message BarrierActionDoneResponse {
+  StatusCode status = 1;  // OK=世代已合拢放行 / BARRIER_BROKEN=世代已破（幂等）/ 错误码
 }
