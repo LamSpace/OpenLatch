@@ -10,7 +10,7 @@ detail pages show lock-table entries, wait queues and session footprints.
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console/target/openlatch-console-1.0-SNAPSHOT-executable.jar
+     -jar openlatch-console/target/openlatch-console-1.0.0-executable.jar
 ```
 
 Co-locating with observed nodes is fine (separate process). Template:

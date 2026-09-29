@@ -5,6 +5,7 @@
 [![build](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml)
 [![drill](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml?query=branch%3Amaster)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.lamspace/openlatch-client)](https://central.sonatype.com/artifact/io.github.lamspace/openlatch-client)
 [![Java](https://img.shields.io/badge/Java-25-orange)](#-要求)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](docs/guide/zh/04-spring-boot-starter.md)
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](docs/guide/zh/10-compatibility.md)
@@ -52,13 +53,32 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 | Java | **25**（全部构件 `release=25`） |
 | Spring Boot starter | **仅 4.x**（依赖 Boot 4 独有构件）；Boot 3.x 请手动装配 SDK |
 | 线路协议 | v1 / v2 / v3，HELLO 协商区间 `[1,3]`，不做隐式兼容 |
-| 构件 | 未发布 Maven Central——先 `mvn clean install` |
+| 构件 | 已发布 **Maven Central**（`io.github.lamspace:openlatch-*`，1.0.0+） |
 
 ## 🚀 快速上手
 
+从 Maven Central 引入（`io.github.lamspace`，1.0.0+）：
+
+```xml
+<!-- 客户端 SDK -->
+<dependency>
+    <groupId>io.github.lamspace</groupId>
+    <artifactId>openlatch-client</artifactId>
+    <version>1.0.0</version>
+</dependency>
+
+<!-- 或 Spring Boot 4 starter -->
+<dependency>
+    <groupId>io.github.lamspace</groupId>
+    <artifactId>openlatch-spring-boot-starter</artifactId>
+    <version>1.0.0</version>
+</dependency>
+```
+
+单节点服务器——从 [Maven Central](https://repo1.maven.org/maven2/io/github/lamspace/openlatch-server/1.0.0/openlatch-server-1.0.0-executable.jar) 下载可执行 jar：
+
 ```bash
-mvn clean install -DskipTests                                   # 本地构建安装
-java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar   # 单节点 :9410
+java -jar openlatch-server-1.0.0-executable.jar    # 监听 :9410
 ```
 
 ```java

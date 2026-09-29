@@ -14,7 +14,7 @@
 <dependency>
     <groupId>io.github.lamspace</groupId>
     <artifactId>openlatch-spring-boot-starter</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 

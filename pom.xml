@@ -6,11 +6,33 @@
 
     <groupId>io.github.lamspace</groupId>
     <artifactId>openlatch</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>pom</packaging>
 
     <name>OpenLatch</name>
-    <description>OpenLatch 分布式锁（Phase 1 / MVP）</description>
+    <description>OpenLatch distributed lock: protocol, server, client SDK, Spring Boot starter and console under one roof.</description>
+    <url>https://github.com/LamSpace/OpenLatch</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Lam Tong</name>
+            <email>lemonlovepy@163.com</email>
+            <url>https://github.com/LamSpace</url>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/LamSpace/OpenLatch.git</connection>
+        <developerConnection>scm:git:git@github.com:LamSpace/OpenLatch.git</developerConnection>
+        <url>https://github.com/LamSpace/OpenLatch</url>
+    </scm>
 
     <modules>
         <module>openlatch-protocol</module>
@@ -186,11 +208,13 @@
                         <docencoding>UTF-8</docencoding>
                     </configuration>
                     <executions>
+                        <!-- goal=jar 一份执行身兼两职：doclint 门禁（doclint=all + failOnWarnings 照常生效），
+                             且把 -javadoc.jar 挂载为构件（javadoc:javadoc 只产 HTML 报告、不 attach，Central 校验会判缺件） -->
                         <execution>
                             <id>verify-javadoc</id>
                             <phase>verify</phase>
                             <goals>
-                                <goal>javadoc</goal>
+                                <goal>jar</goal>
                             </goals>
                         </execution>
                     </executions>
@@ -204,4 +228,66 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Maven Central release profile: attaches sources and GPG signatures on top of the
+             default build (the javadoc jar is already produced and attached by build/plugins),
+             then uploads via the Sonatype Central Portal. Publishing requires a `central` server
+             entry in the active settings.xml (User Token) and an interactive GPG passphrase
+             prompt. openlatch-examples is excluded from the bundle via excludeArtifacts —
+             maven.deploy.skip is NOT honored by central-publishing-maven-plugin. -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.3.1</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.11.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>false</autoPublish>
+                            <excludeArtifacts>
+                                <excludeArtifact>openlatch-examples</excludeArtifact>
+                            </excludeArtifacts>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
