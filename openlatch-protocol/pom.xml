@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.lamspace</groupId>
         <artifactId>openlatch</artifactId>
-        <version>1.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>openlatch-protocol</artifactId>
@@ -41,11 +41,14 @@
         </extensions>
         <plugins>
             <plugin>
-                <!-- 主源码为 protoc 生成代码，不做 Javadoc 校验 -->
+                <!-- 主源码为 protoc 生成代码，不对其做 Javadoc 质量门禁；但 Maven Central 校验要求
+                     每个非 pom 构件必须有 -javadoc.jar 伴随件，故将 sourcepath 指到生成目录并关闭
+                     doclint，仅为产出文档构件（src/main/java 不存在，默认配置会跳过产出导致缺件） -->
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <configuration>
-                    <skip>true</skip>
+                    <sourcepath>${project.build.directory}/generated-sources/protobuf/java</sourcepath>
+                    <doclint>none</doclint>
                 </configuration>
             </plugin>
             <plugin>

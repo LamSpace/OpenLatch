@@ -173,8 +173,10 @@ class ClusterMetricsTest {
             ClusterHarness.Node leader = h.leader();
             ClusterHarness.Node target = h.nodes().stream()
                     .filter(x -> !x.equals(leader)).findFirst().orElseThrow();
-            assertThat(gauge(leader.metrics(), ServerMetrics.CLUSTER_IS_LEADER, "node_id",
-                    String.valueOf(leader.id))).isEqualTo(1);
+            // is_leader 为 LeaderTracker 事件折算读数，滞后于权威角色（hasLeader 只等后者）；
+            // 高并发下事件线程可能被调度挤后，断言前必须等待读数就位（与切换后断言同纪律）。
+            h.awaitTrue(() -> gauge(leader.metrics(), ServerMetrics.CLUSTER_IS_LEADER, "node_id",
+                    String.valueOf(leader.id)) == 1d, 20_000, "is_leader 就位");
 
             h.transferLeadership(target.id);
             h.awaitTrue(() -> target.isLeader() && !leader.isLeader(), 20_000, "让位完成");

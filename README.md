@@ -5,6 +5,7 @@
 [![build](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/build.yml)
 [![drill](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml/badge.svg)](https://github.com/LamSpace/OpenLatch/actions/workflows/drill.yml?query=branch%3Amaster)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.lamspace/openlatch-client)](https://central.sonatype.com/artifact/io.github.lamspace/openlatch-client)
 [![Java](https://img.shields.io/badge/Java-25-orange)](#-requirements)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](docs/guide/en/04-spring-boot-starter.md)
 [![Protocol](https://img.shields.io/badge/protocol-v3-lightgrey)](docs/guide/en/10-compatibility.md)
@@ -54,13 +55,33 @@ lock-lost callback in every critical path. The full semantics live in the guides
 | Java | **25** (all artifacts, `release=25`) |
 | Spring Boot starter | **4.x only** (Boot-4-only dependencies); Boot 3.x → assemble the SDK manually |
 | Wire protocol | v1 / v2 / v3 via HELLO negotiation, range `[1,3]`, no implicit compatibility |
-| Artifacts | Not yet on Maven Central — `mvn clean install` locally |
+| Artifacts | Published on **Maven Central** (`io.github.lamspace:openlatch-*`, 1.0.0+) |
 
 ## 🚀 Quick Start
 
+Add from Maven Central (`io.github.lamspace`, 1.0.0+):
+
+```xml
+<!-- client SDK -->
+<dependency>
+    <groupId>io.github.lamspace</groupId>
+    <artifactId>openlatch-client</artifactId>
+    <version>1.0.0</version>
+</dependency>
+
+<!-- or the Spring Boot 4 starter -->
+<dependency>
+    <groupId>io.github.lamspace</groupId>
+    <artifactId>openlatch-spring-boot-starter</artifactId>
+    <version>1.0.0</version>
+</dependency>
+```
+
+Run a single-node server — grab the executable jar from
+[Maven Central](https://repo1.maven.org/maven2/io/github/lamspace/openlatch-server/1.0.0/openlatch-server-1.0.0-executable.jar):
+
 ```bash
-mvn clean install -DskipTests                                   # build & install locally
-java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar   # single node on :9410
+java -jar openlatch-server-1.0.0-executable.jar    # listens on :9410
 ```
 
 ```java

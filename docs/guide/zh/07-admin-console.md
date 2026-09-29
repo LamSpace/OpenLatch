@@ -9,7 +9,7 @@
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console/target/openlatch-console-1.0-SNAPSHOT-executable.jar
+     -jar openlatch-console/target/openlatch-console-1.0.0-executable.jar
 ```
 
 与控制端同机部署的被观察节点也完全兼容（不同进程即可）。配置模板见仓库

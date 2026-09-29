@@ -16,7 +16,7 @@ mvn clean install -DskipTests
 ### 2. 启动服务器
 
 ```bash
-java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar
+java -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar
 # 日志确认：OpenLatch server started: port=9410, ... metricsPort=9412
 ```
 
@@ -26,7 +26,7 @@ java -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar
 <dependency>
     <groupId>io.github.lamspace</groupId>
     <artifactId>openlatch-client</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
@@ -85,9 +85,9 @@ openlatch.server.metrics.port=0
 ### 2. 起三节点，找到 Leader
 
 ```bash
-java -Dopenlatch.config=node1.properties -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar &
-java -Dopenlatch.config=node2.properties -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar &
-java -Dopenlatch.config=node3.properties -jar openlatch-server/target/openlatch-server-1.0-SNAPSHOT-executable.jar &
+java -Dopenlatch.config=node1.properties -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar &
+java -Dopenlatch.config=node2.properties -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar &
+java -Dopenlatch.config=node3.properties -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar &
 curl -s localhost:9412/metrics | grep openlatch_cluster_is_leader   # 每节点看自己是否为 Leader
 ```
 
