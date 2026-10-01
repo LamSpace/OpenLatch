@@ -9,7 +9,7 @@
 | Spring Framework | whatever Boot 4 ships (Framework 7) | starter targets Boot 4 contexts only |
 | Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5** (HELLO negotiation, range [1,5]) | out-of-range rejected at handshake — no implicit compatibility |
 | Micrometer | host-provided (not transitive) | inject a `MeterRegistry` to enable client metrics |
-| Maven Central | published (1.0.0+) | use `io.github.lamspace:openlatch-*` coordinates directly, or build locally |
+| Artifact delivery | client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on Maven Central (1.0.0+); server & console executable jars on GitHub Releases | client: use the coordinates directly; server/console: download a jar or build locally |
 
 ## Protocol capabilities by version
 

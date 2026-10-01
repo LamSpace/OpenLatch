@@ -6,7 +6,14 @@
 
 ### 1. 取构件
 
-中央仓库发布前，本地构建安装：
+客户端 SDK 按 Maven Central 坐标引入（见第 3 步）。服务器可执行 jar 从
+[GitHub Releases](https://github.com/LamSpace/OpenLatch/releases) 下载：
+
+```bash
+curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.0.0/openlatch-server-1.0.0-executable.jar
+```
+
+……或改为本地源码构建（下文路径 B 的命令按 `target/` 布局书写）：
 
 ```bash
 git clone https://github.com/LamSpace/OpenLatch.git && cd OpenLatch
@@ -16,7 +23,8 @@ mvn clean install -DskipTests
 ### 2. 启动服务器
 
 ```bash
-java -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar
+java -jar openlatch-server-1.0.0-executable.jar
+# （源码构建则位于 openlatch-server/target/openlatch-server-1.0.0-executable.jar）
 # 日志确认：OpenLatch server started: port=9410, ... metricsPort=9412
 ```
 
