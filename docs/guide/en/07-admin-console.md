@@ -8,10 +8,16 @@ detail pages show lock-table entries, wait queues and session footprints.
 
 ## Deployment
 
+Grab the executable jar from
+[GitHub Releases](https://github.com/LamSpace/OpenLatch/releases), then:
+
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console/target/openlatch-console-1.0.0-executable.jar
+     -jar openlatch-console-1.0.0-executable.jar
 ```
+
+(If you built from source instead, the jar is at
+`openlatch-console/target/openlatch-console-1.0.0-executable.jar`.)
 
 Co-locating with observed nodes is fine (separate process). Template:
 `openlatch-console/console.properties.example` in the repo.

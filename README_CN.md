@@ -53,7 +53,7 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 | Java | **25**（全部构件 `release=25`） |
 | Spring Boot starter | **仅 4.x**（依赖 Boot 4 独有构件）；Boot 3.x 请手动装配 SDK |
 | 线路协议 | v1 / v2 / v3，HELLO 协商区间 `[1,3]`，不做隐式兼容 |
-| 构件 | 已发布 **Maven Central**（`io.github.lamspace:openlatch-*`，1.0.0+） |
+| 构件 | 客户端 SDK 链路（`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`）发布 **Maven Central**（1.0.0+）；服务端与控制台可执行 jar 发布于 **GitHub Releases** |
 
 ## 🚀 快速上手
 
@@ -75,9 +75,10 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 </dependency>
 ```
 
-单节点服务器——从 [Maven Central](https://repo1.maven.org/maven2/io/github/lamspace/openlatch-server/1.0.0/openlatch-server-1.0.0-executable.jar) 下载可执行 jar：
+单节点服务器——从 [GitHub Releases](https://github.com/LamSpace/OpenLatch/releases) 下载可执行 jar：
 
 ```bash
+curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.0.0/openlatch-server-1.0.0-executable.jar
 java -jar openlatch-server-1.0.0-executable.jar    # 监听 :9410
 ```
 

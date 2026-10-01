@@ -9,7 +9,7 @@
 | Spring Framework | 随 Boot 4（Framework 7） | starter 仅面向 Boot 4 应用上下文 |
 | 线路协议 | 服务端接受 **v1 / v2 / v3 / v4 / v5**（HELLO 协商，支持区间 [1,5]） | 区间外拒绝，不做隐式兼容 |
 | Micrometer | 宿主自备（不传递） | 注入 `MeterRegistry` 即启用客户端指标 |
-| 中央仓库 | 已发布（1.0.0+） | 直接按 `io.github.lamspace:openlatch-*` 坐标使用，或本地构建 |
+| 构件分发 | 客户端 SDK 链路（`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`）发布 Maven Central（1.0.0+）；服务端与控制台可执行 jar 发布于 GitHub Releases | 客户端按坐标直接引入；服务端/控制台从 Releases 下载或本地构建 |
 
 ## 协议能力随版本累积
 

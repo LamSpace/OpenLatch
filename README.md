@@ -55,7 +55,7 @@ lock-lost callback in every critical path. The full semantics live in the guides
 | Java | **25** (all artifacts, `release=25`) |
 | Spring Boot starter | **4.x only** (Boot-4-only dependencies); Boot 3.x → assemble the SDK manually |
 | Wire protocol | v1 / v2 / v3 via HELLO negotiation, range `[1,3]`, no implicit compatibility |
-| Artifacts | Published on **Maven Central** (`io.github.lamspace:openlatch-*`, 1.0.0+) |
+| Artifacts | Client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on **Maven Central**, 1.0.0+; server & console executable jars on **GitHub Releases** |
 
 ## 🚀 Quick Start
 
@@ -78,9 +78,10 @@ Add from Maven Central (`io.github.lamspace`, 1.0.0+):
 ```
 
 Run a single-node server — grab the executable jar from
-[Maven Central](https://repo1.maven.org/maven2/io/github/lamspace/openlatch-server/1.0.0/openlatch-server-1.0.0-executable.jar):
+[GitHub Releases](https://github.com/LamSpace/OpenLatch/releases):
 
 ```bash
+curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.0.0/openlatch-server-1.0.0-executable.jar
 java -jar openlatch-server-1.0.0-executable.jar    # listens on :9410
 ```
 

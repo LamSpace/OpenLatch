@@ -7,10 +7,15 @@
 
 ## 部署
 
+可执行 jar 从 [GitHub Releases](https://github.com/LamSpace/OpenLatch/releases) 下载，然后：
+
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console/target/openlatch-console-1.0.0-executable.jar
+     -jar openlatch-console-1.0.0-executable.jar
 ```
+
+（本地源码构建则位于
+`openlatch-console/target/openlatch-console-1.0.0-executable.jar`。）
 
 与控制端同机部署的被观察节点也完全兼容（不同进程即可）。配置模板见仓库
 `openlatch-console/console.properties.example`。

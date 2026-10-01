@@ -234,8 +234,14 @@
              default build (the javadoc jar is already produced and attached by build/plugins),
              then uploads via the Sonatype Central Portal. Publishing requires a `central` server
              entry in the active settings.xml (User Token) and an interactive GPG passphrase
-             prompt. openlatch-examples is excluded from the bundle via excludeArtifacts —
-             maven.deploy.skip is NOT honored by central-publishing-maven-plugin. -->
+             prompt. Publish scope is the client SDK chain only — the parent pom plus
+             openlatch-protocol, openlatch-client and openlatch-spring-boot-starter, i.e. exactly
+             the artifacts external consumers resolve by coordinates. The server and the console
+             are applications, distributed as executable jars attached to GitHub Releases, and
+             openlatch-core is excluded together with the server (no published artifact depends
+             on it); all three are kept out of the bundle via excludeArtifacts — maven.deploy.skip
+             is NOT honored by central-publishing-maven-plugin (same mechanism excludes the
+             never-published openlatch-examples). -->
         <profile>
             <id>release</id>
             <build>
@@ -283,6 +289,9 @@
                             <autoPublish>false</autoPublish>
                             <excludeArtifacts>
                                 <excludeArtifact>openlatch-examples</excludeArtifact>
+                                <excludeArtifact>openlatch-core</excludeArtifact>
+                                <excludeArtifact>openlatch-server</excludeArtifact>
+                                <excludeArtifact>openlatch-console</excludeArtifact>
                             </excludeArtifacts>
                         </configuration>
                     </plugin>

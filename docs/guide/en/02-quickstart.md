@@ -7,7 +7,15 @@ Prereq: Java 25, Maven.
 
 ### 1. Get the artifacts
 
-Before Central publication, build and install locally:
+The client SDK resolves from Maven Central (coordinates in step 3). For the server,
+grab the executable jar from
+[GitHub Releases](https://github.com/LamSpace/OpenLatch/releases):
+
+```bash
+curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.0.0/openlatch-server-1.0.0-executable.jar
+```
+
+…or build from source instead (Path B below writes the `target/` layout):
 
 ```bash
 git clone https://github.com/LamSpace/OpenLatch.git && cd OpenLatch
@@ -17,7 +25,8 @@ mvn clean install -DskipTests
 ### 2. Start the server
 
 ```bash
-java -jar openlatch-server/target/openlatch-server-1.0.0-executable.jar
+java -jar openlatch-server-1.0.0-executable.jar
+# (built from source instead: openlatch-server/target/openlatch-server-1.0.0-executable.jar)
 # log confirms: OpenLatch server started: port=9410, ... metricsPort=9412
 ```
 
