@@ -77,6 +77,14 @@ public record CoreInspection(
      * @param barrierActionPending BARRIER 是否处于动作待决态（非该家族为 {@code false}）
      * @param barrierLastFinal BARRIER 最近完结世代的了结形态
      *                         （非该家族或尚无完结记录为 {@code null}）
+     * @param atomicRefInitial ATOMIC 有值引用形态的定型初值主张
+     *                         （非该形态为 {@code null}；该形态下 {@code null}
+     *                         亦可为"无主张"——与 {@code atomicRefValue} 同读）
+     * @param atomicRefValue ATOMIC 有值引用形态的当前载荷
+     *                         （非该形态为 {@code null}；该形态下 {@code null}
+     *                         为 null 态、零长度数组为空字节串——两态可区分。
+     *                         引用形态的 {@code atomicInitial}/{@code atomicValue}
+     *                         标量位恒 0）
      */
     public record KeySnapshot(
             String key,
@@ -101,7 +109,9 @@ public record CoreInspection(
             long barrierGeneration,
             int barrierArrived,
             boolean barrierActionPending,
-            io.github.lamspace.openlatch.core.result.BarrierFinal barrierLastFinal) {
+            io.github.lamspace.openlatch.core.result.BarrierFinal barrierLastFinal,
+            byte[] atomicRefInitial,
+            byte[] atomicRefValue) {
     }
 
     /**

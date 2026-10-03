@@ -611,6 +611,11 @@ public final class LockStateMachineCore {
             // 非原子形态或未知 op：形状非法（ACQUIRE 面类型不得进入本通道）。
             return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
         }
+        if (kind == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+            // v6 有值引用形态：载荷数组自 optional bytes 还原（缺省=null、
+            // 零长度=""），入引擎引用门面；回执四元组走 bytes 字段。
+            return applyAtomicRefOp(entry, p, local, op);
+        }
         AtomicOpResult r = engine.atomicOp(new AtomicOpCommand(local, p.getRequestId(),
                 req.getKey(), kind, op, req.getOperand(), req.getExpected(),
                 req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq()));
@@ -632,6 +637,60 @@ public final class LockStateMachineCore {
                     REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
                     ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
             default -> error("unreachable atomic op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 有值引用形态的应用落点（{@link #applyAtomicOp} 的形态分派，v6）：
+     * {@code optional bytes} 三字段按显式 presence 还原为载荷数组——
+     * 缺省=null 态、零长度=空字节串，两态无损；入引擎引用门面后判定
+     * 顺序与标量通道逐规则同构（ADD 值域外、初值 presence 断言、GET
+     * 短路、同槽重放、字节内容 CAS）。GRANTED 时镜像影子表（载荷引用
+     * 存储）并以 {@code atomic_old_value_bytes}/{@code atomic_value_bytes}
+     * 回执（null 态=字段缺省）；标量值位恒不出现。尺寸 MUST NOT 在此
+     * 复核（钳制属接入层，见 {@code applyAtomicOp} 通道注记）。
+     *
+     * @param entry 复制条目（error 路径记日志用）
+     * @param p     已解析的原子载荷（引用形态请求）
+     * @param local 本副本引擎内部 sid（调用方已映射）
+     * @param op    已映射的 core 操作枚举
+     * @return 回执（OK 携带载荷应答四元组，拒绝态 bytes 全缺省）
+     */
+    private ApplyResult applyAtomicRefOp(RaftLogEntry entry, AtomicOpPayload p, long local,
+            AtomicOp op) {
+        var req = p.getRequest();
+        byte[] operand = req.hasOperandBytes() ? req.getOperandBytes().toByteArray() : null;
+        byte[] expected = req.hasExpectedBytes() ? req.getExpectedBytes().toByteArray() : null;
+        byte[] initial = req.hasInitialBytes() ? req.getInitialBytes().toByteArray() : null;
+        io.github.lamspace.openlatch.core.result.AtomicRefOpResult r =
+                engine.atomicRefOp(new io.github.lamspace.openlatch.core.command
+                        .AtomicRefOpCommand(local, p.getRequestId(), req.getKey(), op,
+                        operand, expected, req.getExpectedVersion(), initial, req.getOpSeq()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                shadow.atomicRefApplied(req.getKey(), req.getLockType().getNumber(),
+                        p.getSessionId(), req.getOpSeq(), initial,
+                        op == AtomicOp.GET, r.applied(), r.oldValue(), r.value(), r.version());
+                ApplyResult.Builder b = ApplyResult.newBuilder()
+                        .setStatus(ApplyStatus.OK)
+                        .setAtomicApplied(r.applied())
+                        .setAtomicVersion(r.version());
+                if (r.oldValue() != null) {
+                    b.setAtomicOldValueBytes(
+                            com.google.protobuf.ByteString.copyFrom(r.oldValue()));
+                }
+                if (r.value() != null) {
+                    b.setAtomicValueBytes(
+                            com.google.protobuf.ByteString.copyFrom(r.value()));
+                }
+                yield b.build();
+            }
+            case REJECT_SESSION ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_TYPE_MISMATCH, REJECT_ATOMIC_INIT, REJECT_ATOMIC_RANGE,
+                    REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable atomic ref op outcome " + r.outcome(), entry);
         };
     }
 
@@ -767,6 +826,7 @@ public final class LockStateMachineCore {
             case 7 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_LONG;
             case 8 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_INTEGER;
             case 9 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_BOOLEAN;
+            case 11 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE;
             default -> null;
         };
     }
@@ -944,16 +1004,40 @@ public final class LockStateMachineCore {
                 }
                 CoreStateRestore.AtomicState atomic = null;
                 if (ShadowTable.isAtomicType(l.getLockTypeValue())) {
+                    // 去重槽会话以内部 id 入引擎条目（apply 侧以 internal sid 比对）：
+                    // 快照存逻辑 id，重建经 newSidMap 折算（判例：屏障挂账/账簿）；
+                    // 空槽（0）无映射，原样保留。
                     atomic = new CoreStateRestore.AtomicState(l.getAtomicInitial(),
                             l.getAtomicValue(), l.getAtomicVersion(),
-                            l.getAtomicSlotSession(), l.getAtomicSlotOpSeq(),
+                            newSidMap.getOrDefault(l.getAtomicSlotSession(),
+                                    l.getAtomicSlotSession()),
+                            l.getAtomicSlotOpSeq(),
                             l.getAtomicSlotApplied(), l.getAtomicSlotOldValue(),
                             l.getAtomicSlotValue(), l.getAtomicSlotVersion());
+                }
+                // v6：引用条目状态组重建——载荷两态按 presence 还原（缺省
+                // =null），骨架字段与标量形态复用同一编号位。
+                CoreStateRestore.AtomicRefState atomicRef = null;
+                if (ShadowTable.isReferenceType(l.getLockTypeValue())) {
+                    atomicRef = new CoreStateRestore.AtomicRefState(
+                            l.hasAtomicRefInitial() ? l.getAtomicRefInitial().toByteArray() : null,
+                            l.hasAtomicRefValue() ? l.getAtomicRefValue().toByteArray() : null,
+                            l.getAtomicVersion(),
+                            // 同标量判例：槽会话逻辑 id 折算内部 id（空槽 0 原样）。
+                            newSidMap.getOrDefault(l.getAtomicSlotSession(),
+                                    l.getAtomicSlotSession()),
+                            l.getAtomicSlotOpSeq(),
+                            l.getAtomicSlotApplied(),
+                            l.hasAtomicRefSlotOldValue()
+                                    ? l.getAtomicRefSlotOldValue().toByteArray() : null,
+                            l.hasAtomicRefSlotValue()
+                                    ? l.getAtomicRefSlotValue().toByteArray() : null,
+                            l.getAtomicSlotVersion());
                 }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
                         l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(),
-                        atomic, barrier));
+                        atomic, barrier, atomicRef));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

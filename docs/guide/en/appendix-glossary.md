@@ -32,4 +32,7 @@
 | leave-breaks | contract where any arrived participant's departure (timeout/interruption/death/explicit break) instantly breaks its current generation |
 | version stamp | per-key monotone counter of the atomic cell: every successful write adds exactly 1; the basis for timeout re-judgement and ABA elimination |
 | dedup slot | per-atomic-entry record of the last applied write (session, op-sequence, reply quad) that makes same-sequence retries apply only once |
-| initial claim | a handle's non-zero initial-value assertion: applies on first create, rejects on mismatch with the settled value (latch-total precedent) |
+| initial claim | a handle's non-zero initial-value assertion: applies on first create, rejects on mismatch with the settled value (latch-total precedent); the reference form reworks it as a presence claim (absent = no claim, empty = empty-string claim) |
+| atomic reference | the payload form of the ATOMIC family (v6): one opaque byte payload plus a version stamp, get/set/stamped-CAS, the server never deserializes |
+| payload clamp | the per-key reference-payload byte cap (`max-value-bytes`, default 4KB): enforced only at ingress, over-limit commands never enter the log and have zero effect, lowering the cap never retro-affects stored values |
+| truncated preview | the admin-plane rendering of a reference payload: a constant-length (≤64B) escaped prefix plus the true byte size; full payload bytes never appear in an admin response |

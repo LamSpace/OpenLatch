@@ -82,6 +82,8 @@ message ApplyResult
   barrier_parties 15
   barrier_settled 16
   barrier_released_keys 17
+  atomic_old_value_bytes 18
+  atomic_value_bytes 19
 message SnapshotHolder
   session_id 1
   thread_id 2
@@ -114,6 +116,10 @@ message SnapshotLock
   barrier_completed_result 25
   barrier_completed_arrivals 26
   barrier_completed_executor 27
+  atomic_ref_initial 28
+  atomic_ref_value 29
+  atomic_ref_slot_old_value 30
+  atomic_ref_slot_value 31
 message SnapshotBarrierArrival
   session_id 1
   request_id 2

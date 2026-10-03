@@ -509,16 +509,29 @@ class RollingRestartDrillIT {
         return jar;
     }
 
+    /**
+     * 定位 openlatch-server shaded jar：前后缀匹配、不钉版本文件名
+     * （钉死 {@code 1.0-SNAPSHOT} 的旧写法在发版改号后静默跳过全部用例，
+     * 2026-10-03 实证，判例 {@link LeaderKillDrillIT} 同修）。
+     */
     private static Path locateServerJar() {
-        List<Path> candidates = List.of(
-                Path.of("..", "openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"),
-                Path.of("openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"));
-        for (Path c : candidates) {
-            Path abs = c.toAbsolutePath().normalize();
-            if (Files.exists(abs)) {
-                return abs;
+        for (Path dir : List.of(
+                Path.of("..", "openlatch-server", "target"),
+                Path.of("openlatch-server", "target"))) {
+            Path abs = dir.toAbsolutePath().normalize();
+            if (!Files.isDirectory(abs)) {
+                continue;
+            }
+            try (var files = Files.list(abs)) {
+                Path jar = files
+                        .filter(p -> p.getFileName().toString().startsWith("openlatch-server-"))
+                        .filter(p -> p.getFileName().toString().endsWith("-executable.jar"))
+                        .findFirst().orElse(null);
+                if (jar != null) {
+                    return jar;
+                }
+            } catch (java.io.IOException ignored) {
+                // 目录不可读按未找到处理（保持显式跳过告警语义）
             }
         }
         return null;

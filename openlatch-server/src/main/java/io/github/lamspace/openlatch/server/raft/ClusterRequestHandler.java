@@ -511,7 +511,20 @@ public final class ClusterRequestHandler {
             return;
         }
         var req = msg.getAtomicOpRequest();
+        if (req.getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE
+                && session.protocolVersion() < 6) {
+            // v6 专属语义：低版本会话引用形态消息级拒绝、不断连（判例各门）。
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
         StatusCode shapeBad = RequestDispatcher.validateAtomicRequest(req);
+        if (shapeBad == null) {
+            // v6 载荷入口钳制：超限命令 MUST NOT 入日志（判定唯一在接入层，
+            // 引擎/条目侧不复核——防节点配置漂移引入回放分歧）。
+            shapeBad = RequestDispatcher.validateRefPayloadClamp(req, config.maxValueBytes());
+        }
         if (shapeBad != null) {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, shapeBad));
             return;
@@ -758,11 +771,24 @@ public final class ClusterRequestHandler {
         AtomicOpResponse.Builder b = AtomicOpResponse.newBuilder()
                 .setStatus(st)
                 .setOp(msg.getAtomicOpRequest().getOp());
+        boolean reference = msg.getAtomicOpRequest().getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE;
         if (result.getStatus() == ApplyStatus.OK) {
             b.setApplied(result.getAtomicApplied())
-                    .setOldValue(result.getAtomicOldValue())
-                    .setValue(result.getAtomicValue())
                     .setVersion(result.getAtomicVersion());
+            if (reference) {
+                // v6 引用形态：载荷读数按回执 presence 回显（缺省=null 态、
+                // EMPTY=零长度），标量值位恒不出现。
+                if (result.hasAtomicOldValueBytes()) {
+                    b.setOldValueBytes(result.getAtomicOldValueBytes());
+                }
+                if (result.hasAtomicValueBytes()) {
+                    b.setValueBytes(result.getAtomicValueBytes());
+                }
+            } else {
+                b.setOldValue(result.getAtomicOldValue())
+                        .setValue(result.getAtomicValue());
+            }
         }
         return Envelope.newBuilder()
                 .setProtocolVersion(msg.getProtocolVersion())

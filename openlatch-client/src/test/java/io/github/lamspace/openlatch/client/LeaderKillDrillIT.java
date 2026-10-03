@@ -513,17 +513,30 @@ class LeaderKillDrillIT {
         }
     }
 
-    /** 定位 openlatch-server shaded jar（与 ClientProcessKillIT 同策略）。 */
+    /**
+     * 定位 openlatch-server shaded jar（与 ClientProcessKillIT 同策略）：对
+     * 候选目录按前后缀（{@code openlatch-server-} 起、{@code -executable.jar} 终）匹配，
+     * MUST NOT 钉死版本文件名——发版改号曾把钉死 {@code 1.0-SNAPSHOT} 的
+     * 查找打成哑弹，进程级演练整批静默跳过（2026-10-03 实证）。
+     */
     private static Path locateServerJar() {
-        List<Path> candidates = List.of(
-                Path.of("..", "openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"),
-                Path.of("openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"));
-        for (Path c : candidates) {
-            Path abs = c.toAbsolutePath().normalize();
-            if (Files.exists(abs)) {
-                return abs;
+        for (Path dir : List.of(
+                Path.of("..", "openlatch-server", "target"),
+                Path.of("openlatch-server", "target"))) {
+            Path abs = dir.toAbsolutePath().normalize();
+            if (!Files.isDirectory(abs)) {
+                continue;
+            }
+            try (var files = Files.list(abs)) {
+                Path jar = files
+                        .filter(p -> p.getFileName().toString().startsWith("openlatch-server-"))
+                        .filter(p -> p.getFileName().toString().endsWith("-executable.jar"))
+                        .findFirst().orElse(null);
+                if (jar != null) {
+                    return jar;
+                }
+            } catch (IOException ignored) {
+                // 目录不可读按未找到处理（保持显式跳过告警语义）
             }
         }
         return null;

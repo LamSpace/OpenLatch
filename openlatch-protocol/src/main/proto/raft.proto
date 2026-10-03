@@ -151,6 +151,11 @@ message ApplyResult {
   int64       barrier_parties     = 15; // 条目定型许可数回显
   bool        barrier_settled     = 16; // v5：本条目应用点使一个世代到达终态——Leader 据此对该 key 广播放行
   repeated string barrier_released_keys = 17; // v5：SESSION_CLOSE 打破世代的屏障 key 集（Leader 逐一广播破障）
+  // v6：有值引用形态的载荷回执（status=OK 时择用，显式 presence：缺省=null、
+  // 零长度=""；标量形态与其余条目恒缺省）。atomic_old_value/atomic_value
+  // 标量位对引用形态恒 0。
+  optional bytes atomic_old_value_bytes = 18; // 操作前载荷
+  optional bytes atomic_value_bytes     = 19; // 操作后（或当前）载荷
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -195,6 +200,16 @@ message SnapshotLock {
   int32  barrier_completed_result    = 25;  // 完结形态：1=TRIPPED、2=BROKEN
   repeated SnapshotBarrierArrival barrier_completed_arrivals = 26;  // 完结世代到场账簿
   int64  barrier_completed_executor  = 27;  // 完结世代执行者会话（0=无）
+  // v6 扩展（ATOMIC 有值引用形态，lock_type = LOCK_TYPE_ATOMIC_REFERENCE；
+  // 其余家族不出现）。值/初值/槽内 old_value/value 为字节串并按显式 presence
+  // 口径序列化（缺省=null、零长度=""，两态保真可区分）；版本戳与去重槽骨架
+  // 复用标量形态既有字段（atomic_version=12、atomic_slot_session=13、
+  // atomic_slot_op_seq=14、atomic_slot_applied=15、atomic_slot_version=18），
+  // 引用条目的标量值字段（10/11/16/17）恒缺省。
+  optional bytes atomic_ref_initial     = 28; // 定型初值主张（缺省=建条目无主张，初值 null）
+  optional bytes atomic_ref_value       = 29; // 当前值（缺省=null）
+  optional bytes atomic_ref_slot_old_value = 30; // 去重槽应答 old 载荷（槽空时缺省）
+  optional bytes atomic_ref_slot_value     = 31; // 去重槽应答 value 载荷（槽空时缺省）
 }
 
 // v5：循环屏障到场身份（(会话, 请求) 二元组，快照内列表项）。

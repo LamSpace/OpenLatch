@@ -101,6 +101,8 @@ public final class ServerMetrics {
     public static final String ATOMIC_KIND_INTEGER = "integer";
     /** 原子形态标签值：boolean。 */
     public static final String ATOMIC_KIND_BOOLEAN = "boolean";
+    /** 原子形态标签值：reference（v6 有值引用）。 */
+    public static final String ATOMIC_KIND_REFERENCE = "reference";
 
     /** 耗时 result 标签值：授予。 */
     public static final String RESULT_GRANTED = "granted";
@@ -246,6 +248,7 @@ public final class ServerMetrics {
                     case LOCK_TYPE_ATOMIC_LONG -> ATOMIC_KIND_LONG;
                     case LOCK_TYPE_ATOMIC_INTEGER -> ATOMIC_KIND_INTEGER;
                     case LOCK_TYPE_ATOMIC_BOOLEAN -> ATOMIC_KIND_BOOLEAN;
+                    case LOCK_TYPE_ATOMIC_REFERENCE -> ATOMIC_KIND_REFERENCE;
                     default -> "other";
                 })
                 .tag("op", switch (op) {

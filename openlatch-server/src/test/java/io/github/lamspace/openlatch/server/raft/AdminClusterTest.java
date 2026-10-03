@@ -211,4 +211,58 @@ class AdminClusterTest {
         assertThat(after).isEqualTo(before); // 管理查询不产生复制日志条目
         harness.setProbesEnabled(true);
     }
+
+    /** 有值引用 SET 信封（v6，载荷经 optional bytes 承载）。 */
+    private static Envelope refSet(long rid, String key, byte[] operand) {
+        return Envelope.newBuilder().setProtocolVersion(6).setType(MessageType.ATOMIC_OP)
+                .setRequestId(rid)
+                .setAtomicOpRequest(io.github.lamspace.openlatch.protocol.AtomicOpRequest
+                        .newBuilder()
+                        .setKey(key)
+                        .setOp(io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType
+                                .LOCK_TYPE_ATOMIC_REFERENCE)
+                        .setOperandBytes(com.google.protobuf.ByteString.copyFrom(operand))
+                        .setOpSeq(1))
+                .build();
+    }
+
+    @Test
+    void referenceEntriesReplicateIntoShadowWithBoundedPreview() throws Exception {
+        ClusterHarness.Node leader = harness.leader();
+        ClusterHarness.Node follower = harness.nodes().stream()
+                .filter(n -> !n.isLeader()).findFirst().orElseThrow();
+        ClusterHarness.TestConn conn = harness.connect(leader);
+        conn.hello(1, 6);
+        byte[] big = new byte[300];
+        java.util.Arrays.fill(big, (byte) 0xff);
+        for (int i = 0; i < 20; i++) {
+            big[i] = (byte) ('a' + i);
+        }
+        assertThat(conn.request(refSet(2, "cref", big)).getAtomicOpResponse().getStatus())
+                .isEqualTo(StatusCode.OK);
+
+        // Follower 复制镜像追平：本地 KEY_DETAIL 可查，预览有界（全量载荷零外发）。
+        AdminRequestHandler followerHandler = handlerFor(follower);
+        ClusterHarness.TestConn fConn = harness.connect(follower);
+        fConn.hello(9, 6);
+        harness.awaitTrue(() -> admin(follower, followerHandler, fConn, keyDetail(10, "cref"))
+                .getAdminKeyDetailResponse().getStatus() == StatusCode.OK,
+                10_000, "follower 引用镜像收敛");
+        AdminKeyDetailResponse d = admin(follower, followerHandler, fConn, keyDetail(11, "cref"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getFamily()).isEqualTo("atomic");
+        assertThat(d.getAtomicKind()).isEqualTo("reference");
+        assertThat(d.getAtomicPayloadSize()).isEqualTo(300);
+        assertThat(d.getAtomicPayloadPreview())
+                .startsWith("abcdefghijklmnopqrst").contains("\\xff").endsWith("…")
+                .hasSizeLessThan(300);
+
+        // SUMMARY 的 atomic_entries 含引用条目（家族单列，不扩 per-kind 计数线）。
+        AdminRequestHandler leaderHandler = handlerFor(leader);
+        ClusterHarness.TestConn lConn = harness.connect(leader);
+        lConn.hello(13, 6);
+        assertThat(admin(leader, leaderHandler, lConn, summary(12)).getAdminSummaryResponse()
+                .getAtomicEntries()).isPositive();
+    }
 }

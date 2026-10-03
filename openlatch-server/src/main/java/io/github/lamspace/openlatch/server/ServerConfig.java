@@ -41,6 +41,9 @@ import java.util.Properties;
  * @param maxKeyLength             锁键长度上限（UTF-8 字节）
  * @param maxQueueDepthPerKey      单 key 等待队列深度上限
  * @param maxInflightPerConnection 单连接在途请求上限
+ * @param maxValueBytes            有值引用载荷字节上限（v6 小载荷钳制，默认
+ *                                 4096；判定仅在接入层执行，节点本地配置
+ *                                 MUST NOT 参与 apply 判定，见快照/复制规格）
  */
 public record ServerConfig(
         int port,
@@ -53,7 +56,8 @@ public record ServerConfig(
         long headReplyTimeoutMs,
         int maxKeyLength,
         int maxQueueDepthPerKey,
-        int maxInflightPerConnection) {
+        int maxInflightPerConnection,
+        int maxValueBytes) {
 
     /** 指定配置文件路径的系统属性键。 */
     public static final String CONFIG_PATH_PROPERTY = "openlatch.config";
@@ -78,6 +82,34 @@ public record ServerConfig(
     public static final int DEFAULT_MAX_QUEUE_DEPTH_PER_KEY = 4096;
     /** 默认单连接在途请求上限。 */
     public static final int DEFAULT_MAX_INFLIGHT_PER_CONNECTION = 1024;
+    /** 默认有值引用载荷字节上限（2026-09 定位裁决：每 key 限额默认 4KB）。 */
+    public static final int DEFAULT_MAX_VALUE_BYTES = 4096;
+    /** 有值引用载荷字节上限的可配置上界（512KiB，为 1MiB 帧上限留信封编解码边际）。 */
+    public static final int MAX_VALUE_BYTES_CEILING = 512 * 1024;
+
+    /**
+     * v6 之前的十一参形态：载荷上限取内置默认 4096（既有构造调用点与测试
+     * 夹具零改动，需要自定义钳制值的用例走全参构造）。
+     *
+     * @param port                     监听端口
+     * @param workerThreads            worker 线程数
+     * @param idleTimeoutMs            空闲超时
+     * @param defaultLeaseMs           默认租约
+     * @param minLeaseMs               租约下限
+     * @param maxLeaseMs               租约上限
+     * @param leaseTickIntervalMs      扫描周期
+     * @param headReplyTimeoutMs       队首响应超时
+     * @param maxKeyLength             键长上限
+     * @param maxQueueDepthPerKey      队列深度上限
+     * @param maxInflightPerConnection 在途上限
+     */
+    public ServerConfig(int port, int workerThreads, long idleTimeoutMs, long defaultLeaseMs,
+            long minLeaseMs, long maxLeaseMs, long leaseTickIntervalMs, long headReplyTimeoutMs,
+            int maxKeyLength, int maxQueueDepthPerKey, int maxInflightPerConnection) {
+        this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
+                leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
+                maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES);
+    }
 
     /**
      * 全默认配置（worker 线程数取 2 × CPU）。
@@ -96,7 +128,8 @@ public record ServerConfig(
                 DEFAULT_HEAD_REPLY_TIMEOUT_MS,
                 DEFAULT_MAX_KEY_LENGTH,
                 DEFAULT_MAX_QUEUE_DEPTH_PER_KEY,
-                DEFAULT_MAX_INFLIGHT_PER_CONNECTION);
+                DEFAULT_MAX_INFLIGHT_PER_CONNECTION,
+                DEFAULT_MAX_VALUE_BYTES);
     }
 
     /**
@@ -131,7 +164,8 @@ public record ServerConfig(
                 longOf(props, "openlatch.server.queue.head-reply-timeout-ms", base.headReplyTimeoutMs()),
                 intOf(props, "openlatch.server.limit.max-key-length", base.maxKeyLength()),
                 intOf(props, "openlatch.server.limit.max-queue-depth-per-key", base.maxQueueDepthPerKey()),
-                intOf(props, "openlatch.server.limit.max-inflight-per-connection", base.maxInflightPerConnection()));
+                intOf(props, "openlatch.server.limit.max-inflight-per-connection", base.maxInflightPerConnection()),
+                intOf(props, "openlatch.server.limit.max-value-bytes", base.maxValueBytes()));
         cfg.validate();
         return cfg;
     }
@@ -254,6 +288,11 @@ public record ServerConfig(
             throw new IllegalArgumentException(
                     "配置项 openlatch.server.limit.max-inflight-per-connection 非法（应 >= 1）: "
                             + maxInflightPerConnection);
+        }
+        if (maxValueBytes < 1 || maxValueBytes > MAX_VALUE_BYTES_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-value-bytes 非法（应为 1–"
+                            + MAX_VALUE_BYTES_CEILING + "）: " + maxValueBytes);
         }
     }
 }

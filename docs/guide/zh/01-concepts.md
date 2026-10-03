@@ -61,9 +61,10 @@ try {
 
 同步 API 永不无限阻塞；异步 API（`lockAsync`/`tryLockAsync`/`acquireAsync`/`releaseAsync`）以异常完成的 future 表达以上失败。
 
-## 7. 原子变量与版本戳
+## 7. 原子变量、版本戳与有值引用
 
-`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`（协议 v4）是库内唯一的**非锁**协调原语：
+`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`（协议 v4）与 `OAtomicReference`（协议 v6）
+同属 ATOMIC 家族，是库内唯一的**非锁**协调原语：
 服务端复制状态里的一个共享可变单元。它与锁的语义差异必须逐条知晓：
 
 - **值不绑定归属**——不属于任何 `(会话, 线程)`。创建者进程死亡、会话超时，值**不回滚、不清零**；
@@ -78,6 +79,29 @@ try {
   `getStamped()` 复核，MUST NOT 盲目换值重试。
 - **条目常驻不回收**：无删除语义，动态生成 key 的场景注意基数治理。
 - 溢出语义与 JDK 一致（long/int 按域 wrap，bool 限 {0,1}）。
+
+### 7.1 有值引用与小载荷（v6）
+
+`OAtomicReference` 在标量形态之上引入**一段不透明字节载荷**（对应 JDK `AtomicReference`
+的协调面），是二档"小载荷"通道的首个原语：
+
+- **载荷不透明**——服务端只存字节、比较字节，**永不反序列化或解释内容**。对象形态由
+  应用层自行编解码（UTF-8 字符串直接用 `String` 便利方法）。这不是实现限制，是定位
+  边界：需要按内容检索/分片的正解是 KV 存储，不在本库。
+- **尺寸由服务端权威钳制**——每 key 载荷上限 `openlatch.server.limit.max-value-bytes`
+  （默认 4KB）。超限写入被**入口拒绝**（`OpenLatchException`，拒绝语义）且零生效——
+  超限命令不进入复制日志，集群不会为一段过大的值支付任何复制与快照代价。
+  钳制判定只发生在接入层（Leader/单机入口），节点配置漂移不会造成副本分歧；
+  **钳制下调不追溯存量**——既有的更大载荷照常可读，后续写入按新限。
+- **null 与空字节串是两个可区分的值**——`set(null)` 即清空、`compareAndSet(null, x)`
+  可建立空态；空串条目上期望 null 的 CAS 不命中。
+- 版本戳、去重槽、同序号重发、超时复判与标量形态**逐项同构**（同一套裁决表）；
+  值比较为字节内容相等，`compareAndSetStamped` 同为 ABA-free 形态。
+- **无算术面**：没有 `incrementAndGet`/`accumulateAndGet` 对应物（字节串无加法，
+  JDK `AtomicReference` 本也没有）。
+- **驻留成本可见化**：条目常驻 + 载荷常驻 = 真实的内存与快照尺寸成本。控制台与管理
+  协议呈现载荷**大小与截断预览**（全量字节不出现在管理应答中），快照尺寸治理见
+  [05 §2/§4.3](05-cluster-deployment.md)。
 
 ## 8. 循环屏障与世代
 
@@ -111,6 +135,7 @@ try {
 | 信号量 | — | N 许可门闸；`release` 超持有量抛 `IllegalMonitorStateException` |
 | 倒计数屏障 | — | 一次性：`init` 定型 total，`countDown` 倒计数至零放行所有 `await`；条目存续至节点重启 |
 | 原子变量 | — | 值不绑定归属（死亡不回滚）；每写版本戳 +1；ABA 仅 `*Stamped` 形态消除；条目常驻不回收（v4） |
+| 有值引用 | — | 不透明载荷 ≤`maxValueBytes`（默认 4KB，入口权威钳制、超限零生效）；null 与空串两态可区分；版本戳/去重与标量同构；条目与载荷常驻（v6） |
 | 循环屏障 | — | 多方会合、可复用世代；**离场即破障**（死亡/超时/中断/显式 break 打破当前世代，增强于 JDK）；破障不粘滞、无 `reset()`；动作由最后到场方执行（v5） |
 
 ## 下一步

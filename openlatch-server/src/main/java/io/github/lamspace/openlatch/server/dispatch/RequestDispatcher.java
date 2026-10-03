@@ -89,9 +89,14 @@ public final class RequestDispatcher {
     private final CoreEngine core;
     /** 指标词表门面；{@code null} 表示不埋点（测试夹具形态）。 */
     private final ServerMetrics metrics;
+    /**
+     * 有值引用载荷字节上限（单机分发入口钳制判定用；引擎/条目侧不复核，
+     * 钳制点唯一在接入层）。
+     */
+    private final int maxValueBytes;
 
     /**
-     * 构造分发器（不埋点，既有测试夹具形态）。
+     * 构造分发器（不埋点，既有测试夹具形态；载荷上限取内置默认 4096）。
      *
      * @param core 锁语义核心
      */
@@ -100,14 +105,28 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 构造分发器（生产形态：应答经 {@code metrics} 记入服务端指标词表）。
+     * 构造分发器（生产形态：应答经 {@code metrics} 记入服务端指标词表；
+     * 载荷上限取内置默认 4096）。
      *
      * @param core    锁语义核心
      * @param metrics 指标门面，可为 {@code null}（不埋点）
      */
     public RequestDispatcher(CoreEngine core, ServerMetrics metrics) {
+        this(core, metrics, io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_VALUE_BYTES);
+    }
+
+    /**
+     * 构造分发器（全参形态：单机分发按 {@code maxValueBytes} 对有值引用载荷
+     * 做入口钳制）。
+     *
+     * @param core          锁语义核心
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes 有值引用载荷字节上限（{@code >= 1}）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes) {
         this.core = Objects.requireNonNull(core);
         this.metrics = metrics;
+        this.maxValueBytes = maxValueBytes;
     }
 
     /**
@@ -253,9 +272,29 @@ public final class RequestDispatcher {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
         }
         AtomicOpRequest req = msg.getAtomicOpRequest();
+        if (req.getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE
+                && session.protocolVersion() < 6) {
+            // v6 专属语义：低版本会话引用形态消息级拒绝、不断连（判例各门）。
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         StatusCode shapeBad = validateAtomicRequest(req);
+        if (shapeBad == null) {
+            shapeBad = validateRefPayloadClamp(req, maxValueBytes);
+        }
         if (shapeBad != null) {
             return errorResponse(msg, shapeBad);
+        }
+        if (req.getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE) {
+            io.github.lamspace.openlatch.core.result.AtomicRefOpResult refResult =
+                    core.atomicRefOp(toAtomicRefCommand(session.sessionId(),
+                            msg.getRequestId(), req));
+            if (metrics != null) {
+                metrics.recordAtomic(req.getLockType(), req.getOp(),
+                        toLatchStatus(refResult.outcome()));
+            }
+            return toAtomicRefOpResponse(msg, refResult);
         }
         AtomicOpResult result = core.atomicOp(toAtomicCommand(session.sessionId(),
                 msg.getRequestId(), req));
@@ -278,7 +317,9 @@ public final class RequestDispatcher {
      */
     public static StatusCode validateAtomicRequest(AtomicOpRequest req) {
         io.github.lamspace.openlatch.protocol.LockType kind = req.getLockType();
-        if (kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG
+        boolean reference = kind
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE;
+        if (!reference && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG
                 && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER
                 && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
             return StatusCode.INVALID_REQUEST;
@@ -293,7 +334,23 @@ public final class RequestDispatcher {
         if (op == AtomicOp.GET && req.getOpSeq() != 0) {
             return StatusCode.INVALID_REQUEST;
         }
-        if (req.getExpectedVersion() < 0 || req.getInitialValue() < 0) {
+        if (req.getExpectedVersion() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (reference) {
+            // 有值引用形态：ADD 值域外（字节串无加法，判例布尔 ADD）；
+            // 标量槽位 MUST 为 0（操作数全走 optional bytes 通道）。
+            if (op == AtomicOp.ADD || req.getOperand() != 0 || req.getExpected() != 0
+                    || req.getInitialValue() != 0) {
+                return StatusCode.INVALID_REQUEST;
+            }
+            return null;
+        }
+        if (req.getInitialValue() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        // 标量形态 MUST NOT 携带引用载荷字段（presence 即形状违例）。
+        if (req.hasOperandBytes() || req.hasExpectedBytes() || req.hasInitialBytes()) {
             return StatusCode.INVALID_REQUEST;
         }
         if (kind == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
@@ -304,6 +361,30 @@ public final class RequestDispatcher {
             if (op == AtomicOp.ADD || !valuesOk || !operandOk) {
                 return StatusCode.INVALID_REQUEST;
             }
+        }
+        return null;
+    }
+
+    /**
+     * 有值引用载荷入口钳制（v6，尺寸判定唯一发生在接入层——超限命令
+     * MUST NOT 入日志/触引擎）：引用形态请求任一 {@code optional bytes}
+     * 字段（operand/expected/initial）字节长度超过 {@code maxValueBytes}
+     * 时回 {@code INVALID_REQUEST}；非引用形态恒合法（其载荷 presence
+     * 属形状违例，由 {@link #validateAtomicRequest} 拦截）。
+     *
+     * @param req           原子操作请求（形状已先行校验）
+     * @param maxValueBytes 本节点载荷上限
+     * @return 超限时的状态码；合法为 {@code null}
+     */
+    public static StatusCode validateRefPayloadClamp(AtomicOpRequest req, int maxValueBytes) {
+        if (req.getLockType()
+                != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE) {
+            return null;
+        }
+        if ((req.hasOperandBytes() && req.getOperandBytes().size() > maxValueBytes)
+                || (req.hasExpectedBytes() && req.getExpectedBytes().size() > maxValueBytes)
+                || (req.hasInitialBytes() && req.getInitialBytes().size() > maxValueBytes)) {
+            return StatusCode.INVALID_REQUEST;
         }
         return null;
     }
@@ -322,6 +403,54 @@ public final class RequestDispatcher {
                 toCoreAtomicKind(req.getLockType().getNumber()),
                 toCoreAtomicOp(req.getOp()), req.getOperand(), req.getExpected(),
                 req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq());
+    }
+
+    /**
+     * 协议原子请求（引用形态）→ core 引用命令。{@code optional bytes}
+     * 按显式 presence 还原：缺省={@code null}、零长度=空字节串。仅在
+     * {@link #validateAtomicRequest} 与 {@link #validateRefPayloadClamp}
+     * 通过后调用。
+     *
+     * @param sessionId 会话 id
+     * @param requestId 连接内请求 id
+     * @param req       协议请求（引用形态）
+     * @return core 引用命令
+     */
+    static io.github.lamspace.openlatch.core.command.AtomicRefOpCommand toAtomicRefCommand(
+            long sessionId, long requestId, AtomicOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.AtomicRefOpCommand(
+                sessionId, requestId, req.getKey(), toCoreAtomicOp(req.getOp()),
+                req.hasOperandBytes() ? req.getOperandBytes().toByteArray() : null,
+                req.hasExpectedBytes() ? req.getExpectedBytes().toByteArray() : null,
+                req.getExpectedVersion(),
+                req.hasInitialBytes() ? req.getInitialBytes().toByteArray() : null,
+                req.getOpSeq());
+    }
+
+    /**
+     * core 引用结果 → 协议应答（v6）：{@code GRANTED} 携带载荷应答四元组
+     * （null 态=bytes 字段缺省、零长度=EMPTY）与 op 回显，标量值位恒 0；
+     * 拒绝态四元组留零值形（bytes 全缺省）。
+     *
+     * @param msg    原请求信封
+     * @param result core 引用结果
+     * @return 应答信封
+     */
+    static Envelope toAtomicRefOpResponse(Envelope msg,
+            io.github.lamspace.openlatch.core.result.AtomicRefOpResult result) {
+        AtomicOpResponse.Builder resp = AtomicOpResponse.newBuilder()
+                .setStatus(toLatchStatus(result.outcome()))
+                .setOp(msg.getAtomicOpRequest().getOp());
+        if (result.outcome() == Outcome.GRANTED) {
+            resp.setApplied(result.applied()).setVersion(result.version());
+            if (result.oldValue() != null) {
+                resp.setOldValueBytes(com.google.protobuf.ByteString.copyFrom(result.oldValue()));
+            }
+            if (result.value() != null) {
+                resp.setValueBytes(com.google.protobuf.ByteString.copyFrom(result.value()));
+            }
+        }
+        return envelope(msg, MessageType.ATOMIC_OP, b -> b.setAtomicOpResponse(resp));
     }
 
     /**
@@ -445,6 +574,7 @@ public final class RequestDispatcher {
             case 7 -> LockType.ATOMIC_LONG;
             case 8 -> LockType.ATOMIC_INTEGER;
             case 9 -> LockType.ATOMIC_BOOLEAN;
+            case 11 -> LockType.ATOMIC_REFERENCE;
             default -> null;
         };
     }

@@ -7,7 +7,7 @@
 | Java runtime/compile | **25** (only) | all artifacts build with `release=25`; 17/21 cannot load them |
 | Spring Boot starter | **4.x** | depends on Boot-4-only artifacts; Boot 3.x incompatible — wire the SDK manually ([03](03-client-sdk.md)) |
 | Spring Framework | whatever Boot 4 ships (Framework 7) | starter targets Boot 4 contexts only |
-| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5** (HELLO negotiation, range [1,5]) | out-of-range rejected at handshake — no implicit compatibility |
+| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6** (HELLO negotiation, range [1,6]) | out-of-range rejected at handshake — no implicit compatibility |
 | Micrometer | host-provided (not transitive) | inject a `MeterRegistry` to enable client metrics |
 | Artifact delivery | client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on Maven Central (1.0.0+); server & console executable jars on GitHub Releases | client: use the coordinates directly; server/console: download a jar or build locally |
 
@@ -20,13 +20,16 @@
 | v3 | extended primitives (fair lock / semaphore / latch), `ADMIN_*` read-only observation, field-shape tightening |
 | v4 | atomic variables (`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`): the `ATOMIC_OP` message pair, per-key version stamps and dedup slots |
 | v5 | cyclic barrier (`OBarrier`): `BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` message pairs, replicated generation ledgers, leave-breaks-the-generation contract |
+| v6 | atomic reference (`OAtomicReference`): `optional bytes` payload fields on the ATOMIC message pair (no new `MessageType`), ingress `maxValueBytes` clamp, payload snapshot/preview |
 
 Mixed-version rule: **server ≥ client**. Old clients (v1/v2) work fully against new servers;
 a newer client against an older server is rejected at handshake (explicit failure beats
-silent behavioral downgrade). Atomic capabilities require server v4 and barrier capabilities
+silent behavioral downgrade). Atomic capabilities require server v4, barrier capabilities
 server v5 (v≤4 sessions sending `BARRIER_*` get an `INVALID_REQUEST` message-level
-rejection without disconnect); after the server is upgraded, v≤4 clients keep their
-byte-for-byte behavior.
+rejection without disconnect), and reference-form payloads require server v6 (v≤5 sessions
+sending a reference-form `ATOMIC_OP` get an `INVALID_REQUEST` message-level rejection
+without disconnect — scalar atomics stay untouched); after the server is upgraded, v≤5
+clients keep their byte-for-byte behavior.
 
 ## Upgrade & rollback order
 
@@ -46,6 +49,7 @@ snapshot-index point of no return for older binaries) live in
 Raft log/snapshot formats are backward-compatible within 1.x (a newer binary reads an older
 data dir). **The reverse does not hold** — once a snapshot/truncation exists, older binaries
 cannot mount that `data-dir` (see [05 rollback](05-cluster-deployment.md)). Once v4/v5 snapshots
-carry ATOMIC or BARRIER entries, rolling back to older binaries falls under the same rule —
+carry ATOMIC or BARRIER entries — or v6 snapshots carry reference payloads (`atomic_ref_*`
+fields) — rolling back to older binaries falls under the same rule —
 either confirm no such keys were written before rollback, or accept the state resetting to zero
-(barrier generations restart from scratch).
+(barrier generations restart from scratch; reference payloads stop being understood).

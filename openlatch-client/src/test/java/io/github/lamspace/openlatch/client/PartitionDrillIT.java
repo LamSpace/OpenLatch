@@ -97,11 +97,21 @@ class PartitionDrillIT {
     private static final String JAVA_BIN = ProcessHandle.current().info().command()
             .orElseThrow(() -> new IllegalStateException("无法定位当前 JVM 绝对路径"));
 
+    /**
+     * sudo 执行器——契约与 {@link #assumePrivileges()} 的口令一致：全程
+     * {@code -n} 非交互。旧实现漏加 {@code -n}，sudo 拿不到子进程 stdin 时
+     * 会直开 {@code /dev/tty} 抢终端要密码；时间戳（默认 5 分钟）中途过期后，
+     * 清理链的任意一条命令即把人离席的墙钟烧穿类级 @Timeout（2026-10-03
+     * 重武装后首跑实证：功能判据全绿、teardown 挂密码提示 300s+ 超时）。
+     * 凭证失效时 {@code -n} 快速失败，经预检路径转显式跳过、经运行路径转
+     * 带指引的错误——MUST NOT 出现无界等待。
+     */
     private static final class Sudo {
         static Process exec(String... args) throws IOException {
-            String[] cmd = new String[args.length + 1];
+            String[] cmd = new String[args.length + 2];
             cmd[0] = "sudo";
-            System.arraycopy(args, 0, cmd, 1, args.length);
+            cmd[1] = "-n";
+            System.arraycopy(args, 0, cmd, 2, args.length);
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.redirectErrorStream(true);
             Process p = pb.start();
@@ -110,10 +120,19 @@ class PartitionDrillIT {
 
         static void run(String... args) throws IOException, InterruptedException {
             Process p = exec(args);
+            // 先有界等待退出、后收输出：旧顺序（readAllBytes 先于 waitFor）在
+            // 子进程不退出时把 30s 超时挡成死码。
+            if (!p.waitFor(30, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                throw new IOException("sudo -n " + String.join(" ", args)
+                        + " 超时 30s 未退出（已强杀）");
+            }
             String out = new String(p.getInputStream().readAllBytes());
-            if (!p.waitFor(30, TimeUnit.SECONDS) || p.exitValue() != 0) {
-                throw new IOException("sudo " + String.join(" ", args)
-                        + " 失败 (" + p.exitValue() + "): " + out);
+            if (p.exitValue() != 0) {
+                throw new IOException("sudo -n " + String.join(" ", args)
+                        + " 失败 (" + p.exitValue() + "): " + out
+                        + "；凭证可能已过期——请配置 NOPASSWD（visudo -f /etc/sudoers.d/openlatch-drill）"
+                        + "或全程 keep-alive（另开终端 while true; do sudo -n true; sleep 60; done）");
             }
         }
     }
@@ -255,7 +274,10 @@ class PartitionDrillIT {
             }
         }
         assumeTrue(ok, "PartitionDrillIT 跳过：" + why + "；特权环境执行命令："
-                + "mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=PartitionDrillIT");
+                + "mvn -s <settings> -pl openlatch-client verify -Pdrill -Dit.test=PartitionDrillIT；"
+                + "全程 MUST 非交互（NOPASSWD 或 sudo -v 新鲜时间戳覆盖演练全程——功能段+清理可超 5 分钟，"
+                + "推荐 visudo 落 NOPASSWD 条目，或演练期间另开终端 keep-alive："
+                + "while true; do sudo -n true; sleep 60; done）");
     }
 
     /**
@@ -305,10 +327,11 @@ class PartitionDrillIT {
         }
         // destroyForcibly 的直接子是 `ip netns exec`（父进程），孙 java 进程会
         // 过继到 init 继续占住 netns——先按 jar 路径标识清掉演练进程再删 netns。
+        // 标识用版本无关正则（钉死旧版本名在发版后清不掉任何进程，2026-10-03）。
         for (int i = 1; i <= 3; i++) {
             try {
                 Sudo.run("ip", "netns", "exec", NS_PREFIX + i, "pkill", "-f",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar");
+                        "openlatch-server-.*-executable\\.jar");
             } catch (Exception ignored) {
                 // netns 不存在/无匹配进程即已干净
             }
@@ -607,16 +630,29 @@ class PartitionDrillIT {
         return jar;
     }
 
+    /**
+     * 定位 openlatch-server shaded jar：前后缀匹配、不钉版本文件名
+     * （钉死 {@code 1.0-SNAPSHOT} 的旧写法在发版改号后静默跳过全部用例，
+     * 2026-10-03 实证，判例 {@link LeaderKillDrillIT} 同修）。
+     */
     private static Path locateServerJar() {
-        List<Path> candidates = List.of(
-                Path.of("..", "openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"),
-                Path.of("openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"));
-        for (Path c : candidates) {
-            Path abs = c.toAbsolutePath().normalize();
-            if (Files.exists(abs)) {
-                return abs;
+        for (Path dir : List.of(
+                Path.of("..", "openlatch-server", "target"),
+                Path.of("openlatch-server", "target"))) {
+            Path abs = dir.toAbsolutePath().normalize();
+            if (!Files.isDirectory(abs)) {
+                continue;
+            }
+            try (var files = Files.list(abs)) {
+                Path jar = files
+                        .filter(p -> p.getFileName().toString().startsWith("openlatch-server-"))
+                        .filter(p -> p.getFileName().toString().endsWith("-executable.jar"))
+                        .findFirst().orElse(null);
+                if (jar != null) {
+                    return jar;
+                }
+            } catch (java.io.IOException ignored) {
+                // 目录不可读按未找到处理（保持显式跳过告警语义）
             }
         }
         return null;

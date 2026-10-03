@@ -138,13 +138,19 @@ public final class ShadowTable {
      * @param barrierActionPending BARRIER 是否动作待决（其余家族 false）
      * @param barrierCompletedResult BARRIER 最近完结世代的了结形态
      *                               （0=无、1=TRIPPED、2=BROKEN；其余家族 0）
+     * @param refInitial ATOMIC 有值引用条目的定型初值载荷（其余家族 {@code null}；
+     *                   该形态下 {@code null}=无主张、零长度=空字节串）
+     * @param refValue ATOMIC 有值引用条目的当前载荷（其余家族 {@code null}；
+     *                 该形态下 {@code null}=null 态、零长度=空字节串。管理应答
+     *                 仅装配大小与截断预览，全量字节不外发）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
                                  long latchTotal, long latchCount, Set<Long> latchParticipants,
                                  long atomicInitial, long atomicValue, long atomicVersion,
                                  long barrierParties, long barrierGeneration, int barrierArrived,
-                                 boolean barrierActionPending, int barrierCompletedResult) { }
+                                 boolean barrierActionPending, int barrierCompletedResult,
+                                 byte[] refInitial, byte[] refValue) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -186,6 +192,14 @@ public final class ShadowTable {
         private long atomicSlotValue;
         /** ATOMIC 条目：槽应答 version（其余家族 0）。 */
         private long atomicSlotVersion;
+        /** ATOMIC 有值引用条目：定型初值载荷（其余家族 {@code null}）。 */
+        private byte[] refInitial;
+        /** ATOMIC 有值引用条目：当前载荷（其余家族 {@code null}）。 */
+        private byte[] refValue;
+        /** ATOMIC 有值引用条目：去重槽应答 oldValue 载荷（其余家族 {@code null}）。 */
+        private byte[] refSlotOldValue;
+        /** ATOMIC 有值引用条目：去重槽应答 value 载荷（其余家族 {@code null}）。 */
+        private byte[] refSlotValue;
         /** BARRIER 定型许可数（其余家族 0）。 */
         private long barrierParties;
         /** BARRIER 当前世代号（其余家族 0）。 */
@@ -343,7 +357,8 @@ public final class ShadowTable {
                 l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants),
                 l.atomicInitial, l.atomicValue, l.atomicVersion,
                 l.barrierParties, l.barrierGeneration, l.barrierArrivals.size(),
-                l.barrierActionSession != 0, l.barrierCompletedResult);
+                l.barrierActionSession != 0, l.barrierCompletedResult,
+                l.refInitial, l.refValue);
     }
 
     /**
@@ -447,7 +462,7 @@ public final class ShadowTable {
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
             if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
                     || en.getValue().lockType == LockType.LOCK_TYPE_BARRIER_VALUE
-                    || isAtomicType(en.getValue().lockType)) {
+                    || isAtomicFamily(en.getValue().lockType)) {
                 // 无租约家族（Latch/ATOMIC/BARRIER）到期时刻恒 0——非"已到期"
                 // 信号，永不由到期清扫回收（一次性护栏、常驻值与循环屏障世代
                 // 存续语义各自承载；判例：原子变更对影子表无租约家族到期误扫的修复）。
@@ -485,9 +500,9 @@ public final class ShadowTable {
                 }
                 continue;
             }
-            if (isAtomicType(l.lockType)) {
-                // 原子条目存续与一切会话无关：值不绑定归属，
-                // 会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
+            if (isAtomicFamily(l.lockType)) {
+                // 原子条目（含 v6 有值引用形态）存续与一切会话无关：值不绑定
+                // 归属，会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
                 continue;
             }
             if (l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE) {
@@ -608,6 +623,29 @@ public final class ShadowTable {
                     lb.addBarrierCompletedArrivals(SnapshotBarrierArrival.newBuilder()
                             .setSessionId(a.sessionId()).setRequestId(a.requestId()));
                 }
+            } else if (isReferenceType(l.lockType)) {
+                // v6 引用条目：版本戳与去重槽骨架复用既有字段；载荷按显式
+                // presence 写入（null=字段缺省、零长度=EMPTY），标量值字段
+                // 恒缺省——序列化确定性由数组字节内容承载，跨副本可比。
+                lb.setAtomicVersion(l.atomicVersion)
+                        .setAtomicSlotSession(l.atomicSlotSession)
+                        .setAtomicSlotOpSeq(l.atomicSlotOpSeq)
+                        .setAtomicSlotApplied(l.atomicSlotApplied)
+                        .setAtomicSlotVersion(l.atomicSlotVersion);
+                if (l.refInitial != null) {
+                    lb.setAtomicRefInitial(com.google.protobuf.ByteString.copyFrom(l.refInitial));
+                }
+                if (l.refValue != null) {
+                    lb.setAtomicRefValue(com.google.protobuf.ByteString.copyFrom(l.refValue));
+                }
+                if (l.refSlotOldValue != null) {
+                    lb.setAtomicRefSlotOldValue(
+                            com.google.protobuf.ByteString.copyFrom(l.refSlotOldValue));
+                }
+                if (l.refSlotValue != null) {
+                    lb.setAtomicRefSlotValue(
+                            com.google.protobuf.ByteString.copyFrom(l.refSlotValue));
+                }
             } else if (isAtomicType(l.lockType)) {
                 // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
                 lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
@@ -654,6 +692,28 @@ public final class ShadowTable {
                 locks.put(l.getKey(), sl);
                 heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
                         Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
+            } else if (isReferenceType(l.getLockTypeValue())) {
+                // v6 引用条目装载：载荷两态按 presence 还原（缺省=null、
+                // EMPTY=零长度——槽占用与否由 slotOpSeq 骨架判定），常驻条目
+                // 不入 heldIndex。
+                sl.atomicVersion = l.getAtomicVersion();
+                sl.atomicSlotSession = l.getAtomicSlotSession();
+                sl.atomicSlotOpSeq = l.getAtomicSlotOpSeq();
+                sl.atomicSlotApplied = l.getAtomicSlotApplied();
+                sl.atomicSlotVersion = l.getAtomicSlotVersion();
+                if (l.hasAtomicRefInitial()) {
+                    sl.refInitial = l.getAtomicRefInitial().toByteArray();
+                }
+                if (l.hasAtomicRefValue()) {
+                    sl.refValue = l.getAtomicRefValue().toByteArray();
+                }
+                if (l.hasAtomicRefSlotOldValue()) {
+                    sl.refSlotOldValue = l.getAtomicRefSlotOldValue().toByteArray();
+                }
+                if (l.hasAtomicRefSlotValue()) {
+                    sl.refSlotValue = l.getAtomicRefSlotValue().toByteArray();
+                }
+                locks.put(l.getKey(), sl);
             } else if (isAtomicType(l.getLockTypeValue())) {
                 sl.atomicInitial = l.getAtomicInitial();
                 sl.atomicValue = l.getAtomicValue();
@@ -787,10 +847,33 @@ public final class ShadowTable {
     }
 
     /**
-     * 协议 {@code LockType} 数值是否原子形态（7/8/9，含装载态）。
+     * 协议 {@code LockType} 数值是否有值引用形态（11，含装载态）。
      *
      * @param lockTypeValue 协议数值
-     * @return 原子形态为 {@code true}
+     * @return 有值引用形态为 {@code true}
+     */
+    public static boolean isReferenceType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_ATOMIC_REFERENCE_VALUE;
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否 ATOMIC 家族（标量 7/8/9 与有值引用 11，
+     * 含装载态）。家族级判定（无持有语义、会话无关、不入到期清扫）一律
+     * 用本方法；形态级序列化分支仍用 {@link #isAtomicType(int)} 与
+     * {@link #isReferenceType(int)}。
+     *
+     * @param lockTypeValue 协议数值
+     * @return ATOMIC 家族为 {@code true}
+     */
+    public static boolean isAtomicFamily(int lockTypeValue) {
+        return isAtomicType(lockTypeValue) || isReferenceType(lockTypeValue);
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否标量原子形态（7/8/9，含装载态）。
+     *
+     * @param lockTypeValue 协议数值
+     * @return 标量原子形态为 {@code true}
      */
     public static boolean isAtomicType(int lockTypeValue) {
         return lockTypeValue == LockType.LOCK_TYPE_ATOMIC_LONG_VALUE
@@ -841,6 +924,57 @@ public final class ShadowTable {
             l.atomicSlotApplied = applied;
             l.atomicSlotOldValue = oldValue;
             l.atomicSlotValue = value;
+            l.atomicSlotVersion = version;
+        }
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 有值引用原子操作应用点镜像（v6，ATOMIC_OP_ENTRY 引用形态的 GRANTED
+     * 落点）：与 {@link #atomicApplied} 同构，值域换载荷——条目不存在且本条
+     * 为写操作时按 {@code initialClaim}（{@code null}=无主张）镜像创建引用
+     * 条目；写操作刷新载荷/版本戳并覆盖去重槽（含 {@code applied=false} 的
+     * CAS 未命中——槽内载荷字节随镜像存续，快照与追赶据此复原）。GET 与
+     * 形态不符（引擎已回互拒）零扰动、不重发布。
+     *
+     * <p><b>载荷所有权</b>：{@code value}/{@code oldValue}/{@code initialClaim}
+     * 数组按引用存储（应用线程内构造、迁移以引用替换），镜像与视图只读；
+     * null 与零长度两态原样保留。
+     *
+     * @param key          有值引用键
+     * @param kindValue    请求携带的协议形态数值（恒 11，建镜像条目定型用）
+     * @param sessionId    逻辑会话 id（槽记录）
+     * @param opSeq        请求 op_seq（0=不参与去重，槽不更新）
+     * @param initialClaim 初值主张载荷（{@code null}=无主张）
+     * @param get          本条是否 GET 条目（零迁移，镜像不创建不刷新）
+     * @param applied      载荷应答四元组 applied
+     * @param oldValue     载荷应答 oldValue（可为 null）
+     * @param value        载荷应答 value（可为 null）
+     * @param version      应答 version
+     */
+    public void atomicRefApplied(String key, int kindValue, long sessionId, long opSeq,
+                                 byte[] initialClaim, boolean get, boolean applied,
+                                 byte[] oldValue, byte[] value, long version) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            if (get) {
+                return; // GET 且条目缺席：引擎未建条目，镜像同样零扰动
+            }
+            l = new SLock(kindValue, 0, 0, 0);
+            l.refInitial = initialClaim;
+            locks.put(key, l);
+        }
+        if (get || l.lockType != kindValue) {
+            return; // GET 零迁移；形态与镜像定型不符——零扰动
+        }
+        l.refValue = value;
+        l.atomicVersion = version;
+        if (opSeq >= 1) {
+            l.atomicSlotSession = sessionId;
+            l.atomicSlotOpSeq = opSeq;
+            l.atomicSlotApplied = applied;
+            l.refSlotOldValue = oldValue;
+            l.refSlotValue = value;
             l.atomicSlotVersion = version;
         }
         adminView.put(key, viewOf(l));

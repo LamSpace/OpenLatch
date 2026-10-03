@@ -40,6 +40,7 @@ enum LockType {
   LOCK_TYPE_ATOMIC_INTEGER = 8;  // v4：原子 int 形态判别（int32 域 wrap）
   LOCK_TYPE_ATOMIC_BOOLEAN = 9;  // v4：原子 boolean 形态判别（值域 {0,1}）
   LOCK_TYPE_BARRIER        = 10; // v5：循环屏障定型判别（屏障操作经 BARRIER_* 消息）
+  LOCK_TYPE_ATOMIC_REFERENCE = 11; // v6：原子有值引用形态判别（仅 ATOMIC_OP 消息携带；载荷为不透明字节，≤maxValueBytes 由接入层钳制）
 }
 
 // 状态码。
@@ -263,11 +264,15 @@ message AdminKeyInfo {
   int32  holders             = 3;  // 持有者数（Latch/ATOMIC/BARRIER 恒 0）
   int64  remaining_lease_ms  = 4;  // 剩余租约（受理节点时钟；未持有为 0）
   int32  waiter_count        = 5;  // 等待者数（非 Leader 视角恒 0）
-  string atomic_kind         = 6;  // v4：long/integer/boolean（非 ATOMIC 恒空）
-  sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0）
+  string atomic_kind         = 6;  // v4：long/integer/boolean/reference（非 ATOMIC 恒空）
+  sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0；reference 恒 0，读数见 payload 字段）
   int64  barrier_parties     = 8;  // v5：定型许可数（非 BARRIER 恒 0）
   int64  barrier_generation  = 9;  // v5：当前世代号，自 1 起单调递增（非 BARRIER 恒 0）
   int32  barrier_arrived     = 10; // v5：当前世代已到场数（非 BARRIER 恒 0）
+  // v6：有值引用条目的载荷观察对（非 reference 家族恒 0/空；预览为服务端
+  // 构造的恒定长度截断转义文本，全量载荷不外发）。
+  int32  atomic_payload_size    = 11; // 当前值字节数（null 值恒 0）
+  string atomic_payload_preview = 12; // 截断转义预览（null 值恒空串）
 }
 
 message AdminListKeysResponse {
@@ -314,7 +319,8 @@ message AdminKeyDetailResponse {
   int64  latch_total          = 9;   // LATCH 专属，其余 0
   int64  latch_remaining      = 10;  // LATCH 专属，其余 0（-1 恒不出现：未命中走 status）
   bool   wait_queue_leader_only = 11; // true=本节点非 Leader，等待队列区无数据
-  // v4：ATOMIC 专属四字段（其余家族恒空/0；kind 取 long/integer/boolean 词表）。
+  // v4：ATOMIC 专属四字段（其余家族恒空/0；kind 取 long/integer/boolean/reference 词表；
+  // reference 形态 atomic_value 恒 0、atomic_initial 恒 0，载荷读数见 v6 payload 字段对）。
   string atomic_kind     = 12;
   int64  atomic_initial  = 13;
   sint64 atomic_value    = 14;
@@ -325,6 +331,12 @@ message AdminKeyDetailResponse {
   int32  barrier_arrived        = 18;
   bool   barrier_action_pending = 19;  // true=当前世代处于动作待决态（执行者尚未回报）
   string barrier_last_final     = 20;  // 最近完结世代的了结形态：tripped/broken/none
+  // v6：有值引用条目的载荷观察对（非 reference 家族恒 0/空）。预览由服务端构造：
+  // 至多 64 字节前缀，可打印 UTF-8 原样、其余 \xHH 转义，长度恒定不随配置或
+  // 载荷膨胀；null 值 preview 为缺省空串、size 0，空字节串 preview 为 "\"\""
+  // （空引号标记），两态可区分。全量载荷 MUST NOT 出现在应答中。
+  int32  atomic_payload_size    = 21;  // 当前值字节数（null 值恒 0）
+  string atomic_payload_preview = 22;  // 截断转义预览（null 值恒空串）
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -345,12 +357,14 @@ message AdminListSessionsResponse {
   repeated AdminSessionInfo sessions = 2;
 }
 
-// v4：原子变量操作请求（ATOMIC_OP）。lock_type 取三原子形态之一作形态判别；
-// op 之外的操作数按 op 消费：operand 为 SET/GET_AND_SET 新值、ADD 增量、
-// CAS/CAS_STAMPED 更新值；expected 为 CAS/CAS_STAMPED 期望值；
-// expected_version 仅在 ADD（条件加）与 CAS_STAMPED 上有非零意义，> 0 为版本
-// 断言、0 为不主张；initial_value 非零 = 建条目初值主张（判例：Semaphore/Latch
-// 总量非零主张），0 为不主张；op_seq 为会话内单调写序号（GET 填 0 不参与去重）。
+// v4：原子变量操作请求（ATOMIC_OP）。lock_type 取四原子形态之一作形态判别
+// （v6 起含 LOCK_TYPE_ATOMIC_REFERENCE）；op 之外的操作数按 op 消费：operand 为
+// SET/GET_AND_SET 新值、ADD 增量、CAS/CAS_STAMPED 更新值；expected 为
+// CAS/CAS_STAMPED 期望值；expected_version 仅在 ADD（条件加）与 CAS_STAMPED 上
+// 有非零意义，> 0 为版本断言、0 为不主张；initial_value 非零 = 建条目初值主张
+// （判例：Semaphore/Latch 总量非零主张），0 为不主张；op_seq 为会话内单调写序号
+// （GET 填 0 不参与去重）。有值引用形态以 v6 的 optional bytes 三字段承载载荷
+// 与主张（标量槽位恒 0，无 ADD 面）——见字段注。
 message AtomicOpRequest {
   string   key              = 1;
   AtomicOp op               = 2;
@@ -360,6 +374,15 @@ message AtomicOpRequest {
   sint64   expected_version = 6;
   sint64   initial_value    = 7;
   uint64   op_seq           = 8;
+  // v6：有值引用形态（lock_type = LOCK_TYPE_ATOMIC_REFERENCE）的载荷三字段，
+  // 显式 presence 口径——缺省=null，零长度=空字节串（两态可区分）：
+  // operand_bytes 为 SET/GET_AND_SET/CAS/CAS_STAMPED 落值（缺省=落 null）；
+  // expected_bytes 为 CAS/CAS_STAMPED 期望值（缺省=期望 null）；
+  // initial_bytes 为初值主张（缺省=不主张）。标量形态 MUST NOT 携带这三字段
+  // （presence 即形状违例）；引用形态的标量槽位 MUST 为 0。
+  optional bytes operand_bytes  = 9;
+  optional bytes expected_bytes = 10;
+  optional bytes initial_bytes  = 11;
 }
 
 // v4：原子变量操作应答。拒绝态四元组为零值形；GET 的 applied 恒 false，
@@ -372,6 +395,10 @@ message AtomicOpResponse {
   sint64     old_value = 4;
   sint64     value     = 5;
   sint64     version   = 6;
+  // v6：有值引用形态的载荷回执（显式 presence：缺省=null、零长度=""）；
+  // 标量形态与拒绝态恒缺省。
+  optional bytes old_value_bytes = 7;
+  optional bytes value_bytes     = 8;
 }
 
 // v5：循环屏障到场（BARRIER_AWAIT）。parties 为定型断言（>= 0，0 为不主张——

@@ -448,4 +448,101 @@ class ProtocolCodecTest {
                 .build();
         assertThat(roundTrip(doneResp)).isEqualTo(doneResp);
     }
+
+    /**
+     * v6 载荷字段回环：{@code optional bytes} 三形态（缺省/零长度/非空）presence
+     * 逐格可判别，4KB 二进制字节级保真；含请求、应答与 raft 侧回执/快照承载。
+     */
+    @Test
+    void atomicReferencePayloadRoundTrip() {
+        byte[] big = new byte[4096];
+        for (int i = 0; i < big.length; i++) {
+            big[i] = (byte) (i * 31 + 7);
+        }
+
+        // 请求侧三形态：缺省（null）/ 零长度（""）/ 4KB 二进制
+        AtomicOpRequest absent = AtomicOpRequest.newBuilder()
+                .setKey("ref").setOp(AtomicOp.ATOMIC_SET)
+                .setLockType(LockType.LOCK_TYPE_ATOMIC_REFERENCE)
+                .setOpSeq(1L).build();
+        AtomicOpRequest empty = absent.toBuilder()
+                .setOperandBytes(com.google.protobuf.ByteString.EMPTY).build();
+        AtomicOpRequest binary = absent.toBuilder()
+                .setOperandBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .setExpectedBytes(com.google.protobuf.ByteString.copyFromUtf8("x"))
+                .setInitialBytes(com.google.protobuf.ByteString.copyFromUtf8("y"))
+                .build();
+
+        Envelope req = Envelope.newBuilder().setProtocolVersion(6)
+                .setType(MessageType.ATOMIC_OP).setRequestId(21L)
+                .setAtomicOpRequest(binary).build();
+        Envelope parsedReq = roundTrip(req);
+        assertThat(parsedReq.getAtomicOpRequest()).isEqualTo(binary);
+        assertThat(parsedReq.getAtomicOpRequest().toByteArray()).isEqualTo(binary.toByteArray());
+        assertThat(parsedReq.getAtomicOpRequest().hasOperandBytes()).isTrue();
+        assertThat(parsedReq.getAtomicOpRequest().getOperandBytes().toByteArray())
+                .containsExactly(big);
+        // presence 判别：缺省态无字段、零长度态有字段且为空——两态序列化互异
+        assertThat(absent.hasOperandBytes()).isFalse();
+        assertThat(empty.hasOperandBytes()).isTrue();
+        assertThat(empty.getOperandBytes().isEmpty()).isTrue();
+        assertThat(absent.toByteArray()).isNotEqualTo(empty.toByteArray());
+
+        // 应答侧三形态
+        AtomicOpResponse respNull = AtomicOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(AtomicOp.ATOMIC_GET)
+                .setApplied(false).setVersion(3L).build();
+        AtomicOpResponse respEmpty = respNull.toBuilder()
+                .setValueBytes(com.google.protobuf.ByteString.EMPTY).build();
+        AtomicOpResponse respBinary = respNull.toBuilder()
+                .setOldValueBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .setValueBytes(com.google.protobuf.ByteString.copyFromUtf8("v2")).build();
+        assertThat(roundTripEnvelope(respNull).getAtomicOpResponse()).isEqualTo(respNull);
+        assertThat(roundTripEnvelope(respBinary).getAtomicOpResponse()).isEqualTo(respBinary);
+        assertThat(respEmpty.hasOldValueBytes()).isFalse();
+        assertThat(respEmpty.hasValueBytes()).isTrue();
+
+        // raft 侧：ApplyResult 载荷回执与 SnapshotLock ref 字段回环
+        io.github.lamspace.openlatch.protocol.raft.ApplyResult apply =
+                io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                        .setStatus(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK)
+                        .setAtomicApplied(true).setAtomicVersion(4L)
+                        .setAtomicOldValueBytes(com.google.protobuf.ByteString.copyFrom(big))
+                        .setAtomicValueBytes(com.google.protobuf.ByteString.copyFromUtf8("w"))
+                        .build();
+        io.github.lamspace.openlatch.protocol.raft.ApplyResult parsedApply = parseApply(apply);
+        assertThat(parsedApply).isEqualTo(apply);
+        assertThat(parsedApply.getAtomicOldValueBytes().toByteArray()).containsExactly(big);
+        assertThat(parsedApply.hasAtomicOldValueBytes()).isTrue();
+
+        io.github.lamspace.openlatch.protocol.raft.SnapshotLock refLock =
+                io.github.lamspace.openlatch.protocol.raft.SnapshotLock.newBuilder()
+                        .setKey("ref").setLockType(LockType.LOCK_TYPE_ATOMIC_REFERENCE)
+                        .setAtomicVersion(9L)
+                        .setAtomicRefValue(com.google.protobuf.ByteString.copyFrom(big))
+                        .setAtomicRefSlotValue(com.google.protobuf.ByteString.EMPTY)
+                        .build();
+        assertThat(refLock.toBuilder().clearAtomicRefSlotValue().build().hasAtomicRefSlotValue()).isFalse();
+        assertThat(refLock.hasAtomicRefInitial()).isFalse();
+        assertThat(refLock.hasAtomicRefSlotValue()).isTrue();
+        assertThat(refLock.getAtomicRefSlotValue().isEmpty()).isTrue();
+    }
+
+    /** 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 ATOMIC_OP 通道）。 */
+    private static Envelope roundTripEnvelope(AtomicOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(6)
+                .setType(MessageType.ATOMIC_OP).setRequestId(22L)
+                .setAtomicOpResponse(resp).build());
+    }
+
+    /** ApplyResult 序列化回环。 */
+    private static io.github.lamspace.openlatch.protocol.raft.ApplyResult parseApply(
+            io.github.lamspace.openlatch.protocol.raft.ApplyResult apply) {
+        try {
+            return io.github.lamspace.openlatch.protocol.raft.ApplyResult
+                    .parseFrom(apply.toByteArray());
+        } catch (InvalidProtocolBufferException e) {
+            throw new AssertionError("apply decode failed", e);
+        }
+    }
 }

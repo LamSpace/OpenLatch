@@ -26,6 +26,7 @@ import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyInfo;
@@ -303,6 +304,61 @@ class AdminProtocolTest {
         assertThat(plain.getFamily()).isEqualTo("lock");
         assertThat(plain.getAtomicKind()).isEmpty();
         assertThat(plain.getAtomicVersion()).isZero();
+    }
+
+    @Test
+    void referenceEntriesVisibleWithBoundedTruncatedPreview() {
+        long w = core.sessionOpened();
+        // 300B 载荷：前 20 字节可打印、其后全 0xff——预览恒截断于 64B 并转义。
+        byte[] big = new byte[300];
+        java.util.Arrays.fill(big, (byte) 0xff);
+        for (int i = 0; i < 20; i++) {
+            big[i] = (byte) ('a' + i);
+        }
+        core.atomicRefOp(new AtomicRefOpCommand(sessionId, 500, "ref:a", AtomicOp.SET,
+                big, null, 0, new byte[] {9}, 1));
+        core.atomicRefOp(new AtomicRefOpCommand(w, 501, "ref:null", AtomicOp.SET,
+                null, null, 0, null, 1));
+        core.atomicRefOp(new AtomicRefOpCommand(w, 502, "ref:empty", AtomicOp.SET,
+                new byte[0], null, 0, null, 2));
+
+        // SUMMARY：引用条目并入 atomic_entries 单列计数（per-kind 不扩计数线）。
+        AdminSummaryResponse s = admin(adminSummary(20, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getAtomicEntries()).isEqualTo(3);
+
+        AdminKeyInfo row = admin(adminListKeys(21, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:a")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("atomic");
+        assertThat(row.getAtomicKind()).isEqualTo("reference");
+        assertThat(row.getAtomicValue()).isZero(); // 引用形态标量位恒 0
+        assertThat(row.getAtomicPayloadSize()).isEqualTo(300);
+        // 预览有界：可打印前缀 + \xHH 转义 + 省略号；不随载荷膨胀，全量不外发。
+        assertThat(row.getAtomicPayloadPreview())
+                .startsWith("abcdefghijklmnopqrst")
+                .contains("\\xff")
+                .endsWith("…")
+                .hasSizeLessThan(300);
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(22, TOKEN, "ref:a"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getFamily()).isEqualTo("atomic");
+        assertThat(d.getAtomicKind()).isEqualTo("reference");
+        assertThat(d.getAtomicPayloadSize()).isEqualTo(300);
+        assertThat(d.getAtomicVersion()).isEqualTo(1);
+
+        // null 态：size 0、preview 空串；空字节串：size 0、preview "\"\""——两态可区分。
+        AdminKeyInfo nullRow = admin(adminListKeys(23, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:null")).findFirst().orElseThrow();
+        assertThat(nullRow.getAtomicPayloadSize()).isZero();
+        assertThat(nullRow.getAtomicPayloadPreview()).isEmpty();
+        AdminKeyInfo emptyRow = admin(adminListKeys(24, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:empty")).findFirst().orElseThrow();
+        assertThat(emptyRow.getAtomicPayloadSize()).isZero();
+        assertThat(emptyRow.getAtomicPayloadPreview()).isEqualTo("\"\"");
     }
 
     @Test

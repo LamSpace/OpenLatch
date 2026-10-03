@@ -30,6 +30,7 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.limit.max-key-length` | `512` | max key bytes |
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | per-key queue depth cap |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | inflight cap per connection |
+| `openlatch.server.limit.max-value-bytes` | `4096` | per-key payload cap for atomic references (v6); enforced only at ingress (over-limit commands never enter the log), range [1, 512KiB]; lowering the cap never retro-affects stored values |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -126,6 +127,28 @@ availability is carried by the server-side self-healing watchdog, not by restart
 - Before rolling the server back past snapshot support: once the cluster has produced a
   snapshot (log truncated at the snapshot index), the data dir **cannot** be reopened by the
   older binary — clear & re-add, or stay on the current line.
+- **v6 atomic-reference rollback window**: reference payload log entries and snapshot
+  fields (`atomic_ref_*`) are v6 additions that pre-v6 binaries cannot interpret — before
+  rolling back below v6, drain the reference keys (a full `set(null)` does not reclaim
+  the entry, so either accept the memory residency during the rollback window, or clear
+  & re-add per the previous bullet). While on the older binary, any reference-form write
+  is shape-rejected at the old leader's ingress and never pollutes the replication face.
+
+### Payload snapshot & log size governance (v6)
+
+- The payload channel adds a **bytes** dimension to snapshot growth on top of the
+  entry-count dimension: one reference entry occupies at most `2 × max-value-bytes +
+  constant` in a snapshot (the current value plus the dedup slot each carry a payload);
+- trigger and retention semantics **do not change with payloads** — `snapshot-threshold`
+  still counts entries and each node keeps 2 snapshots; the reference-key cardinality is
+  the dominant snapshot-size variable, and combined with entry permanence it is the
+  residency cost operations must watch: namespace reference keys per tenant/round;
+- `data-dir` capacity planning gains a term: reference keys × `max-value-bytes` × constant,
+  on top of the existing write-rate × log-retention estimate;
+- observability: the console/admin protocol expose per-entry payload size plus a
+  constant-length truncated preview (full bytes never leave the admin plane), and the
+  benchmark suite carries a "batch of exactly-capped payloads → snapshot stays within
+  bounds" gate case.
 
 ## 5. Replication-stall self-healing & the supervisor (operational must-read)
 

@@ -29,6 +29,7 @@
 | `openlatch.server.limit.max-key-length` | `512` | 键长上限（字节） |
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | 单键队列深度上限 |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | 单连接在途请求上限 |
+| `openlatch.server.limit.max-value-bytes` | `4096` | 有值引用（v6）单 key 载荷字节上限；判定仅在接入层（超限命令不入日志），取值 [1, 512KiB]；下调不追溯存量值 |
 | `openlatch.server.metrics.enabled` | `true` | 指标管理端点开关（Prometheus 抓取 `http://host:port/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0`=临时）；绑定冲突即启动失败——同机多节点须互异 |
 | `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理令牌；未配置 ⇒ 一切管理请求被拒 |
@@ -120,6 +121,22 @@ OpenLatchClient client = OpenLatchClient.builder()
 - 客户端回退旧版本仍可用（存量锁经转发车道无损）；
 - 服务端回退到不支持快照的版本前确认：一旦集群产出过快照（日志按快照位点截断），
   数据目录**不可**由更旧二进制恢复——需清目录全量重加，或保持当前版本线。
+- **v6 有值引用的回滚窗口**：引用载荷写入的日志条目与快照字段（`atomic_ref_*`）
+  为 v6 新增，早于 v6 的二进制无法理解——回滚至 v6 前须先排空引用 key（写入
+  全部 `set(null)` 不回收条目，故须接受回滚期内存驻留，或按上条清目录全量重加）。
+  回滚期任何引用形态写入在旧 Leader 入口即被形状拒绝，不会污染复制面。
+
+### 载荷下的快照与日志尺寸治理（v6）
+
+- 载荷通道把"条目数"维度的快照膨胀引入"字节数"维度：单条有值引用条目快照占用
+  上界 ≈ `2 × max-value-bytes + 常数`（当前值 + 去重槽各一份载荷）；
+- 触发与保留口径**不因载荷改变**——`snapshot-threshold` 仍按条目数、每节点保留
+  2 份；载荷基数（引用 key 数）是快照尺寸的主导变量，与条目常驻叠加即为运维须
+  关注的驻留成本，建议按租户/轮次命名引用 key 并纳入基数治理；
+- `data-dir` 容量估算需在原"写入频率 × 日志保留"基础上叠加"引用 key 数 ×
+  `max-value-bytes` × 常数"项；
+- 观测与断言：控制台/管理协议呈现每条目载荷大小与恒定长度的截断预览（全量字节
+  不入管理应答），基准侧有"恰限载荷批量写 → 快照尺寸落界"的守门用例。
 
 ## 5. 复制停摆自愈与 supervisor（必读运维事实）
 

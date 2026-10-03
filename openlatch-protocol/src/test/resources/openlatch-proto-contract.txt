@@ -31,6 +31,7 @@ enum LockType
   LOCK_TYPE_ATOMIC_INTEGER 8
   LOCK_TYPE_ATOMIC_BOOLEAN 9
   LOCK_TYPE_BARRIER 10
+  LOCK_TYPE_ATOMIC_REFERENCE 11
 enum StatusCode
   OK 0
   QUEUED 1
@@ -185,6 +186,8 @@ message AdminKeyInfo
   barrier_parties 8
   barrier_generation 9
   barrier_arrived 10
+  atomic_payload_size 11
+  atomic_payload_preview 12
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -227,6 +230,8 @@ message AdminKeyDetailResponse
   barrier_arrived 18
   barrier_action_pending 19
   barrier_last_final 20
+  atomic_payload_size 21
+  atomic_payload_preview 22
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -247,6 +252,9 @@ message AtomicOpRequest
   expected_version 6
   initial_value 7
   op_seq 8
+  operand_bytes 9
+  expected_bytes 10
+  initial_bytes 11
 message AtomicOpResponse
   status 1
   op 2
@@ -254,6 +262,8 @@ message AtomicOpResponse
   old_value 4
   value 5
   version 6
+  old_value_bytes 7
+  value_bytes 8
 message BarrierAwaitRequest
   key 1
   parties 2

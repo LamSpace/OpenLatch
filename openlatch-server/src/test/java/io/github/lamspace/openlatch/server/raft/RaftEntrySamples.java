@@ -124,6 +124,33 @@ final class RaftEntrySamples {
                 .build();
     }
 
+    /** 有值引用原子操作条目（v6，载荷数组 {@code null}=字段缺省即 null 态）。 */
+    static RaftLogEntry atomicRefSample(long sessionId, long requestId, String key,
+                                        io.github.lamspace.openlatch.protocol.AtomicOp op,
+                                        byte[] operand, byte[] expected, byte[] initial,
+                                        long expectedVersion, long opSeq, long wallMs, long seq) {
+        io.github.lamspace.openlatch.protocol.AtomicOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.AtomicOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setLockType(
+                                LockType.LOCK_TYPE_ATOMIC_REFERENCE)
+                        .setExpectedVersion(expectedVersion).setOpSeq(opSeq);
+        if (operand != null) {
+            rb.setOperandBytes(com.google.protobuf.ByteString.copyFrom(operand));
+        }
+        if (expected != null) {
+            rb.setExpectedBytes(com.google.protobuf.ByteString.copyFrom(expected));
+        }
+        if (initial != null) {
+            rb.setInitialBytes(com.google.protobuf.ByteString.copyFrom(initial));
+        }
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.ATOMIC_OP_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(AtomicOpPayload.newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId).setRequest(rb)
+                        .build().toByteString())
+                .build();
+    }
+
     /** 循环屏障到场条目（v5）。 */
     static RaftLogEntry barrierAwait(long sessionId, long requestId, String key, long parties,
                                      boolean carriesAction, long wallMs, long seq) {

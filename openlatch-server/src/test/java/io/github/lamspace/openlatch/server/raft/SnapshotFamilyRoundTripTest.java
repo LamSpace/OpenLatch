@@ -110,6 +110,10 @@ class SnapshotFamilyRoundTripTest {
                 20, 10, 1, 0, 7, 4_000, 6).toByteArray()));
         assertThat(retry.getStatus())
                 .isEqualTo(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK);
+        // 强断言四元组逐位回放（applied+old 命中槽的证明——仅 value/version
+        // 相等不足以区分"重放"与"重执行后恰合"）。
+        assertThat(retry.getAtomicApplied()).isTrue();
+        assertThat(retry.getAtomicOldValue()).isEqualTo(10);
         assertThat(retry.getAtomicVersion()).isEqualTo(2);
         assertThat(retry.getAtomicValue()).isEqualTo(20);
 
@@ -120,6 +124,149 @@ class SnapshotFamilyRoundTripTest {
                 1, 0, 0, 0, 8, 5_000, 7).toByteArray()));
         assertThat(next.getAtomicValue()).isEqualTo(21);
         assertThat(next.getAtomicVersion()).isEqualTo(3);
+    }
+
+    @Test
+    void referencePayloadNullEmptyAndSlotSurviveSnapshotInstall() throws Exception {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(71, 1_000, 1).toByteArray());
+        // 非 null 初值主张建条目 + 空字节串态 + 同槽重放占位。
+        origin.applyEntry(RaftEntrySamples.atomicRefSample(71, 101, "rn",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                new byte[] {1, 2}, null, new byte[] {9}, 0, 1, 2_000, 2).toByteArray());
+        origin.applyEntry(RaftEntrySamples.atomicRefSample(71, 102, "rn",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                new byte[0], null, null, 0, 2, 2_100, 3).toByteArray());
+        // null 值条目（无主张创建后落 null）：载荷字段全部缺省。
+        origin.applyEntry(RaftEntrySamples.atomicRefSample(71, 103, "rnull",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                null, null, null, 0, 3, 2_200, 4).toByteArray());
+        // 恰限 4KB 大载荷。
+        byte[] big = new byte[4096];
+        for (int i = 0; i < big.length; i++) {
+            big[i] = (byte) (i * 7 + 1);
+        }
+        origin.applyEntry(RaftEntrySamples.atomicRefSample(71, 104, "rbig",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                big, null, null, 0, 4, 2_300, 5).toByteArray());
+
+        SnapshotState snap = origin.snapshotState();
+        var rn = snap.getLocksList().stream()
+                .filter(l -> l.getKey().equals("rn")).findFirst().orElseThrow();
+        assertThat(rn.hasAtomicRefInitial()).isTrue();
+        assertThat(rn.getAtomicRefInitial().toByteArray()).containsExactly(9);
+        assertThat(rn.getAtomicRefValue().toByteArray()).isEmpty(); // 空串=EMPTY 非缺省
+        assertThat(rn.hasAtomicRefSlotValue()).isTrue();
+        assertThat(rn.getAtomicSlotOpSeq()).isEqualTo(2);
+        var rnull = snap.getLocksList().stream()
+                .filter(l -> l.getKey().equals("rnull")).findFirst().orElseThrow();
+        assertThat(rnull.hasAtomicRefInitial()).isFalse(); // 无主张：缺省
+        assertThat(rnull.hasAtomicRefValue()).isFalse();   // null 态：缺省（非 EMPTY）
+        assertThat(rnull.getAtomicSlotOpSeq()).isEqualTo(3);
+
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        assertThat(restored.shadow().adminEntry("rn").refValue()).isEmpty();
+        assertThat(restored.shadow().adminEntry("rn").refInitial()).containsExactly(9);
+        assertThat(restored.shadow().adminEntry("rnull").refValue()).isNull();
+        assertThat(restored.shadow().adminEntry("rbig").refValue()).containsExactly(big);
+
+        // 重启后命中槽重发：载荷应答原样回放，不双推进。
+        ApplyResult replay = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.atomicRefSample(71, 999, "rn",
+                        io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                        new byte[] {5}, null, null, 0, 2, 3_000, 6).toByteArray()));
+        assertThat(replay.getStatus())
+                .isEqualTo(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK);
+        assertThat(replay.getAtomicVersion()).isEqualTo(2);
+        assertThat(replay.getAtomicValueBytes().toByteArray()).isEmpty();
+        // 恢复后新写照常推进（null 态可被期望 null 的 CAS 建立）。
+        ApplyResult casFromNull = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.atomicRefSample(71, 998, "rnull",
+                        io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_CAS,
+                        new byte[] {8}, null, null, 0, 9, 3_100, 7).toByteArray()));
+        assertThat(casFromNull.getAtomicApplied()).isTrue();
+        // rnull 重启前版本已 1（占槽写 null），恢复后新写推进至 2。
+        assertThat(casFromNull.getAtomicVersion()).isEqualTo(2);
+    }
+
+    @Test
+    void legacySnapshotWithoutReferenceFieldsInstallsAndTailRefWorks() throws Exception {
+        // 旧版本（v4/v5）快照零 ref 字段——新码加载不坏（未知字段容忍的反向
+        // 面：新字段缺省），且恢复后引用形态写入照常可用。
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(81, 1_000, 1).toByteArray());
+        origin.applyEntry(RaftEntrySamples.atomic(81, 101, "at",
+                io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG,
+                5, 0, 0, 0, 1, 2_000, 2).toByteArray());
+        SnapshotState snap = origin.snapshotState();
+        assertThat(snap.getLocksList().get(0).hasAtomicRefValue()).isFalse();
+
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        ApplyResult ref = ApplyResult.parseFrom(restored.applyEntry(
+                RaftEntrySamples.atomicRefSample(81, 102, "r",
+                        io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                        new byte[] {1}, null, null, 0, 1, 3_000, 3).toByteArray()));
+        assertThat(ref.getStatus())
+                .isEqualTo(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK);
+        assertThat(ref.getAtomicValueBytes().toByteArray()).containsExactly(1);
+    }
+
+    @Test
+    void payloadBoundedSnapshotSizeRegression() {
+        // 载荷快照尺寸治理回归（二档基建守门用例）：N 个恰限引用 key、
+        // 每 key 多轮版本推进后，快照字节 ≤ N×(2×4096 + 常数)×安全系数，
+        // 且随推进轮次零增长（版本历史不入快照）、安装与追赶回放正常。
+        final int keys = 64;
+        final int rounds = 8;
+        final int maxBytes = 4096;
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(91, 1_000, 1).toByteArray());
+        for (int round = 0; round < rounds; round++) {
+            for (int k = 0; k < keys; k++) {
+                byte[] payload = new byte[maxBytes];
+                payload[0] = (byte) k;
+                payload[1] = (byte) round;
+                origin.applyEntry(RaftEntrySamples.atomicRefSample(91, 1000 + round * keys + k,
+                        "rk-" + k, io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                        payload, null, null, 0, round * keys + k + 1,
+                        2_000 + round * keys + k, 10 + round * keys + k).toByteArray());
+            }
+        }
+        assertThat(origin.applyFailures()).isZero();
+        byte[] snapBytes = origin.snapshotState().toByteArray();
+        // 上界：每 key 至初值 0 份 + 当前值 1×4KB + 槽双份 2×4KB（最坏 3 份），
+        // 常数 512B 容纳 key/序号/版本/家族字段；再乘 1.5 安全系数。
+        long bound = (long) keys * (3L * maxBytes + 512) * 3 / 2;
+        assertThat((long) snapBytes.length).isLessThanOrEqualTo(bound);
+
+        // 轮次零增长的对照：单轮终态等价载荷分布下，多轮推进不放大快照
+        // （以两轮重建对照——历史版本不入快照）。
+        LockStateMachineCore lastRoundOnly = new LockStateMachineCore(new CoreConfig());
+        lastRoundOnly.applyEntry(RaftEntrySamples.sessionOpen(91, 1_000, 1).toByteArray());
+        for (int k = 0; k < keys; k++) {
+            byte[] payload = new byte[maxBytes];
+            payload[0] = (byte) k;
+            payload[1] = (byte) (rounds - 1);
+            lastRoundOnly.applyEntry(RaftEntrySamples.atomicRefSample(91, 2000 + k,
+                    "rk-" + k, io.github.lamspace.openlatch.protocol.AtomicOp.ATOMIC_SET,
+                    payload, null, null, 0, rounds * keys + k + 1,
+                    9_000 + k, 10 + rounds * keys + k).toByteArray());
+        }
+        byte[] singleBytes = lastRoundOnly.snapshotState().toByteArray();
+        // 单轮与八轮的快照仅差版本号尺寸，量级一致（不随轮次累积）。
+        assertThat(singleBytes.length).isBetween(
+                snapBytes.length / 2, snapBytes.length * 2);
+
+        // 安装与追赶：新副本经快照+尾部日志回放到终态。
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(origin.snapshotState());
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        assertThat(restored.shadow().adminEntry("rk-3").refValue()).hasSize(maxBytes);
     }
 
     @Test

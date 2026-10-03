@@ -121,6 +121,40 @@ hits.accumulateAndGet(5, Integer::sum);                        // 客户端带�
 6. `newAtomic*(key, initial)` 的初值是**断言**而非赋值：既有条目初值不符时，
    该句柄首个操作抛 `OpenLatchException`（与屏障 total 定型同规则）。
 
+## 有值引用（OAtomicReference，v6）
+
+ATOMIC 家族的载荷形态：一段不透明字节（默认上限 4KB）附版本戳，走 get/set/版本 CAS。
+
+```java
+OAtomicReference cfg = client.newAtomicReference("config:switch");   // 初值 null 态
+cfg.set("on".getBytes(StandardCharsets.UTF_8));                       // 落字节载荷
+cfg.setString("v2");                                                  // String 便利族（UTF-8）
+
+// 跨进程"配置代次切换"（ABA-free）：
+OAtomicReference.Stamped cur = cfg.getStamped();
+boolean ok = cfg.compareAndSetStamped(cur.value(), cur.version(), s("v3"));
+
+// null 与空字节串是两个可区分的值：
+OAtomicReference flag = client.newAtomicReference("boot:ready");
+if (flag.compareAndSet(null, s("init"))) { doInit(); }               // 期望 null 建立空态
+```
+
+同一 key 的**形态由首建请求定型**（long/integer/boolean/reference 四选一，同族互斥互拒）——
+标量键上引用操作、引用键上标量操作均以 `INVALID_REQUEST` 拒绝、零扰动。
+
+语义边界（务必知晓，详见 [01 核心概念 §7.1](01-concepts.md)）：
+
+1. 载荷**不透明**：服务端只存/比字节，永不反序列化——对象编码归应用层；
+2. **超限零生效**：写超过服务端 `max-value-bytes`（默认 4KB）的载荷抛
+   `OpenLatchException`（拒绝语义），SDK 不截断、不重试，条目值与版本逐项不变；
+   钳制下调不追溯存量（既有更大载荷照常可读）；
+3. 与标量原子同规则：每操作一次往返、值不绑定会话、超时不确定窗与同序号重发、
+   ABA 仅 `*Stamped` 消除、条目与载荷常驻不回收；
+4. **无算术面**：不提供 `increment`/`accumulate`（JDK `AtomicReference` 亦无对应物），
+   也没有 `weakCompareAndSet`/`compareAndExchange` 族；
+5. 需 **v6 握手**：对握版本上限低于 6 的服务端，引用形态请求以显式
+   `OpenLatchException`（`INVALID_REQUEST`）失败，不重发、不降级。
+
 ## 循环屏障（OBarrier，v5）
 
 ```java

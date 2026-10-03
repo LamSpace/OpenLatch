@@ -82,15 +82,17 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      * @param permitsTotal Semaphore 条目的许可总量（非 Semaphore 恒 0）
      * @param latchTotal  Latch 条目的定型初始计数（非 Latch 恒 0）
      * @param latchCount  Latch 条目的当前剩余计数（非 Latch 恒 0）
-     * @param atomic      ATOMIC 条目的状态组（形态合法值、版本戳与去重槽；
+     * @param atomic      ATOMIC 标量条目的状态组（形态合法值、版本戳与去重槽；
      *                    非 ATOMIC 恒 {@code null}）
      * @param barrier     BARRIER 条目的状态组（parties/世代/到场账簿/挂账/
      *                    了结记录；非 BARRIER 恒 {@code null}）
+     * @param atomicRef   ATOMIC 有值引用条目的状态组（初值/载荷/版本戳与
+     *                    去重槽；非该形态恒 {@code null}）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
-                        AtomicState atomic, BarrierState barrier) {
+                        AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef) {
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -104,7 +106,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          */
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
-            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0, null, null);
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    0, 0, 0, null, null, null);
         }
 
         /**
@@ -124,7 +127,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 long expiresAtMs, List<Holder> holders, int permitsTotal,
                 long latchTotal, long latchCount) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    permitsTotal, latchTotal, latchCount, null, null);
+                    permitsTotal, latchTotal, latchCount, null, null, null);
         }
 
         /**
@@ -133,7 +136,9 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
          * 计数须在 {@code [0, total]} 内且 {@code total >= 1}；ATOMIC 条目
          * 无租约与持有者、MUST 携带原子状态组且初值/当前值/槽应答属形态
-         * 值域（integer 截断域、boolean 限 {0,1}）；BARRIER 条目无租约与
+         * 值域（integer 截断域、boolean 限 {0,1}）；ATOMIC_REFERENCE 条目
+         * 无租约与持有者、MUST 携带引用状态组（载荷可为 null/零长度两态，
+         * 尺寸不校验——钳制属接入层）；BARRIER 条目无租约与
          * 持有者、MUST 携带屏障状态组且 parties/generation 为正、了结编码
          * 在值域内。
          *
@@ -163,6 +168,28 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
                     || lockType == LockType.ATOMIC_BOOLEAN;
+            boolean atomicRefKind = lockType == LockType.ATOMIC_REFERENCE;
+            if (atomicRefKind) {
+                if (atomicRef == null) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry requires state group: key=" + key);
+                }
+                if (atomic != null) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must not carry scalar state: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must have no holders or lease: key=" + key);
+                }
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must not carry other-family counters: key=" + key);
+                }
+            } else if (atomicRef != null) {
+                throw new IllegalArgumentException(
+                        "non-reference entry must not carry reference state: key=" + key);
+            }
             if (atomicKind) {
                 if (atomic == null) {
                     throw new IllegalArgumentException("atomic entry requires state group: key=" + key);
@@ -190,12 +217,14 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 }
             } else if (lockType == LockType.BARRIER) {
                 // 屏障自洽性已在家族首检完成；此处只拦他族字段携带。
-                if (atomic != null || permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
                     throw new IllegalArgumentException(
                             "barrier entry must not carry other-family state: key=" + key);
                 }
+            } else if (atomicRefKind) {
+                // 引用条目自洽性已在家族首检完成（载荷两态原样直写，不校验）。
             } else {
-                if (atomic != null) {
+                if (atomic != null || atomicRef != null) {
                     throw new IllegalArgumentException(
                             "non-atomic entry must not carry atomic state: key=" + key);
                 }
@@ -225,7 +254,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
                     && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
-                    && !atomicKind && holders.size() != 1) {
+                    && !atomicKind && !atomicRefKind && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -271,6 +300,50 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             if (slotSession != 0 && slotOpSeq < 1) {
                 throw new IllegalArgumentException("occupied dedup slot must carry seq >= 1");
             }
+        }
+    }
+
+    /**
+     * ATOMIC 有值引用条目的快照状态组（数据载体）：定型初值主张、当前
+     * 载荷、版本戳与去重槽（最近被处理写操作的会话/序号与载荷应答
+     * 四元组；空槽以 {@code slotSession = 0} 表达）。载荷的 null 与零
+     * 长度两态按原样保留（重建直写通道，不做解释）；尺寸不校验——
+     * 载荷钳制属接入层，快照/日志内容视为已钳制。构造时对载荷数组
+     * 做防御性复制（维持本类型"深不可变"承诺）。
+     *
+     * @param initial      定型初值主张（{@code null}=无主张创建）
+     * @param value        当前载荷（{@code null}=null 态、零长度=空字节串）
+     * @param version      版本戳（{@code >= 0}）
+     * @param slotSession  去重槽会话（0=空槽）
+     * @param slotOpSeq    去重槽序号（空槽恒 0；非空槽 {@code >= 1}）
+     * @param slotApplied  槽应答 applied
+     * @param slotOldValue 槽应答 oldValue 载荷（可为 null；空槽为 null）
+     * @param slotValue    槽应答 value 载荷（可为 null；空槽为 null）
+     * @param slotVersion  槽应答 version
+     */
+    public record AtomicRefState(byte[] initial, byte[] value, long version, long slotSession,
+                                 long slotOpSeq, boolean slotApplied, byte[] slotOldValue,
+                                 byte[] slotValue, long slotVersion) {
+
+        /**
+         * 构造并做载荷数组防御性复制与版本/槽形态自洽校验。
+         *
+         * @throws IllegalArgumentException 版本为负、空/非空槽与序号矛盾
+         */
+        public AtomicRefState {
+            if (version < 0) {
+                throw new IllegalArgumentException("atomic version must be >= 0: " + version);
+            }
+            if (slotSession == 0 && slotOpSeq != 0) {
+                throw new IllegalArgumentException("empty dedup slot must carry seq 0");
+            }
+            if (slotSession != 0 && slotOpSeq < 1) {
+                throw new IllegalArgumentException("occupied dedup slot must carry seq >= 1");
+            }
+            initial = initial == null ? null : initial.clone();
+            value = value == null ? null : value.clone();
+            slotOldValue = slotOldValue == null ? null : slotOldValue.clone();
+            slotValue = slotValue == null ? null : slotValue.clone();
         }
     }
 

@@ -129,6 +129,46 @@ Semantic boundaries (details in [01 Concepts §7](01-concepts.md)):
    a mismatching claim on an existing entry makes the handle's first operation throw
    `OpenLatchException` (same rule as the latch total).
 
+## Atomic reference (OAtomicReference, v6)
+
+The payload form of the ATOMIC family: one opaque byte payload (capped at 4KB by default)
+plus a version stamp, driven through get/set/stamped-CAS.
+
+```java
+OAtomicReference cfg = client.newAtomicReference("config:switch"); // initial null state
+cfg.set("on".getBytes(StandardCharsets.UTF_8));                    // store a byte payload
+cfg.setString("v2");                                               // String convenience (UTF-8)
+
+// cross-process "config generation flip" (ABA-free):
+OAtomicReference.Stamped cur = cfg.getStamped();
+boolean ok = cfg.compareAndSetStamped(cur.value(), cur.version(), s("v3"));
+
+// null and the empty byte string are two distinguishable values:
+OAtomicReference flag = client.newAtomicReference("boot:ready");
+if (flag.compareAndSet(null, s("init"))) { doInit(); }             // expect-null establishes the state
+```
+
+The form of a key is **settled by the first create request** (one of long/integer/boolean/
+reference; mutually exclusive within the family) — a reference operation on a scalar key or
+a scalar operation on a reference key is rejected with `INVALID_REQUEST`, zero perturbation.
+
+Semantic boundaries (know these; details in [01 core concepts §7.1](01-concepts.md)):
+
+1. payloads are **opaque**: the server stores and compares bytes and never deserializes —
+   object encoding is the application's responsibility;
+2. **overflow has zero effect**: a payload above the server's `max-value-bytes` (default
+   4KB) throws `OpenLatchException` (rejection semantics); the SDK neither truncates nor
+   retries, and the entry's value and version stay untouched; lowering the cap never
+   retro-affects stored values (existing larger payloads remain readable);
+3. same rules as the scalar atomics: one round-trip per operation, value unbound from the
+   session, the timeout indeterminate window with same-sequence retry, ABA eliminated only
+   by `*Stamped`, entry and payload never reclaimed;
+4. **no arithmetic**: no `increment`/`accumulate`, and no `weakCompareAndSet` /
+   `compareAndExchange` family (the JDK `AtomicReference` has no arithmetic either);
+5. requires the **v6 handshake**: against a server whose capped protocol version is below
+   6, a reference-form request fails with an explicit `OpenLatchException`
+   (`INVALID_REQUEST`) — no retry, no silent downgrade.
+
 ## Cyclic barrier (OBarrier, v5)
 
 ```java

@@ -179,4 +179,118 @@ class ClientAtomicIT {
         assertThat(b.getVersion()).isEqualTo(1);
         assertThat(b.incrementAndGet()).isEqualTo(43); // 生者照常续写
     }
+
+    // ===================== v6 有值引用 =====================
+
+    @Test
+    void referencePresenceFormsRoundTripAndDistinctness() throws Exception {
+        OAtomicReference r = clientA.newAtomicReference("ref-rt");
+        assertThat(r.get()).isNull();                 // 缺 key 读数 null 且不建条目
+        assertThat(r.getVersion()).isZero();
+        r.set(new byte[] {1, 2, 3});
+        assertThat(r.get()).containsExactly(1, 2, 3);
+        r.setString("héllo");                         // String 形态按 UTF-8 折叠
+        assertThat(r.getAsString()).isEqualTo("héllo");
+        assertThat(r.get()).isEqualTo("héllo".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        // null 与空字节串两态可区分。
+        r.set((byte[]) null);
+        assertThat(r.get()).isNull();
+        assertThat(r.compareAndSetString("x", "y")).isFalse();  // 当前为 null 态
+        assertThat(r.compareAndSet((byte[]) null, new byte[0])).isTrue();
+        assertThat(r.get()).isEmpty();
+        assertThat(r.compareAndSet((byte[]) null, new byte[] {9})).isFalse(); // 空串 ≠ null
+        assertThat(r.getAndSetAsString("done")).isEqualTo("");
+        assertThat(r.getAsString()).isEqualTo("done");
+        // stamped 落 null 收尾。
+        OAtomicReference.Stamped s = r.getStamped();
+        assertThat(r.compareAndSetStampedString("done", s.version(), null)).isTrue();
+        assertThat(r.get()).isNull();
+        assertThat(r.getVersion()).isEqualTo(s.version() + 1);
+    }
+
+    @Test
+    void referenceOverLimitRejectedWithZeroEffectAndNoRetry() throws Exception {
+        OAtomicReference r = clientA.newAtomicReference("ref-big");
+        r.set(new byte[] {1});
+        long v0 = r.getVersion();
+        // 5KB 超默认钳制（4096）：显式拒绝、条目零扰动、无重发不截断。
+        assertThatThrownBy(() -> r.set(new byte[5_000]))
+                .isInstanceOf(OpenLatchException.class);
+        assertThat(r.get()).containsExactly(1);
+        assertThat(r.getVersion()).isEqualTo(v0);
+    }
+
+    @Test
+    void referenceInitialClaimConflictOnForeignBaseline() throws Exception {
+        OAtomicReference a = clientA.newAtomicReference("ref-claim",
+                "init".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        // 首建旧值基准=主张值，落新值正常。
+        assertThat(a.getAndSetAsString("first")).isEqualTo("init");
+        // 异主张句柄对既有条目：每次操作初值断言冲突，显式失败。
+        OAtomicReference b = clientB.newAtomicReference("ref-claim",
+                "other".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThatThrownBy(b::get).isInstanceOf(OpenLatchException.class);
+        // 无主张句柄照常。
+        OAtomicReference c = clientB.newAtomicReference("ref-claim");
+        assertThat(c.getAsString()).isEqualTo("first");
+    }
+
+    @Test
+    void referenceConcurrentStampedCasConvergesWithoutGaps() throws Exception {
+        OAtomicReference a = clientA.newAtomicReference("ref-matrix");
+        OAtomicReference b = clientB.newAtomicReference("ref-matrix");
+        final int perClient = 60;
+        AtomicInteger wins = new AtomicInteger();
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            Runnable racer0 = () -> raceStampedCas(a, perClient, "c0-", wins, start, done);
+            Runnable racer1 = () -> raceStampedCas(b, perClient, "c1-", wins, start, done);
+            pool.submit(racer0);
+            pool.submit(racer1);
+            start.countDown();
+            assertThat(done.await(60, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        }
+        long finalVersion = a.getVersion();
+        // Σ成功 CAS == Δversion（版本稠密推进、无间隙由服务端恰 +1 承诺）。
+        assertThat(finalVersion).isEqualTo(wins.get());
+        // 终值属候选集（双端前缀可辨）。
+        String terminal = a.getAsString();
+        assertThat(terminal).matches("c[01]-\\d{1,2}");
+    }
+
+    /** 单端 stamped CAS 竞速：读 (value,version) → 期望双符才落，成功计数。 */
+    private static void raceStampedCas(OAtomicReference r, int rounds, String prefix,
+            AtomicInteger wins, CountDownLatch start, CountDownLatch done) {
+        try {
+            start.await();
+            for (int i = 0; i < rounds; i++) {
+                try {
+                    OAtomicReference.Stamped cur = r.getStamped();
+                    if (r.compareAndSetStampedString(cur.valueAsString(), cur.version(),
+                            prefix + i)) {
+                        wins.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            done.countDown();
+        }
+    }
+
+    @Test
+    void referenceSessionDeathLeavesPayloadUntouched() throws Exception {
+        OAtomicReference a = clientA.newAtomicReference("ref-death");
+        a.set("persist".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        clientA.shutdown();
+        clientA = null;
+        OAtomicReference b = clientB.newAtomicReference("ref-death");
+        assertThat(b.getAsString()).isEqualTo("persist"); // 载荷不随创建者死亡回滚
+        assertThat(b.getVersion()).isEqualTo(1);
+    }
 }

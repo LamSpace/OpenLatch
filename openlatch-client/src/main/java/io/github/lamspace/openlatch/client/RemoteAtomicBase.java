@@ -219,6 +219,156 @@ abstract class RemoteAtomicBase {
     }
 
     /**
+     * 有值引用应答四元组（不可变读数；载荷可为 null）。
+     *
+     * @param applied  是否落值（CAS 家族成败；GET 恒 false）
+     * @param oldValue 操作前载荷（可为 {@code null}=null 态）
+     * @param value    操作后（或当前）载荷（可为 {@code null}）
+     * @param version  版本戳
+     */
+    record RefQuad(boolean applied, byte[] oldValue, byte[] value, long version) { }
+
+    /**
+     * 执行一次引用读操作（GET）：无锁、无序号、幂等重试——重发裁决与
+     * {@link #execute} 同表（共用瞬态判定与会话轮询）。
+     *
+     * @param claim 初值主张载荷（{@code null}=不主张；随请求携带作一致性断言）
+     * @return 载荷应答四元组（applied=false，old==value==当前载荷）
+     * @throws InterruptedException      本地等待被中断
+     * @throws OpenLatchException        不可重试失败（含超限/低版本服务的拒绝）
+     * @throws OpenLatchTimeoutException 总界限耗尽
+     */
+    final RefQuad readRef(byte[] claim) throws InterruptedException {
+        return executeRef(AtomicOp.ATOMIC_GET, null, null, 0, false, claim);
+    }
+
+    /**
+     * 执行一次引用写操作（在途互斥 + 同序号重发，车道与 {@link #write}
+     * 完全一致——复用同一监视器、序号分配与放弃语义）。
+     *
+     * @param op              操作类型（GET 之外的写族）
+     * @param operand         落值载荷（可为 {@code null}=落 null 态）
+     * @param expected        CAS/CAS_STAMPED 期望载荷（可为 {@code null}）
+     * @param expectedVersion 版本断言（0 不主张）
+     * @param claim           初值主张载荷（{@code null}=不主张）
+     * @return 载荷应答四元组
+     * @throws InterruptedException      本地等待被中断
+     * @throws OpenLatchException        不可重试失败（含会话切换放弃）
+     * @throws OpenLatchTimeoutException 总界限耗尽（效果不确定）
+     */
+    final RefQuad writeRef(AtomicOp op, byte[] operand, byte[] expected,
+            long expectedVersion, byte[] claim) throws InterruptedException {
+        Object monitor = client.atomicWriteMonitor(key);
+        synchronized (monitor) {
+            return executeRef(op, operand, expected, expectedVersion, true, claim);
+        }
+    }
+
+    /**
+     * 引用形态请求执行循环（{@link #execute} 的载荷通道对偶）：信封以
+     * {@code optional bytes} 显式 presence 表达操作数三态（缺省=null 态、
+     * 零长度=空串），其余序号分配、会话切换放弃、瞬态重发分类逐项同表。
+     * 拒绝类应答（含超限 {@code INVALID_REQUEST} 与低版本服务的协议拒绝）
+     * 不重发——以 {@link OpenLatchException} 显式表达。
+     *
+     * @param op              操作类型
+     * @param operand         落值载荷
+     * @param expected        期望载荷
+     * @param expectedVersion 版本断言
+     * @param writeOp         是否写路径（决定序号与放弃语义）
+     * @param claim           初值主张载荷
+     * @return 载荷应答四元组
+     * @throws InterruptedException 中断
+     */
+    private RefQuad executeRef(AtomicOp op, byte[] operand, byte[] expected,
+            long expectedVersion, boolean writeOp, byte[] claim) throws InterruptedException {
+        long opSeq = writeOp ? client.nextAtomicOpSeq() : 0L;
+        long budgetMs = client.config().requestTimeout().toMillis();
+        long deadline = System.currentTimeMillis() + budgetMs;
+        Long startSession = null;
+        Envelope env = null;
+        long envSid = -1L;
+        while (true) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                throw new OpenLatchTimeoutException("atomic reference "
+                        + (writeOp ? "write" : "read") + " on '" + key
+                        + "' exceeded request timeout; the write may have been"
+                        + " applied — verify with getStamped()");
+            }
+            OpenLatchClient.LatchRoute route = client.latchRoute();
+            if (route == null) {
+                Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                continue;
+            }
+            if (startSession == null) {
+                startSession = route.session().sessionId();
+            }
+            if (env == null || envSid != route.session().sessionId()) {
+                long rid = route.session().nextRequestId();
+                AtomicOpRequest.Builder rb = AtomicOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setLockType(wireKind)
+                        .setExpectedVersion(expectedVersion).setOpSeq(opSeq);
+                // 显式 presence 三态：null 不携带（=null 态）、空数组携带 EMPTY。
+                if (operand != null) {
+                    rb.setOperandBytes(com.google.protobuf.ByteString.copyFrom(operand));
+                }
+                if (expected != null) {
+                    rb.setExpectedBytes(com.google.protobuf.ByteString.copyFrom(expected));
+                }
+                if (claim != null) {
+                    rb.setInitialBytes(com.google.protobuf.ByteString.copyFrom(claim));
+                }
+                env = Envelope.newBuilder()
+                        .setType(MessageType.ATOMIC_OP)
+                        .setRequestId(rid)
+                        .setAtomicOpRequest(rb)
+                        .build();
+                envSid = route.session().sessionId();
+            }
+            if (writeOp && route.session().sessionId() != startSession) {
+                throw new OpenLatchException(StatusCode.SESSION_EXPIRED,
+                        "session switched mid-flight for atomic reference write on '" + key
+                                + "' — dedup slot no longer applies; verify effect with getStamped()");
+            }
+            AtomicOpResponse resp;
+            try {
+                Envelope answer = route.mux().sendWithId(env,
+                        Math.min(remaining, budgetMs + SLACK_MS))
+                        .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
+                resp = answer.getAtomicOpResponse();
+            } catch (ExecutionException e) {
+                Throwable cause = unwrap(e);
+                if (isTransientRetryable(cause)) {
+                    continue; // 同信封（同 op_seq）重发
+                }
+                if (cause instanceof InterruptedException ie) {
+                    throw ie;
+                }
+                if (cause instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new OpenLatchException("atomic reference op on '" + key + "' failed", cause);
+            } catch (TimeoutException e) {
+                continue; // 读界兜底：同序号重发，服务端去重槽裁决
+            }
+            StatusCode st = resp.getStatus();
+            if (st == StatusCode.OK) {
+                return new RefQuad(resp.getApplied(),
+                        resp.hasOldValueBytes() ? resp.getOldValueBytes().toByteArray() : null,
+                        resp.hasValueBytes() ? resp.getValueBytes().toByteArray() : null,
+                        resp.getVersion());
+            }
+            if (st == StatusCode.NOT_LEADER || st == StatusCode.OVERLOADED) {
+                continue;
+            }
+            throw new OpenLatchException(st, "atomic reference op on '" + key
+                    + "' rejected: " + st
+                    + (writeOp ? "; effect indeterminate — verify with getStamped()" : ""));
+        }
+    }
+
+    /**
      * 瞬态可重发判定：传输不可用（含 Leader 切换窗口的改道失败）与
      * 单次请求超时——两者均不改变服务端裁决结果，同序号重发安全。
      *

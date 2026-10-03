@@ -45,4 +45,26 @@ class RemoteAtomicFactoryTest {
         assertThatThrownBy(() -> client.newAtomicInteger("k", -2))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void referenceFactoriesReturnHandleAndKey() {
+        OAtomicReference plain = client.newAtomicReference("ref");
+        OAtomicReference claim = client.newAtomicReference("ref",
+                "init".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        OAtomicReference strClaim = client.newAtomicReference("ref2", "init");
+        assertThat(plain).isInstanceOf(RemoteAtomicReference.class);
+        assertThat(claim.key()).isEqualTo("ref");
+        assertThat(strClaim.key()).isEqualTo("ref2");
+        // null 主张等价无主张形态（不抛、句柄照常构造）。
+        assertThat(client.newAtomicReference("ref3", (byte[]) null)).isNotNull();
+        assertThat(client.newAtomicReference("ref4", (String) null)).isNotNull();
+    }
+
+    @Test
+    void referenceNullKeyRejected() {
+        assertThatThrownBy(() -> client.newAtomicReference(null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> client.newAtomicReference(null, "x"))
+                .isInstanceOf(NullPointerException.class);
+    }
 }

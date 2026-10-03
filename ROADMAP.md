@@ -2,12 +2,13 @@
 
 本表是主动演进方向与次序的决策清单,与 `WATCHLIST.md`(被动观察项)配对。
 裁决、状态、次序的单一事实源在本文件;原语的契约细节永远沉淀在各自的提案与规格里。
-最后更新:2026-09-20。
+最后更新:2026-10-04。
 
 ## 决策记录
 
 - **2026-09-16 定位裁决**:采纳"B——允许小载荷协调数据结构"(每 key 限额、默认 4KB、服务端钳制)为能力边界;落地次序按"A——纯协调面先行"。来源:JDK 并发原语扩展的可行性分析(五轴:定位契合/机制复用/协议成本/语义保真/竞品先例)。
-- 库产物面**不得**启用 `--enable-preview`(发布未定,见 WATCHLIST W5);预览 API 转正前不入任何对外契约。
+- **2026-10-01 发布裁决**:1.0.0 发布并打 tag `v1.0.0`;Maven Central 发布范围收窄至客户端 SDK 链(protocol/client/starter),core/server/console 退出中央仓库、服务端与控制台改经 GitHub Releases 可执行 jar 分发。WATCHLIST W5 发布挂账就此清账。
+- 库产物面**不得**启用 `--enable-preview`(W5 发布挂账已于 2026-10-01 随 1.0.0 发布清账,禁令延续至发布后仍适用);预览 API 转正前不入任何对外契约。
 - 每个新 wire 类型随协议版本门引入(先例:v3 携带 FAIR/SEMAPHORE/LATCH)。
 
 ## 状态图例
@@ -23,11 +24,11 @@
 
 ## 二档 — 小载荷(前提:载荷通道;由本档首项开辟)
 
-**载荷通道基建项**(随二档首个原语一并落地):proto 载荷消息对、`maxValueBytes` 全局钳制配置(默认 4KB)、快照/压缩尺寸治理参数、控制台载荷展示(截断)。
+**载荷通道基建项**(随二档首个原语一并落地,已随 `add-oatomic-reference` 落地(归档见 openspec/changes/archive/2026-10-04-add-oatomic-reference/)):proto 载荷消息对、`maxValueBytes` 全局钳制配置(默认 4KB)、快照/压缩尺寸治理参数、控制台载荷展示(截断)。
 
 | 候选原语 | JDK 对应 | 核心语义 | 关键验收点 | 状态 |
 |---|---|---|---|---|
-| `OAtomicReference` | `AtomicReference` | 引标量形态之上的有值引用:引用值 get/set/版本 CAS,≤`maxValueBytes` | 超限 `INVALID_REQUEST`;快照膨胀回归测 | 未启动 |
+| `OAtomicReference` | `AtomicReference` | 引标量形态之上的有值引用:引用值 get/set/版本 CAS,≤`maxValueBytes` | 超限 `INVALID_REQUEST`;快照膨胀回归测 | 已落地([提案归档](openspec/changes/archive/2026-10-04-add-oatomic-reference/)) |
 | `OBlockingQueue` | `BlockingQueue` + `DelayQueue` 变体 | 有界队列 `put`/`take`/`offer`/`poll`/`drainTo`;延时形态 = 元素带到期时刻(服务端定时器基建先例:租约到期) | FIFO 公平套件同款;元素生命周期绑定 key 而非会话——持有者死亡不吞元素,需契约声明 | 未启动 |
 | `OTopic` | `Flow.Publisher`/`SubmissionPublisher` | 广播发布/订阅,协调级消息限额;**弱背压为显式契约**(慢消费者缓冲满的丢弃/断连策略在提案中裁决) | 多订阅者 fan-out E2E;取消订阅回收服务端订阅条目(防泄漏) | 未启动 |
 

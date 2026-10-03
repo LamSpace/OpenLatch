@@ -77,5 +77,15 @@ public enum LockType {
      * {@code barrierActionDone}）进入 {@code BarrierEntry}，不经获取/
      * 释放/续租命令通道。
      */
-    BARRIER
+    BARRIER,
+    /**
+     * 有值引用形态（枚举序与协议 {@code LOCK_TYPE_ATOMIC_REFERENCE} 数值
+     * 对齐）：非锁家族类型，仅作 key 定型与操作判别——引用操作经门面
+     * 独立入口（{@code atomicRefOp}，命令为 {@code AtomicRefOpCommand}）
+     * 进入 {@code AtomicRefEntry}，不经获取/释放/续租命令通道；与三标量
+     * 形态同族互斥（同 key 跨形态以类型不匹配拒绝）。值域为不透明字节
+     * （null 与空字节串为两个可区分的合法值），无 ADD 面；载荷尺寸钳制
+     * 属接入层，条目侧不复核。ACQUIRE 携带本类型属请求形状错误，入口即拒。
+     */
+    ATOMIC_REFERENCE
 }

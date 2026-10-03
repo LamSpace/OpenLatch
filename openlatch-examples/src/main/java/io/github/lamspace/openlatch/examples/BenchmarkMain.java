@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.lamspace.openlatch.client.OAtomicLong;
+import io.github.lamspace.openlatch.client.OAtomicReference;
 import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
@@ -115,6 +116,30 @@ public final class BenchmarkMain {
             for (int level : ATOMIC_CAS_LEVELS) {
                 runAtomicCasContended(client, level, WARMUP_MS);
             }
+            // 引用相（v6）：小载荷/恰限 4KB 写、读 RTT、版本 CAS 争用——热身。
+            byte[] refSmall = "bench-ref-16B-payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] refExact = new byte[4096];
+            for (int i = 0; i < refExact.length; i++) {
+                refExact[i] = (byte) (i * 7 + 1);
+            }
+            runRefSet(client, refSmall, WARMUP_MS);
+            runRefSet(client, refExact, WARMUP_MS);
+            runRefGet(client, WARMUP_MS);
+            for (int level : ATOMIC_CAS_LEVELS) {
+                runRefCasContended(client, level, WARMUP_MS);
+            }
+            List<long[]> refSmallThroughput = new ArrayList<>();
+            List<double[]> refSmallLatencies = new ArrayList<>();
+            List<long[]> refBigThroughput = new ArrayList<>();
+            List<double[]> refBigLatencies = new ArrayList<>();
+            List<long[]> refGetThroughput = new ArrayList<>();
+            List<double[]> refGetLatencies = new ArrayList<>();
+            List<List<long[]>> refCasThroughput = new ArrayList<>();
+            List<List<double[]>> refCasLatencies = new ArrayList<>();
+            for (int level : ATOMIC_CAS_LEVELS) {
+                refCasThroughput.add(new ArrayList<>());
+                refCasLatencies.add(new ArrayList<>());
+            }
             List<long[]> addThroughput = new ArrayList<>();
             List<double[]> addLatencies = new ArrayList<>();
             List<long[]> getThroughput = new ArrayList<>();
@@ -161,11 +186,28 @@ public final class BenchmarkMain {
                         "bench:barrier:act:" + b, SAMPLE_MS);
                 actionThroughput.add(new long[] {ba.opsPerSec});
                 actionLatencies.add(ba.latencies);
+                // 引用相采样：小/恰限写、读、版本 CAS 争用。
+                Result rs = runRefSet(client, refSmall, SAMPLE_MS);
+                refSmallThroughput.add(new long[] {rs.opsPerSec});
+                refSmallLatencies.add(rs.latencies);
+                Result rb = runRefSet(client, refExact, SAMPLE_MS);
+                refBigThroughput.add(new long[] {rb.opsPerSec});
+                refBigLatencies.add(rb.latencies);
+                Result rg = runRefGet(client, SAMPLE_MS);
+                refGetThroughput.add(new long[] {rg.opsPerSec});
+                refGetLatencies.add(rg.latencies);
+                for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+                    Result rr = runRefCasContended(client, ATOMIC_CAS_LEVELS[i], SAMPLE_MS);
+                    refCasThroughput.get(i).add(new long[] {rr.opsPerSec});
+                    refCasLatencies.get(i).add(rr.latencies);
+                }
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
                     getThroughput, getLatencies, casThroughput, casLatencies,
-                    barrierThroughput, barrierLatencies, actionThroughput, actionLatencies);
+                    barrierThroughput, barrierLatencies, actionThroughput, actionLatencies,
+                    refSmallThroughput, refSmallLatencies, refBigThroughput, refBigLatencies,
+                    refGetThroughput, refGetLatencies, refCasThroughput, refCasLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -396,6 +438,139 @@ public final class BenchmarkMain {
                 f.get(1, TimeUnit.SECONDS);
             } catch (Exception e) {
                 throw new IllegalStateException("atomic bench worker failed", e);
+            }
+        }
+        double[] merged = mergeSorted(reservoirs);
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis), merged);
+    }
+
+    /**
+     * 有值引用写往返（v6）：单线程 {@code getAndSet} 固定载荷循环——度量
+     * 载荷写入通道的提交+应答全成本；载荷长度入 key（16B 小载荷与 4KB
+     * 恰限对照，写同一载荷内容，条目常驻不回收由 key 隔离批次）。
+     *
+     * @param client  客户端
+     * @param payload 固定载荷字节
+     * @param millis  采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runRefSet(OpenLatchClient client, byte[] payload, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:set:" + payload.length);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ref.getAndSet(payload);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 有值引用读往返：单线程 {@code get()} 循环（经 Raft 的线性一致读数，
+     * 与 {@link #runAtomicGet} 同判例）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runRefGet(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:get");
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ref.get();
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 有值引用版本 CAS 争用：N 线程对同 key（64B 载荷）循环
+     * "读 stamped → 值+版本双符 CAS 递增计数"，直至落值成功——延迟列为
+     * 单次成功的完整耗时（含重试轮次），吞吐为跨线程合并的成功计数，
+     * 度量载荷通道上的争用放大（对照标量 CAS 相）。
+     *
+     * @param client  客户端
+     * @param threads 并发线程数
+     * @param millis  采样时长
+     * @return 结果（合并样本）
+     * @throws InterruptedException 等待被打断
+     */
+    private static Result runRefCasContended(OpenLatchClient client, int threads, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:cas:" + threads);
+        AtomicLong ops = new AtomicLong();
+        Reservoir[] reservoirs = new Reservoir[threads];
+        for (int i = 0; i < threads; i++) {
+            reservoirs[i] = new Reservoir();
+        }
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            futures.add(pool.submit(() -> {
+                ready.countDown();
+                try {
+                    go.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                long deadline2 = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+                long localOps = 0;
+                while (System.nanoTime() < deadline2) {
+                    long start = System.nanoTime();
+                    try {
+                        while (true) {
+                            OAtomicReference.Stamped cur = ref.getStamped();
+                            long next = cur.value() == null ? 1
+                                    : Long.parseLong(new String(cur.value(),
+                                    java.nio.charset.StandardCharsets.UTF_8)) + 1;
+                            // 读后加一：值与版本双符才落（服务端裁决）。
+                            if (ref.compareAndSetStamped(cur.value(), cur.version(),
+                                    Long.toString(next).getBytes(
+                                            java.nio.charset.StandardCharsets.UTF_8))) {
+                                break;
+                            }
+                            if (System.nanoTime() >= deadline2) {
+                                break;
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    reservoirs[idx].record(System.nanoTime() - start);
+                    localOps++;
+                }
+                ops.addAndGet(localOps);
+            }));
+        }
+        ready.await(10, TimeUnit.SECONDS);
+        go.countDown();
+        pool.shutdown();
+        if (!pool.awaitTermination(120, TimeUnit.SECONDS)) {
+            pool.shutdownNow();
+        }
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(1, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new IllegalStateException("atomic reference bench worker failed", e);
             }
         }
         double[] merged = mergeSorted(reservoirs);
@@ -634,6 +809,14 @@ public final class BenchmarkMain {
      * @param barrierLatencies  循环屏障各档位到场等待延迟样本批次
      * @param actionThroughput  携 barrierAction 世代的吞吐各批
      * @param actionLatencies   携 barrierAction 世代的延迟各批样本
+     * @param refSmallThroughput 有值引用 16B 载荷写各批吞吐
+     * @param refSmallLatencies  有值引用 16B 载荷写各批延迟样本
+     * @param refBigThroughput   有值引用 4KB 恰限载荷写各批吞吐
+     * @param refBigLatencies    有值引用 4KB 恰限载荷写各批延迟样本
+     * @param refGetThroughput   有值引用读各批吞吐
+     * @param refGetLatencies    有值引用读各批延迟样本
+     * @param refCasThroughput   引用版本 CAS 争用各档各批吞吐
+     * @param refCasLatencies    引用版本 CAS 争用各档各批延迟样本
      * @return Markdown 文本
      */
     private static String renderReport(List<long[]> uncThroughput,
@@ -649,7 +832,15 @@ public final class BenchmarkMain {
                                        List<List<long[]>> barrierThroughput,
                                        List<List<double[]>> barrierLatencies,
                                        List<long[]> actionThroughput,
-                                       List<double[]> actionLatencies) {
+                                       List<double[]> actionLatencies,
+                                       List<long[]> refSmallThroughput,
+                                       List<double[]> refSmallLatencies,
+                                       List<long[]> refBigThroughput,
+                                       List<double[]> refBigLatencies,
+                                       List<long[]> refGetThroughput,
+                                       List<double[]> refGetLatencies,
+                                       List<List<long[]>> refCasThroughput,
+                                       List<List<double[]>> refCasLatencies) {
         StringBuilder sb = new StringBuilder();
         sb.append("# OpenLatch 基准基线\n\n");
         sb.append("生成：").append(java.time.LocalDate.now())
@@ -691,6 +882,23 @@ public final class BenchmarkMain {
                     .append(" 线程争用 CAS 加一 | ").append(medianOps(casThroughput.get(i)))
                     .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.5)))
                     .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.99)))
+                    .append(" |\n");
+        }
+        sb.append("| 有值引用 getAndSet（16B 载荷写 RTT） | ").append(medianOps(refSmallThroughput))
+                .append(" | ").append(fmt(medianQuantile(refSmallLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refSmallLatencies, 0.99))).append(" |\n");
+        sb.append("| 有值引用 getAndSet（4KB 恰限载荷写 RTT） | ")
+                .append(medianOps(refBigThroughput))
+                .append(" | ").append(fmt(medianQuantile(refBigLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refBigLatencies, 0.99))).append(" |\n");
+        sb.append("| 有值引用 get（读 RTT，经 Raft） | ").append(medianOps(refGetThroughput))
+                .append(" | ").append(fmt(medianQuantile(refGetLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refGetLatencies, 0.99))).append(" |\n");
+        for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+            sb.append("| ").append(ATOMIC_CAS_LEVELS[i])
+                    .append(" 线程争用引用版本 CAS | ").append(medianOps(refCasThroughput.get(i)))
+                    .append(" | ").append(fmt(medianQuantile(refCasLatencies.get(i), 0.5)))
+                    .append(" | ").append(fmt(medianQuantile(refCasLatencies.get(i), 0.99)))
                     .append(" |\n");
         }
         for (int i = 0; i < BARRIER_LEVELS.length; i++) {

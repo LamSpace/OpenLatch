@@ -36,7 +36,11 @@ package io.github.lamspace.openlatch.core.result;
  * 家族/形态判定（{@link #REJECT_TYPE_MISMATCH}）→ 布尔值域检查
  * （{@link #REJECT_ATOMIC_RANGE}）→ 初值断言（{@link #REJECT_ATOMIC_INIT}）→
  * 去重槽重放或操作执行（结果恒 {@link #GRANTED}，CAS 家族成败由
- * {@code applied} 承载、不占用本枚举判别位）。
+ * {@code applied} 承载、不占用本枚举判别位）。有值引用形态
+ * （{@code ATOMIC_REFERENCE}）判定顺序同构，仅两处换形：值域检查为
+ * "ADD 属值域外操作"（字节串无加法，复用 {@link #REJECT_ATOMIC_RANGE}），
+ * 初值断言为 presence 主张（非 {@code null} 主张须与定型初值字节相符，
+ * 复用 {@link #REJECT_ATOMIC_INIT}）；两者条目状态均零扰动。
  *
  * <p><b>屏障通道口径</b>：BARRIER 家族的判定顺序为会话预检 → key 校验 →
  * 家族判定（{@link #REJECT_TYPE_MISMATCH}）→ parties 断言
@@ -89,15 +93,17 @@ public enum Outcome {
     REJECT_LATCH_TOTAL,
     /**
      * 拒绝：原子变量初值主张不成立——既有条目上非零 {@code initial_value}
-     * 与定型初值不符；条目状态零扰动，server 层映射协议
+     * 与定型初值不符（有值引用形态：非 {@code null} 主张与定型初值字节
+     * 不符）；条目状态零扰动，server 层映射协议
      * {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
      * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
      */
     REJECT_ATOMIC_INIT,
     /**
      * 拒绝：原子变量参数越出形态值域——布尔形态的落值/期望值不在
-     * {0,1}，或布尔形态携带 ADD 操作；条目状态零扰动，server 层
-     * 映射协议 {@code INVALID_REQUEST}。
+     * {0,1}，布尔形态携带 ADD 操作，或有值引用形态携带 ADD 操作
+     * （字节串无加法）；条目状态零扰动，server 层映射协议
+     * {@code INVALID_REQUEST}。
      */
     REJECT_ATOMIC_RANGE,
     /**

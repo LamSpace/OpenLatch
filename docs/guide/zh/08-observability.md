@@ -27,7 +27,7 @@
 | `openlatch.server.renew.total` | Counter | `status` | 续租计数 |
 | `openlatch.server.lease.expired.total` | Counter | — | 租约到期回收数 |
 | `openlatch.server.queue.depth.max` | Gauge | — | 单键最深队列 |
-| `openlatch.server.atomic.total` | Counter | `kind`、`op`、`status` | 原子变量操作计数（v4；CAS 成败由应答 `applied` 承载、不占维度） |
+| `openlatch.server.atomic.total` | Counter | `kind`、`op`、`status` | 原子变量操作计数（v4；v6 `kind` 增 `reference`、`op` 无 `add`；CAS 成败由应答 `applied` 承载、不占维度；超限/低版本拒绝走 `status="INVALID_REQUEST"` 线） |
 | `openlatch.server.barrier.total` | Counter | `op`=`await`/`leave`/`action_done`、`status` | 循环屏障操作计数（v5；破障了结以 `status="BARRIER_BROKEN"` 单列） |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | 本节点是否为 Leader（仅集群启用时注册） |
 

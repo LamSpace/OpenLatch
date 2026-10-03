@@ -259,7 +259,9 @@ public final class AdminRequestHandler {
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
-                } else if (ShadowTable.isAtomicType(v.lockType())) {
+                } else if (ShadowTable.isAtomicFamily(v.lockType())) {
+                    // v6：有值引用条目并入 ATOMIC 家族单列计数（per-kind 区分
+                    // 由指标 kind 标签承担，不扩计数线）。
                     atomicEntries++;
                 } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                     barrierEntries++;
@@ -330,6 +332,14 @@ public final class AdminRequestHandler {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
                         row.setAtomicKind(atomicKindNameOfCore(k.atomicKind()))
                                 .setAtomicValue(k.atomicValue());
+                        if (k.atomicKind()
+                                == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+                            // v6：引用行以大小+截断预览承载（全量载荷零外发）。
+                            row.setAtomicPayloadSize(
+                                            k.atomicRefValue() == null ? 0
+                                                    : k.atomicRefValue().length)
+                                    .setAtomicPayloadPreview(payloadPreview(k.atomicRefValue()));
+                        }
                     } else if (k.family() == KeyFamily.BARRIER) {
                         // v5：屏障行呈现 parties/世代/到场数（holders/租约恒零）。
                         row.setBarrierParties(k.barrierParties())
@@ -357,6 +367,12 @@ public final class AdminRequestHandler {
                 if (ShadowTable.isAtomicType(v.lockType())) {
                     row.setAtomicKind(atomicKindNameOf(v.lockType()))
                             .setAtomicValue(v.atomicValue());
+                } else if (ShadowTable.isReferenceType(v.lockType())) {
+                    // v6：引用行以大小+截断预览承载（全量载荷零外发）。
+                    row.setAtomicKind(atomicKindNameOf(v.lockType()))
+                            .setAtomicPayloadSize(
+                                    v.refValue() == null ? 0 : v.refValue().length)
+                            .setAtomicPayloadPreview(payloadPreview(v.refValue()));
                 } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                     row.setBarrierParties(v.barrierParties())
                             .setBarrierGeneration(v.barrierGeneration())
@@ -430,6 +446,14 @@ public final class AdminRequestHandler {
                         .setBarrierLastFinal(snap.barrierLastFinal() == null
                                 ? "none" : barrierFinalWord(snap.barrierLastFinal().ordinal()));
             }
+            if (snap.family() == KeyFamily.ATOMIC && snap.atomicKind()
+                    == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+                // v6：引用明细——标量初值/值位恒 0（上方已装配），载荷读数走
+                // 大小+截断预览对；初值观察不入载荷字段（定型语义由值态承载）。
+                b.setAtomicPayloadSize(snap.atomicRefValue() == null
+                                ? 0 : snap.atomicRefValue().length)
+                        .setAtomicPayloadPreview(payloadPreview(snap.atomicRefValue()));
+            }
             for (CoreInspection.HolderSnapshot h : snap.holders()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.sessionId()).setThreadId(h.threadId())
@@ -459,6 +483,11 @@ public final class AdminRequestHandler {
                     .setAtomicInitial(v.atomicInitial())
                     .setAtomicValue(v.atomicValue())
                     .setAtomicVersion(v.atomicVersion());
+            if (ShadowTable.isReferenceType(v.lockType())) {
+                // v6：引用明细——大小+截断预览对（全量载荷零外发）。
+                b.setAtomicPayloadSize(v.refValue() == null ? 0 : v.refValue().length)
+                        .setAtomicPayloadPreview(payloadPreview(v.refValue()));
+            }
             if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                 b.setBarrierParties(v.barrierParties())
                         .setBarrierGeneration(v.barrierGeneration())
@@ -575,7 +604,7 @@ public final class AdminRequestHandler {
         if (lockTypeValue == LockType.LOCK_TYPE_LATCH_VALUE) {
             return "latch";
         }
-        if (ShadowTable.isAtomicType(lockTypeValue)) {
+        if (ShadowTable.isAtomicFamily(lockTypeValue)) {
             return "atomic";
         }
         if (lockTypeValue == LockType.LOCK_TYPE_BARRIER_VALUE) {
@@ -585,8 +614,8 @@ public final class AdminRequestHandler {
     }
 
     /**
-     * 协议形态数值 → 原子形态词表（管理观察面：long/integer/boolean；
-     * 非原子数值回空串——proto3 缺省即"不适用"）。
+     * 协议形态数值 → 原子形态词表（管理观察面：long/integer/boolean/
+     * reference；非原子数值回空串——proto3 缺省即"不适用"）。
      *
      * @param lockTypeValue {@code LockType} 数值
      * @return 形态词或空串
@@ -600,6 +629,9 @@ public final class AdminRequestHandler {
         }
         if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_BOOLEAN_VALUE) {
             return "boolean";
+        }
+        if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_REFERENCE_VALUE) {
+            return "reference";
         }
         return "";
     }
@@ -618,8 +650,42 @@ public final class AdminRequestHandler {
             case ATOMIC_LONG -> "long";
             case ATOMIC_INTEGER -> "integer";
             case ATOMIC_BOOLEAN -> "boolean";
+            case ATOMIC_REFERENCE -> "reference";
             default -> "";
         };
+    }
+
+    /**
+     * 有值引用载荷的截断转义预览（v6，管理观察面）：至多 64 字节前缀，
+     * 可打印 ASCII（0x20–0x7e）原样、其余 {@code \xHH} 转义；预览长度恒定
+     * （不随 {@code maxValueBytes} 或实际载荷膨胀），超长以 {@code …} 结尾。
+     * {@code null}（null 态）回空串，零长度（空字节串）回 {@code ""}——
+     * 两态在预览上亦可区分。全量载荷 MUST NOT 出现在应答中。
+     *
+     * @param value 载荷字节（可 {@code null}）
+     * @return 预览字符串
+     */
+    private static String payloadPreview(byte[] value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.length == 0) {
+            return "\"\"";
+        }
+        int limit = Math.min(value.length, 64);
+        StringBuilder sb = new StringBuilder(limit + 8);
+        for (int i = 0; i < limit; i++) {
+            int b = value[i] & 0xff;
+            if (b >= 0x20 && b <= 0x7e && b != '\\') {
+                sb.append((char) b);
+            } else {
+                sb.append(String.format("\\x%02x", b));
+            }
+        }
+        if (value.length > limit) {
+            sb.append('…');
+        }
+        return sb.toString();
     }
 
     /**

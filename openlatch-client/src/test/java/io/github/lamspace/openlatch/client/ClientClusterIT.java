@@ -265,6 +265,29 @@ class ClientClusterIT {
         }
     }
 
+    @Test
+    void committedReferencePayloadSurvivesLeaderKillWithoutDrift() throws Exception {
+        startCluster(3);
+        // v6 引用形态的换主持久锚：已提交载荷字节级不丢不漂、续写照常。
+        String[] allSeeds = nodes.stream().map(NodeRef::address).toArray(String[]::new);
+        try (OpenLatchClient client = clientTo(allSeeds)) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OAtomicReference r = client.newAtomicReference("rpk");
+            r.set("v1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(r.compareAndSetString("v1", "v2")).isTrue(); // version 2
+            NodeRef victim = leader();
+            stopNode(victim);
+            awaitTrue(() -> {
+                NodeRef l = leader();
+                return l != null && l != victim;
+            }, "新主选出");
+            assertThat(r.getAsString()).isEqualTo("v2");
+            assertThat(r.getVersion()).isEqualTo(2);
+            assertThat(r.compareAndSetString("v2", "v3")).isTrue(); // 换主后续写
+            assertThat(r.getAsString()).isEqualTo("v3");
+        }
+    }
+
     // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test

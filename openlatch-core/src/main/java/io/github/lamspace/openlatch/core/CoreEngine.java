@@ -18,6 +18,7 @@ package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
 import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
@@ -27,6 +28,7 @@ import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.AtomicEntry;
+import io.github.lamspace.openlatch.core.lock.AtomicRefEntry;
 import io.github.lamspace.openlatch.core.lock.BarrierEntry;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LatchEntry;
@@ -38,6 +40,7 @@ import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.AtomicOpResult;
+import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
 import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
 import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
@@ -166,6 +169,18 @@ public final class CoreEngine {
                         as.value(), as.version(), as.slotSession(), as.slotOpSeq(),
                         as.slotApplied(), as.slotOldValue(), as.slotValue(), as.slotVersion());
                 lockTable.computeIfAbsent(en.key(), k -> ae);
+                continue;
+            }
+            if (en.lockType() == LockType.ATOMIC_REFERENCE) {
+                // 有值引用条目：与标量形态同判例——无租约、无持有者、无常驻
+                // 回收；载荷两态（null/零长度）与去重槽直写快照原值，尺寸不
+                // 复核（钳制属接入层，恢复不重演判定）。
+                CoreStateRestore.AtomicRefState rs = en.atomicRef();
+                AtomicRefEntry re = AtomicRefEntry.restored(en.key(), rs.initial(),
+                        rs.value(), rs.version(), rs.slotSession(), rs.slotOpSeq(),
+                        rs.slotApplied(), rs.slotOldValue(), rs.slotValue(),
+                        rs.slotVersion());
+                lockTable.computeIfAbsent(en.key(), k -> re);
                 continue;
             }
             if (en.lockType() == LockType.BARRIER) {
@@ -422,7 +437,7 @@ public final class CoreEngine {
             case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
             case SEMAPHORE -> KeyFamily.SEMAPHORE;
             case LATCH -> KeyFamily.LATCH;
-            case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN -> KeyFamily.ATOMIC;
+            case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN, ATOMIC_REFERENCE -> KeyFamily.ATOMIC;
             case BARRIER -> KeyFamily.BARRIER;
         };
     }
@@ -684,6 +699,10 @@ public final class CoreEngine {
         if (familyOf(cmd.kind()) != KeyFamily.ATOMIC) {
             throw new IllegalArgumentException("not an atomic kind: " + cmd.kind());
         }
+        if (cmd.kind() == LockType.ATOMIC_REFERENCE) {
+            throw new IllegalArgumentException(
+                    "reference kind requires atomicRefOp channel");
+        }
         if (!sessions.contains(cmd.sessionId())) {
             return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
         }
@@ -709,10 +728,75 @@ public final class CoreEngine {
                 if (e.family() != KeyFamily.ATOMIC) {
                     return AtomicOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
                 }
+                if (!(e instanceof AtomicEntry)) {
+                    // 同 key 已定型为有值引用形态——标量↔引用跨形态互拒（家族同位、
+                    // 条目类型不同，判例同族跨标量形态互拒）。
+                    return AtomicOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
                 if (!sessions.contains(cmd.sessionId())) {
                     return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
                 }
                 return ((AtomicEntry) e).op(cmd);
+            }
+        }
+    }
+
+    /**
+     * 有值引用原子操作：ATOMIC 家族引用形态的唯一命令入口（与
+     * {@link #atomicOp} 标量通道平行——无等待、无租约、即时裁决，判定
+     * 顺序与校验口径逐项同构，值域换不透明字节）。
+     *
+     * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 形状
+     * 校验 → 条目定位：{@code GET} 对不存在的 key 直接回 {@code (null, 0)}
+     * 且 MUST NOT 建条目；写命令对不存在的 key 以主张载荷懒建引用条目
+     * （竞态良性：他者抢先建条目后按"既有条目断言/形态判定"规则处理）
+     * → 条目锁内家族与形态判定（他家族或已定型标量形态 →
+     * {@link Outcome#REJECT_TYPE_MISMATCH}）、会话权威复校 →
+     * {@link AtomicRefEntry#op} 规则集（ADD 值域外拒绝、初值 presence 断言、
+     * GET 短路、去重重放、操作执行）。
+     *
+     * <p><b>载荷尺寸</b>：本门面与条目 MUST NOT 复核载荷字节数——
+     * 钳制属接入层（超限命令永不入引擎/日志），见
+     * {@link AtomicRefEntry} 类注释。
+     *
+     * @param cmd 引用形态命令（会话须已登记；载荷数组传入后不得再修改）
+     * @return 操作结果：{@link Outcome#GRANTED} 携带载荷应答四元组，
+     *         或会话/key/家族/值域/初值类拒绝
+     */
+    public AtomicRefOpResult atomicRefOp(AtomicRefOpCommand cmd) {
+        if (!sessions.contains(cmd.sessionId())) {
+            return AtomicRefOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return AtomicRefOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.op() == AtomicOp.GET) {
+                    // 读数零迁移：不存在的 key 即 (null, 0)，不建条目。
+                    return new AtomicRefOpResult(Outcome.GRANTED, false, null, null, 0);
+                }
+                e = lockTable.computeIfAbsent(key,
+                        k -> new AtomicRefEntry(k, LockType.ATOMIC_REFERENCE, cmd.initial()));
+            }
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (e.family() != KeyFamily.ATOMIC) {
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!(e instanceof AtomicRefEntry)) {
+                    // 同 key 已定型标量形态——跨形态互拒，零扰动。
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.contains(cmd.sessionId())) {
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                return ((AtomicRefEntry) e).op(cmd);
             }
         }
     }
@@ -1016,9 +1100,10 @@ public final class CoreEngine {
                     case SemaphoreEntry se -> snapshots.add(se.snapshot(now));
                     case LatchEntry la -> snapshots.add(la.snapshot(now));
                     case AtomicEntry ae -> snapshots.add(ae.snapshot(now));
+                    case AtomicRefEntry re -> snapshots.add(re.snapshot(now));
                     case BarrierEntry be -> snapshots.add(be.snapshot(now));
                     default -> {
-                        // 未知实现不入快照（理论不可达：五家族已穷尽）。
+                        // 未知实现不入快照（理论不可达：条目类已穷尽）。
                     }
                 }
             }
@@ -1053,6 +1138,7 @@ public final class CoreEngine {
                 case SemaphoreEntry se -> se.snapshot(now);
                 case LatchEntry la -> la.snapshot(now);
                 case AtomicEntry ae -> ae.snapshot(now);
+                case AtomicRefEntry re -> re.snapshot(now);
                 case BarrierEntry be -> be.snapshot(now);
                 default -> null;
             };

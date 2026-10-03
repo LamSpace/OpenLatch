@@ -27,7 +27,7 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
 | `openlatch.server.renew.total` | Counter | `status` | renewals |
 | `openlatch.server.lease.expired.total` | Counter | — | lease-expiry reclaims |
 | `openlatch.server.queue.depth.max` | Gauge | — | deepest single-key queue |
-| `openlatch.server.atomic.total` | Counter | `kind`, `op`, `status` | atomic variable operations (v4; CAS hit/miss rides the `applied` field, not a label) |
+| `openlatch.server.atomic.total` | Counter | `kind`, `op`, `status` | atomic variable operations (v4; v6 adds `kind="reference"` — no `add` op for it; CAS hit/miss rides the `applied` field, not a label; over-limit/low-version rejections land on `status="INVALID_REQUEST"`) |
 | `openlatch.server.barrier.total` | Counter | `op`=`await`/`leave`/`action_done`, `status` | cyclic barrier operations (v5; broken settlements surface as `status="BARRIER_BROKEN"`) |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | leadership gauge (registered in cluster mode only) |
 

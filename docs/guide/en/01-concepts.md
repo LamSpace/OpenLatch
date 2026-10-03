@@ -84,9 +84,10 @@ acquisition as "may be invalidated by failover".
 Synchronous APIs never block forever; async APIs (`lockAsync`/`tryLockAsync`/`acquireAsync`/
 `releaseAsync`) express the same failures as exceptionally-completed futures.
 
-## 7. Atomic variables and version stamps
+## 7. Atomic variables, version stamps and atomic references
 
-`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean` (protocol v4) are the library's only
+`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean` (protocol v4) and `OAtomicReference`
+(protocol v6) form the ATOMIC family — the library's only
 **non-lock** coordination primitives: a shared mutable cell inside the replicated state.
 The semantic differences from locks must be known item by item:
 
@@ -105,6 +106,37 @@ The semantic differences from locks must be known item by item:
   never blindly retry a different value.
 - **Entries are never reclaimed**: there is no delete; govern key cardinality yourself.
 - Overflow matches the JDK (wrap within long/int32 domains; boolean restricted to {0,1}).
+
+### 7.1 Atomic references and small payloads (v6)
+
+`OAtomicReference` extends the family above the scalar forms with **one opaque byte
+payload** (the coordination-level counterpart of the JDK `AtomicReference`) — the first
+primitive opening the roadmap's small-payload tier:
+
+- **Payloads are opaque** — the server stores and compares bytes and **never deserializes
+  or interprets** them. Object forms are the application's own encode/decode business
+  (UTF-8 strings ride the `String` convenience methods). This is a deliberate boundary,
+  not a limitation: content-addressed retrieval belongs in a KV store, not here.
+- **Size is authoritatively clamped server-side** — the per-key payload cap is
+  `openlatch.server.limit.max-value-bytes` (default 4KB). Over-limit writes are rejected
+  **at ingress** (`OpenLatchException`, rejection semantics) with zero effect — oversized
+  commands never enter the replication log, so the cluster pays no replication or snapshot
+  cost for them. The clamp runs only at the ingress (leader/standalone entry point), so
+  per-node config drift cannot fork replicas; **lowering the cap never retro-affects
+  stored values** — existing larger payloads remain readable, subsequent writes obey the
+  new limit.
+- **null and the empty byte string are two distinct values** — `set(null)` clears,
+  `compareAndSet(null, x)` establishes from the empty state; a CAS expecting null misses
+  an empty-string entry.
+- Version stamps, dedup slots, same-op-seq retries and timeout re-judgement are
+  **item-for-item isomorphic** with the scalar forms (one shared decision table); value
+  comparison is byte-content equality and `compareAndSetStamped` is the ABA-free form.
+- **No arithmetic**: no `incrementAndGet`/`accumulateAndGet` counterparts (bytes have no
+  addition; the JDK `AtomicReference` has none either).
+- **Residency is made visible**: entry-plus-payload residency is a real memory/snapshot
+  cost. The console and admin protocol show each payload's **size and a truncated
+  preview** (full bytes never appear in admin responses); snapshot size governance
+  lives in [05 §2/§4.3](05-cluster-deployment.md).
 
 ## 8. Cyclic barrier and generations
 
@@ -139,6 +171,7 @@ session switch an in-flight await is abandoned, never replayed.
 | Semaphore | — | N-permit gate; releasing more than held throws `IllegalMonitorStateException` |
 | Count-down latch | — | one-shot: `init` fixes total, `countDown` to zero releases all `await`s; entry lives until node restart |
 | Atomic variables | — | value has no owner (death never rolls back); every write bumps the version stamp by 1; ABA only eliminated by `*Stamped` forms; entries never reclaimed (v4) |
+| Atomic reference | — | opaque payload ≤ `maxValueBytes` (default 4KB, clamped authoritatively at ingress, zero effect on overflow); null and empty-string are distinct; version stamp/dedup isomorphic with scalars; entry and payload never reclaimed (v6) |
 | Cyclic barrier | — | N-party rendezvous, reusable generations; **leaving breaks the current generation** (death/timeout/interrupt/break — stronger than the JDK); no sticky broken state, no `reset()`; the last arriver runs the action (v5) |
 
 ## Next

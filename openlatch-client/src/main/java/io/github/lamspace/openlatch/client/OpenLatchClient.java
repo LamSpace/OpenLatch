@@ -1443,6 +1443,47 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程有值引用句柄（v6，无初值主张形态）：条目不存在时首个写
+     * 以 {@code null} 载荷为初值基准建立；语义与载荷边界见
+     * {@link OAtomicReference} 接口注释。
+     *
+     * @param key 有值引用键
+     * @return 有值引用句柄（可多线程共用、可多句柄指向同 key）
+     */
+    public OAtomicReference newAtomicReference(String key) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key), null);
+    }
+
+    /**
+     * 创建跨进程有值引用句柄（初值主张形态）：key 首建时条目初值以
+     * {@code initialValue} 定格（作为后续携带主张请求的一致性断言基准，
+     * 首笔写入的旧值读数即该主张值）；既有条目定型初值与之字节不符时
+     * 本句柄首个操作抛 {@link OpenLatchException}（映射服务端初值断言）。
+     * {@code null} 等价无参形态；零长度数组为空字节串主张（与 null 可区分）。
+     * 主张仅建条目时生效，不构成服务端回收依据（条目常驻）。
+     *
+     * @param key          有值引用键
+     * @param initialValue 初值主张载荷（可为 {@code null}=不主张）
+     * @return 有值引用句柄
+     */
+    public OAtomicReference newAtomicReference(String key, byte[] initialValue) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key), initialValue);
+    }
+
+    /**
+     * 创建跨进程有值引用句柄（UTF-8 字符串初值主张形态），语义同
+     * {@link #newAtomicReference(String, byte[])}。
+     *
+     * @param key          有值引用键
+     * @param initialValue 初值主张字符串（可为 {@code null}=不主张）
+     * @return 有值引用句柄
+     */
+    public OAtomicReference newAtomicReference(String key, String initialValue) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key),
+                initialValue == null ? null : initialValue.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
