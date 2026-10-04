@@ -966,7 +966,7 @@ public final class ClusterRequestHandler {
         if (requireLeader && !gateway.isLeaderAuthoritative()) {
             // ACQUIRE 车道角色门：用权威角色而非事件标志——降级空窗内拒绝
             // 受理，杜绝"无多数派仍提交"；提示来自单源视图，选举空窗为 -1。
-            return notLeaderEnvelope(msg);
+            return notLeaderEnvelope(msg, leaderTracker.snapshot());
         }
         boolean hasPayload = switch (msg.getType()) {
             case LOCK_ACQUIRE -> msg.hasAcquireRequest();
@@ -1066,7 +1066,7 @@ public final class ClusterRequestHandler {
      */
     private Envelope commitFailure(Envelope msg, Throwable err) {
         if (err instanceof ReplicationGateway.RetryableCommitException) {
-            return notLeaderEnvelope(msg);
+            return notLeaderEnvelope(msg, leaderTracker.snapshot());
         }
         log.warn("unexpected commit failure for request {} (type {})",
                 msg.getRequestId(), msg.getType(), err);
@@ -1074,16 +1074,22 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 随附 Leader 提示的 {@code NOT_LEADER} 应答：按原请求类型选载荷
-     * （Acquire/Release/LeaseRenew），{@code leader_node_id} 取
-     * {@link LeaderTracker} 单源当时值（选举空窗 -1），{@code leader_address}
-     * 未配置地址映射时为空串（客户端种子发现兜底）。
+     * 随附 Leader 提示的 {@code NOT_LEADER} 拒绝应答：载荷 MUST 与请求消息
+     * 类型同型（"拒绝状态码线路可见"不变式）——每类客户端接入车道都以其
+     * 对应的 Response 自述 {@code NOT_LEADER}，杜绝任何车道把拒绝读成
+     * protobuf 默认实例的"成功空应答"（{@code StatusCode.OK} 为枚举零值）。
+     * {@code leader_node_id} 取 {@link LeaderTracker} 单源当时值（选举空窗
+     * -1）、{@code leader_address} 未配置地址映射时为空串——提示字段仅由
+     * v2 三类应答（Acquire/Release/LeaseRenew）承载，其余类型（AtomicOp/
+     * Barrier/Latch/QueueOp）沿无提示判例，改道由客户端 Leader 发现机制
+     * 兜底。未配 case 的新类型落 default：记 WARN 暴露漏配并以 acquire
+     * 形态安全落位（协议扩展时 MUST 补同型 case，表驱动门禁测试守门）。
      *
-     * @param msg 原请求信封
+     * @param msg    原请求信封
+     * @param leader 当时 Leader 快照（单源，含选举空窗 -1 形态）
      * @return 带提示的拒绝应答
      */
-    private Envelope notLeaderEnvelope(Envelope msg) {
-        LeaderTracker.Snapshot leader = leaderTracker.snapshot();
+    static Envelope notLeaderEnvelope(Envelope msg, LeaderTracker.Snapshot leader) {
         Envelope.Builder b = Envelope.newBuilder()
                 .setProtocolVersion(msg.getProtocolVersion())
                 .setType(msg.getType())
@@ -1107,10 +1113,28 @@ public final class ClusterRequestHandler {
                     .setStatus(StatusCode.NOT_LEADER));
             case BARRIER_ACTION_DONE -> b.setBarrierActionDoneResponse(
                     BarrierActionDoneResponse.newBuilder().setStatus(StatusCode.NOT_LEADER));
-            default -> b.setAcquireResponse(AcquireResponse.newBuilder()
+            // v3：LATCH 同型拒绝——默认实例的 OK 会被成型为"已破障/remaining=0"
+            // 假绿，码形违例在此杜绝。
+            case LATCH_COUNT_DOWN -> b.setLatchCountDownResponse(
+                    io.github.lamspace.openlatch.protocol.LatchCountDownResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER));
+            case LATCH_AWAIT -> b.setLatchAwaitResponse(
+                    io.github.lamspace.openlatch.protocol.LatchAwaitResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER));
+            // v7：QUEUE_OP 同型拒绝——op 回显沿 ATOMIC_OP 判例；默认实例的
+            // OK 会被成型为"take 交付空元素/size 读 0"伪成功（W10 根因）。
+            case QUEUE_OP -> b.setQueueOpResponse(QueueOpResponse.newBuilder()
                     .setStatus(StatusCode.NOT_LEADER)
-                    .setLeaderNodeId(leader.leaderNodeId())
-                    .setLeaderAddress(leader.leaderAddress()));
+                    .setOp(msg.getQueueOpRequest().getOp()));
+            default -> {
+                log.warn("NOT_LEADER reject has no same-shape case for type {} — "
+                        + "add the matching payload branch on protocol extension "
+                        + "(reject-codec table gate)", msg.getType());
+                b.setAcquireResponse(AcquireResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setLeaderNodeId(leader.leaderNodeId())
+                        .setLeaderAddress(leader.leaderAddress()));
+            }
         }
         return b.build();
     }

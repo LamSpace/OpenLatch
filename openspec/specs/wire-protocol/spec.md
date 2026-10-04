@@ -138,8 +138,6 @@
 - **WHEN** v6 会话发送 `QUEUE_OP` 消息，或 v5 会话发送 `lock_type = LOCK_TYPE_ATOMIC_REFERENCE` 的 `ATOMIC_OP` 消息，或 v4 会话发送 `BARRIER_AWAIT` 消息，或 v3 会话发送 `ATOMIC_OP` 消息，或 v2 会话发送 `lock_type = LOCK_TYPE_SEMAPHORE` 的 ACQUIRE，或 v1 会话发送 LATCH_AWAIT 消息
 - **THEN** 服务端以 `INVALID_REQUEST` 拒绝该请求且不断开连接，该会话的既有版本请求照常服务
 
-## ADDED Requirements
-
 ### Requirement: Leader 提示字段（v2）
 
 `HelloResponse` SHALL 复用既有预留字段 `leader_hint`（field 5，int64）承载当前 Leader 的 `nodeId`，并新增 `leader_address`（field 6，string）承载 Leader 的接入地址（`host:port`）；`AcquireResponse`、`ReleaseResponse`、`LeaseRenewResponse` SHALL 各新增 `leader_node_id`（int64）与 `leader_address`（string）字段。`NOT_LEADER`（StatusCode=10，Phase 1 预留码）在 v2 中启用：非当值 Leader 的节点对写请求 MUST 以该码应答，且 MUST 随附 `leader_node_id`——已知 Leader 时为真实 nodeId，应答节点尚无法给出 Leader 身份（启动后未收到 Leadership 事件、或收到显式无主通知）时为 `-1`；旧 Leader 死亡的过渡窗内提示 MAY 仍为最后已知 nodeId（陈旧性由客户端"改连失败 + 强制重发现"兜底，见 design D3）；`leader_address` 在服务端未配置地址映射时 MUST 为空字符串。提示字段仅在相关应答中出现：OK 应答 MUST NOT 填充 leader 字段（保持 proto3 默认缺省），v1 客户端收到的应答中这些字段作为未知字段被容忍。`CLUSTER_VIEW`（`MessageType = 7`，请求无 payload）的响应 MUST 为 `ClusterView { repeated NodeInfo nodes = 1; StatusCode status = 2 }`（`status` 自述结果：成功 `OK`+成员表，失败错误码+空表，v2 未发布前增补以保证拒绝状态码线路可见），`NodeInfo = { node_id, address, is_leader }`，由任意节点依据本地视图作答。
@@ -299,3 +297,22 @@
 
 - **WHEN** 对 `element_bytes` 缺省、零长度、非空字节串三种请求做编解码往返，并对 TAKE 应答的"无元素"与"空串元素"两态编码解码
 - **THEN** presence 在生成代码中可判别（`hasElementBytes()` 逐一区分），字节内容无损；恰限 4KB 元素二进制往返字节级保真
+
+### Requirement: 拒绝应答码形同型
+
+客户端接入车道可见的拒绝应答 SHALL 与请求消息类型同型：`Envelope.type` 回显请求类型，且 `payload` MUST 携带该类型对应的 Response 消息并以对应状态码自述拒绝结果——MUST NOT 以其他类型的 Response 载荷或空载荷承载拒绝。本协议将既有工程纪律"拒绝状态码线路可见（客户端裁决依赖）"成文为不变式，覆盖接入层门控拒绝（版本/形状/钳制）、集群路径角色门拒绝（`NOT_LEADER`）与提交失败拒绝全部拒绝码形。`leader_node_id`/`leader_address` 提示字段仍仅由 v2 定义的三类应答（Acquire/Release/LeaseRenew）承载——`ATOMIC_OP`/`BARRIER_*`/`LATCH_*`/`QUEUE_OP` 的同型拒绝沿无提示字段判例，改道由客户端 Leader 发现与故障转移机制兜底。`StatusCode.OK` 为枚举零值的事实 MUST NOT 被任何拒绝路径间接利用：缺载荷应答在收发任一侧按 oneof 缺省解读时呈现 protobuf 默认实例即"成功空应答"，属码形违例。
+
+#### Scenario: QUEUE_OP 被非 Leader 节点拒绝码形同型
+
+- **WHEN** v7 会话向非当值 Leader 的集群节点发送任意 `QUEUE_OP`（含只读 op：SIZE/PEEK），该节点角色门拒绝或提交以在途可重试原因失败
+- **THEN** 应答信封 payload 为 `queue_op_response`、`status = NOT_LEADER` 且 `op` 回显请求操作，不产生日志条目、连接保持；客户端对同型拒绝码执行既有退避改道
+
+#### Scenario: LATCH 拒绝码形同型杜绝假绿
+
+- **WHEN** `LATCH_COUNT_DOWN` 或 `LATCH_AWAIT` 被集群路径拒绝（角色门或提交失败）
+- **THEN** 应答分别携带 `latch_count_down_response` / `latch_await_response` 且 `status = NOT_LEADER`——客户端 MUST NOT 可能读到默认实例形态的 `OK`（`remaining=0`/"屏障已破"假绿形态在协议层不可达）
+
+#### Scenario: 全类型拒绝码形表驱动门禁
+
+- **WHEN** 构建门禁枚举客户端接入车道全部请求 `MessageType`，逐一构造被各拒绝码形路径拒绝的应答并检查 payload
+- **THEN** 每一类型的拒绝应答都携带与请求同型的 Response 载荷；任何新增消息类型未通过本门禁（无同型拒绝 case）即构建红

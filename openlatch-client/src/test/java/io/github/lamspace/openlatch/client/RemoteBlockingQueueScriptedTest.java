@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.client;
 
 import io.github.lamspace.openlatch.client.internal.ScriptedServer;
+import io.github.lamspace.openlatch.protocol.AcquireResponse;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LockType;
@@ -42,7 +43,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 工厂参数守门、请求形状装配（阻塞位/容量主张/元素 presence/op_seq 分配与
  * 读类填 0/UTF-8 两形态等价/drain 与 delay 字段）、QUEUED→推送丢失→同信封
  * 自兜底重发→OK 闭环、DENIED 回弹继续等待、不可重试拒绝显式抛错零重发、
- * NOT_LEADER 同信封同序号重试。
+ * NOT_LEADER 同信封同序号重试；应答形态裁决——异型/空载荷拒绝不得读作
+ * 成功（瞬态重发直至显式超时）、TAKE 的 OK-缺元素判协议违例、
+ * 同型 NOT_LEADER 经重发透明改道后取回真值。
  */
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class RemoteBlockingQueueScriptedTest {
@@ -102,8 +105,12 @@ class RemoteBlockingQueueScriptedTest {
             }
             seen.add(req);
             QueueOp op = req.getQueueOpRequest().getOp();
+            // 空队的立即式 TAKE 合法形态是 DENIED-缺元素（阻塞位 false 判例），
+            // 注入 OK-缺元素属交付契约违例形态——护栏落地后由违例用例专门锁。
             QueueOpResponse.Builder b = QueueOpResponse.newBuilder()
-                    .setStatus(StatusCode.OK).setOp(op);
+                    .setStatus(op == QueueOp.QUEUE_OP_TAKE
+                            ? StatusCode.DENIED : StatusCode.OK)
+                    .setOp(op);
             if (op == QueueOp.QUEUE_OP_PEEK) {
                 b.setElementBytes(com.google.protobuf.ByteString
                         .copyFrom("头".getBytes(StandardCharsets.UTF_8)));
@@ -268,5 +275,120 @@ class RemoteBlockingQueueScriptedTest {
         assertThat(seen).hasSize(2);
         assertThat(seen.get(1).getQueueOpRequest().getOpSeq())
                 .isEqualTo(seen.get(0).getQueueOpRequest().getOpSeq());
+    }
+
+    /**
+     * 异型拒绝信封（type 回显 QUEUE_OP、载荷却为 acquire_response——未含
+     * QUEUE_OP 分支的拒绝组装路径产物）MUST 按瞬态重发，MUST NOT 读
+     * protobuf 默认实例（status 零值 OK）伪成功。判红点：修复前
+     * {@code size()} 读回 0、{@code take()} 交付空串。
+     */
+    @Test
+    void malformedRejectEnvelopeRetriedNeverReadAsSuccess() throws Exception {
+        List<Envelope> seen = new ArrayList<>();
+        try (ScriptedServer server = new ScriptedServer(req -> {
+            if (req.getType() == MessageType.HELLO) {
+                return hello(req);
+            }
+            seen.add(req);
+            return Envelope.newBuilder()
+                    .setProtocolVersion(req.getProtocolVersion())
+                    .setType(MessageType.QUEUE_OP)
+                    .setRequestId(req.getRequestId())
+                    .setAcquireResponse(AcquireResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER).setLeaderNodeId(-1))
+                    .build();
+        })) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(2))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OBlockingQueue q = client.newBlockingQueue("q", 2);
+                assertThatThrownBy(() -> q.size())
+                        .as("异型拒绝不得成型为 size 伪成功")
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+                assertThatThrownBy(() -> q.take())
+                        .as("异型拒绝不得成型为 take 交付空元素")
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+            }
+        }
+        assertThat(seen.size()).as("瞬态裁决须发生重发").isGreaterThanOrEqualTo(2);
+    }
+
+    /**
+     * 真 OK 而 TAKE 应答缺 {@code element_bytes} presence（交付契约违例）
+     * MUST 显式协议违例异常、零交付、零重发；同断言中 PEEK 的 OK-缺省
+     * 为合法空读数（护栏严格限定 TAKE，不得误伤）。
+     * 判红点：修复前 {@code take()} 交付 {@code byte[0]}。
+     */
+    @Test
+    void okTakeWithoutElementPresenceIsProtocolViolation() throws Exception {
+        List<Envelope> seen = new ArrayList<>();
+        try (ScriptedServer server = new ScriptedServer(req -> {
+            if (req.getType() == MessageType.HELLO) {
+                return hello(req);
+            }
+            seen.add(req);
+            QueueOp op = req.getQueueOpRequest().getOp();
+            QueueOpResponse.Builder b = QueueOpResponse.newBuilder()
+                    .setStatus(StatusCode.OK).setOp(op);
+            // TAKE 与 PEEK 皆回 OK-缺元素：前者违例、后者合法。
+            return req.toBuilder().setType(MessageType.QUEUE_OP)
+                    .setQueueOpResponse(b).build();
+        })) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(2))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OBlockingQueue q = client.newBlockingQueue("q", 2);
+                assertThatThrownBy(() -> q.take())
+                        .as("OK-缺元素的 TAKE 是协议违例，MUST NOT 交付空串")
+                        .isInstanceOf(OpenLatchException.class);
+                assertThatThrownBy(() -> q.poll(1, TimeUnit.SECONDS))
+                        .as("阻塞车道超时预算内先以重发环撞违例：仍须显式异常")
+                        .isInstanceOf(OpenLatchException.class);
+                assertThat(q.peek())
+                        .as("PEEK 的 OK-缺省=空队读数合法")
+                        .isNull();
+            }
+        }
+        assertThat(seen).as("协议违例终结、无同序号重发").hasSize(3);
+    }
+
+    /**
+     * 同型 {@code NOT_LEADER} 拒绝经同信封重发透明改道——第 2 轮成功即
+     * 取回真值（W10 形态 B 的定案行为：换主窗拒绝对调用方透明，
+     * 读回真实深度而非 0）。
+     */
+    @Test
+    void sameShapeNotLeaderRetriedToTrueRead() throws Exception {
+        List<Envelope> seen = new ArrayList<>();
+        try (ScriptedServer server = new ScriptedServer(req -> {
+            if (req.getType() == MessageType.HELLO) {
+                return hello(req);
+            }
+            seen.add(req);
+            if (seen.size() == 1) {
+                return queueResp(req, StatusCode.NOT_LEADER);
+            }
+            return req.toBuilder().setType(MessageType.QUEUE_OP)
+                    .setQueueOpResponse(QueueOpResponse.newBuilder()
+                            .setStatus(StatusCode.OK).setOp(QueueOp.QUEUE_OP_SIZE)
+                            .setSize(2))
+                    .build();
+        })) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(3))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                assertThat(client.newBlockingQueue("q", 4).size()).isEqualTo(2);
+            }
+        }
+        assertThat(seen).hasSize(2);
     }
 }

@@ -242,8 +242,6 @@ key 条目 SHALL 由首次创建它的请求定型所属家族：LOCK（`REENTRA
 - **WHEN** 已以 `LATCH_AWAIT` 定型的 key 上发起 `BARRIER_AWAIT`，或反向
 - **THEN** 返回 `REJECT_TYPE_MISMATCH`，既有条目状态零扰动
 
-## ADDED Requirements
-
 ### Requirement: Semaphore 队首式授予
 
 `SemaphoreEntry` SHALL 以许可为授予单位：`permits_total` 由首次请求定型，`permits_available` 随授予扣减、随归还回升。授予 MUST 同时满足：请求者为等待队列队首或队列为空，且 `permits_available ≥` 请求数；非队首请求（含所需许可更少的请求）MUST NOT 越位授予（防大请求饥饿）。同归属（session, thread）的重入获取 MUST 先于队首与空位检查、按次累加持有许可并刷新租约。`queueIfBusy = false` 且条件不满足时 MUST 返回拒绝（不排队、不入队）。授予成功 MUST 登记租约（挂在归属维度）。
