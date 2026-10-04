@@ -136,6 +136,19 @@ class ConsoleStandaloneTest {
             }
         });
         awaitVisible("/keys", "stage:sync");
+        // v7 队列：延时形态灌满容量（delay=0 即可见元素），再挂一个等容量的 put。
+        io.github.lamspace.openlatch.client.ODelayQueue tasks =
+                seedClient.newDelayQueue("tasks:queue", 2);
+        tasks.offerDelayed(new byte[] {1}, 0, TimeUnit.MILLISECONDS);
+        tasks.offerDelayed(new byte[] {2}, 0, TimeUnit.MILLISECONDS);
+        BLOCKED.submit(() -> {
+            try {
+                tasks.put(new byte[] {3});
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        awaitVisible("/keys", "tasks:queue");
     }
 
     /** 关停服务器与客户端（daemon 阻塞线程随连接关闭自然脱队）。 */
@@ -181,9 +194,10 @@ class ConsoleStandaloneTest {
         assertThat(body).contains("SINGLE")
                 .contains(OpenLatchServer.serverVersion())
                 .doesNotContain("管理认证失败");
-        // 持有 lock=1 / semaphore=1 / latch 条目=1 / barrier 条目=1 / 等待者=4（四队列各一）。
+        // 持有 lock=1 / semaphore=1 / latch 条目=1 / barrier 条目=1 / queue 条目=1 /
+        // 等待者=5（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一）。
         assertThat(body).contains("<td>1</td>");
-        assertThat(body).contains("<td>4</td>");
+        assertThat(body).contains("<td>5</td>");
         // 会话数：业务客户端 + 控制台自身管理连接。
         assertThat(body).contains("<td>2</td>");
         // sparkline 三线已渲染（指标区未降级）。
@@ -195,14 +209,17 @@ class ConsoleStandaloneTest {
     void keysPageListsAllFamiliesWithPagingInfo() {
         String body = get("/keys");
         assertThat(body).contains("order:1").contains("pool:db").contains("gate:boot")
-                .contains("stage:sync")
-                .contains("lock").contains("semaphore").contains("latch").contains("barrier");
-        // 四行 key（链接计数），总条数读数为 4（pager 的 <span>4</span>）。
+                .contains("stage:sync").contains("tasks:queue")
+                .contains("lock").contains("semaphore").contains("latch").contains("barrier")
+                .contains("queue");
+        // 五行 key（链接计数），总条数读数为 5（pager 的 <span>5</span>）。
         assertThat(org.springframework.util.StringUtils.countOccurrencesOf(
-                body, "/key?node=")).isEqualTo(4);
-        assertThat(body).contains("<span>4</span>");
+                body, "/key?node=")).isEqualTo(5);
+        assertThat(body).contains("<span>5</span>");
         // 屏障行读数（parties · 世代 · 到场）。
         assertThat(body).contains("2 方 · 世代 1 · 到场 1");
+        // 队列行读数（容量 · 深度 · 队首预览——全量元素不外发）。
+        assertThat(body).contains("2 容量 · 深度 2 · 队首 1B");
         // 锁名可点进详情（只读边界：无解锁按钮/表单）。
         assertThat(body).contains("/key?node=");
         assertThat(body).doesNotContain("<form method=\"post\"");
@@ -224,6 +241,12 @@ class ConsoleStandaloneTest {
         assertThat(barrier).contains("parties 2").contains("当前世代 1")
                 .contains("到场 1").contains("最近了结 none")
                 .contains("无持有者（循环屏障按到场合拢裁决，无持有语义）");
+        // v7 队列明细：容量/深度/驻留/队首到期读数 + 等容量挂起者轨道列。
+        String queue = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=tasks:queue");
+        assertThat(queue).contains("容量 2").contains("深度 2").contains("驻留 2B")
+                .contains("等容量");
+        assertThat(queue).contains("无持有者（队列元素绑定 key 不绑定会话，无持有语义）");
     }
 
     @Test

@@ -440,6 +440,6 @@ public final class AtomicRefEntry implements KeyEntry {
                 0, 0, 0, 0, List.of(),
                 kind, 0, 0, version,
                 0, 0, 0, false, null,
-                initial, value);
+                initial, value, 0L, 0, 0L, 0L, null);
     }
 }

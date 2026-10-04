@@ -236,6 +236,7 @@ public final class AdminRequestHandler {
             int latchEntries = 0;
             int atomicEntries = 0;
             int barrierEntries = 0;
+            int queueEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
@@ -243,11 +244,13 @@ public final class AdminRequestHandler {
                     atomicEntries++;
                 } else if (k.family() == KeyFamily.BARRIER) {
                     barrierEntries++;
+                } else if (k.family() == KeyFamily.QUEUE) {
+                    queueEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
-                    .setBarrierEntries(barrierEntries)
+                    .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
                     .setTotalWaiters(st.totalWaiters())
                     .setNodeRole("SINGLE");
         } else {
@@ -256,6 +259,7 @@ public final class AdminRequestHandler {
             int latchEntries = 0;
             int atomicEntries = 0;
             int barrierEntries = 0;
+            int queueEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
@@ -265,11 +269,14 @@ public final class AdminRequestHandler {
                     atomicEntries++;
                 } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                     barrierEntries++;
+                } else if (ShadowTable.isQueueType(v.lockType())) {
+                    // v7：队列两形态合并单列（判例 latch/atomic/barrier）。
+                    queueEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
-                    .setBarrierEntries(barrierEntries)
+                    .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
                     .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
                     .setNodeRole(currentRole());
         }
@@ -345,6 +352,15 @@ public final class AdminRequestHandler {
                         row.setBarrierParties(k.barrierParties())
                                 .setBarrierGeneration(k.barrierGeneration())
                                 .setBarrierArrived(k.barrierArrived());
+                    } else if (k.family() == KeyFamily.QUEUE) {
+                        // v7：队列行呈现容量/深度/首元素大小+截断预览
+                        // （全量元素零外发）。
+                        row.setQueueCapacity(k.queueCapacity())
+                                .setQueueDepth(k.queueDepth())
+                                .setQueueHeadPayloadSize(
+                                        k.queueHeadPayload() == null
+                                                ? 0 : k.queueHeadPayload().length)
+                                .setQueueHeadPayloadPreview(payloadPreview(k.queueHeadPayload()));
                     }
                     rows.add(row.build());
                 }
@@ -377,6 +393,14 @@ public final class AdminRequestHandler {
                     row.setBarrierParties(v.barrierParties())
                             .setBarrierGeneration(v.barrierGeneration())
                             .setBarrierArrived(v.barrierArrived());
+                } else if (ShadowTable.isQueueType(v.lockType())) {
+                    // v7：队列行（容量/深度/首元素大小+截断预览，全量元素零外发）。
+                    row.setQueueCapacity(v.queueCapacity())
+                            .setQueueDepth(v.queueDepth())
+                            .setQueueHeadPayloadSize(
+                                    v.queueHeadPayload() == null
+                                            ? 0 : v.queueHeadPayload().length)
+                            .setQueueHeadPayloadPreview(payloadPreview(v.queueHeadPayload()));
                 }
                 rows.add(row.build());
             }
@@ -454,6 +478,18 @@ public final class AdminRequestHandler {
                                 ? 0 : snap.atomicRefValue().length)
                         .setAtomicPayloadPreview(payloadPreview(snap.atomicRefValue()));
             }
+            if (snap.family() == KeyFamily.QUEUE) {
+                // v7：队列明细——容量/深度/驻留字节/队首到期与首元素截断预览；
+                // 全量元素列表零外发（观察面防放大纪律同 v6 载荷对）。
+                b.setQueueCapacity(snap.queueCapacity())
+                        .setQueueDepth(snap.queueDepth())
+                        .setQueueHeadExpiryMs(snap.queueHeadExpiryMs())
+                        .setQueueTotalPayloadBytes(snap.queueTotalPayloadBytes())
+                        .setQueueHeadPayloadSize(
+                                snap.queueHeadPayload() == null
+                                        ? 0 : snap.queueHeadPayload().length)
+                        .setQueueHeadPayloadPreview(payloadPreview(snap.queueHeadPayload()));
+            }
             for (CoreInspection.HolderSnapshot h : snap.holders()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.sessionId()).setThreadId(h.threadId())
@@ -464,7 +500,9 @@ public final class AdminRequestHandler {
                 b.addWaiters(AdminKeyWaiterInfo.newBuilder()
                         .setPosition(++position).setSessionId(w.sessionId())
                         .setRequestId(w.requestId()).setPermits(w.permits())
-                        .setWaitedMs(w.waitedMs()).setNotified(w.notified()).build());
+                        .setWaitedMs(w.waitedMs()).setNotified(w.notified())
+                            // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
+                            .setQueueTrack(w.track()).build());
             }
         } else {
             ShadowTable.AdminEntryView v = cluster.core().shadow().adminEntry(req.getKey());
@@ -496,6 +534,18 @@ public final class AdminRequestHandler {
                         .setBarrierLastFinal(v.barrierCompletedResult() == 0
                                 ? "none" : barrierFinalWord(v.barrierCompletedResult() - 1));
             }
+            if (ShadowTable.isQueueType(v.lockType())) {
+                // v7：队列明细（复制态镜像读数；首元素到期为条目时刻口径，
+                // 全量元素零外发）。
+                b.setQueueCapacity(v.queueCapacity())
+                        .setQueueDepth(v.queueDepth())
+                        .setQueueHeadExpiryMs(v.queueHeadExpiryMs())
+                        .setQueueTotalPayloadBytes(v.queueTotalPayloadBytes())
+                        .setQueueHeadPayloadSize(
+                                v.queueHeadPayload() == null
+                                        ? 0 : v.queueHeadPayload().length)
+                        .setQueueHeadPayloadPreview(payloadPreview(v.queueHeadPayload()));
+            }
             for (Map.Entry<ShadowTable.Holder, Integer> h : v.holders().entrySet()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.getKey().sessionId()).setThreadId(h.getKey().threadId())
@@ -508,7 +558,9 @@ public final class AdminRequestHandler {
                     b.addWaiters(AdminKeyWaiterInfo.newBuilder()
                             .setPosition(w.position()).setSessionId(w.sessionId())
                             .setRequestId(w.requestId()).setPermits(w.permits())
-                            .setWaitedMs(w.waitedMs()).setNotified(w.notified()).build());
+                            .setWaitedMs(w.waitedMs()).setNotified(w.notified())
+                            // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
+                            .setQueueTrack(w.track()).build());
                 }
             }
         }
@@ -588,6 +640,7 @@ public final class AdminRequestHandler {
             case LATCH -> "latch";
             case ATOMIC -> "atomic";
             case BARRIER -> "barrier";
+            case QUEUE -> "queue";
         };
     }
 
@@ -609,6 +662,9 @@ public final class AdminRequestHandler {
         }
         if (lockTypeValue == LockType.LOCK_TYPE_BARRIER_VALUE) {
             return "barrier";
+        }
+        if (ShadowTable.isQueueType(lockTypeValue)) {
+            return "queue";
         }
         return "lock";
     }

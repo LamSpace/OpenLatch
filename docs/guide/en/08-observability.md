@@ -29,6 +29,8 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
 | `openlatch.server.queue.depth.max` | Gauge | — | deepest single-key queue |
 | `openlatch.server.atomic.total` | Counter | `kind`, `op`, `status` | atomic variable operations (v4; v6 adds `kind="reference"` — no `add` op for it; CAS hit/miss rides the `applied` field, not a label; over-limit/low-version rejections land on `status="INVALID_REQUEST"`) |
 | `openlatch.server.barrier.total` | Counter | `op`=`await`/`leave`/`action_done`, `status` | cyclic barrier operations (v5; broken settlements surface as `status="BARRIER_BROKEN"`) |
+| `openlatch.server.queue.total` | Counter | `op`=`put`/`take`/`drain`/`peek`/`size`, `status` | queue operations (v7; the two "fulls" split: element-full immediate `status="DENIED"` vs waiter-queue-full `status="OVERLOADED"`; parking `QUEUED`, ingress rejects `INVALID_REQUEST`; reads count too) |
+| `openlatch.server.elements.depth.max` | Gauge | — | peak per-key **element depth** (v7, scrape-time sample, residency incl. unexpired delay items) — a different dimension from `queue.depth.max` (waiter depth); never conflate the two |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | leadership gauge (registered in cluster mode only) |
 
 ### Starter alerts (calibrate per workload)
@@ -39,7 +41,10 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
   [09 stall section](09-troubleshooting.md);
 - persistently high `openlatch_server_waiters` — hot key, shard it or split read/write;
 - spiking `increase(openlatch_server_acquire_total{status="NOT_LEADER"}[1m])` — leader
-  changes in flight or incomplete seed config.
+  changes in flight or incomplete seed config;
+- `openlatch_server_elements_depth_max` pinned near `max-queue-capacity` — a hot queue
+  running full (consumers lagging or leaking); read it together with the console's
+  `queue_entries` cardinality for total residency (v7).
 
 ## Client metrics
 

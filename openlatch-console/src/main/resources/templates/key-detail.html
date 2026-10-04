@@ -26,6 +26,8 @@
                       th:text="|（形态 reference · 载荷 ${r.value.atomicPayloadSize}B ${r.value.atomicPayloadPreview} · 版本戳 ${r.value.atomicVersion}）|"></span>
                 <span th:if="${r.value.family == 'barrier'}"
                       th:text="|（parties ${r.value.barrierParties} · 当前世代 ${r.value.barrierGeneration} · 到场 ${r.value.barrierArrived}${r.value.barrierActionPending ? ' · 动作待决' : ''} · 最近了结 ${r.value.barrierLastFinal}）|"></span>
+                <span th:if="${r.value.family == 'queue'}"
+                      th:text="|（容量 ${r.value.queueCapacity} · 深度 ${r.value.queueDepth} · 驻留 ${r.value.queueTotalPayloadBytes}B · 队首 ${r.value.queueHeadPayloadSize}B ${r.value.queueHeadPayloadPreview}${r.value.queueHeadExpiryMs > 0 ? ' · 队首到期 ' + r.value.queueHeadExpiryMs : ''}）|"></span>
             </div>
 
             <h3>持有者</h3>
@@ -39,7 +41,7 @@
                 </tr>
                 <tr th:if="${r.value.holdersList.isEmpty()}">
                     <td colspan="4" class="empty"
-                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : '无持有者')}">无持有者</td>
+                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : (r.value.family == 'queue' ? '无持有者（队列元素绑定 key 不绑定会话，无持有语义）' : '无持有者'))}">无持有者</td>
                 </tr>
             </table>
 
@@ -49,18 +51,19 @@
             </div>
             <th:block th:unless="${r.value.waitQueueLeaderOnly}">
                 <table class="grid">
-                    <tr><th>位次</th><th>会话</th><th>请求</th><th>许可</th><th>已等待</th><th>已通知</th></tr>
+                    <tr><th>位次</th><th>会话</th><th>请求</th><th>许可</th><th>轨道</th><th>已等待</th><th>已通知</th></tr>
                     <tr th:each="w : ${r.value.waitersList}">
                         <td th:text="${w.position}">1</td>
                         <td th:text="${w.sessionId}">0</td>
                         <td th:text="${w.requestId}">0</td>
                         <td th:text="${w.permits}">1</td>
+                        <td th:text="${w.queueTrack == 1 ? '等容量' : (w.queueTrack == 2 ? '等元素' : '—')}">—</td>
                         <td th:text="${w.waitedMs} + 'ms'">0ms</td>
                         <td th:text="${w.notified} ? '是' : '否'">否</td>
                     </tr>
                     <tr th:if="${r.value.waitersList.isEmpty()}">
-                        <td colspan="6" class="empty"
-                            th:text="${r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : '无人等待'}">无人等待</td>
+                        <td colspan="7" class="empty"
+                            th:text="${r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : (r.value.family == 'queue' ? '无人等待（队列挂起者经等容量/等元素双轨承载）' : '无人等待')}">无人等待</td>
                     </tr>
                 </table>
             </th:block>

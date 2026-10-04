@@ -12,6 +12,7 @@ import io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload;
 import io.github.lamspace.openlatch.protocol.raft.BarrierAwaitPayload;
 import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
+import io.github.lamspace.openlatch.protocol.raft.QueueOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
@@ -146,6 +147,32 @@ final class RaftEntrySamples {
         return RaftLogEntry.newBuilder().setType(RaftEntryType.ATOMIC_OP_ENTRY).setSeq(seq)
                 .setWallClockMs(wallMs)
                 .setCommandPayload(AtomicOpPayload.newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId).setRequest(rb)
+                        .build().toByteString())
+                .build();
+    }
+
+    /**
+     * 队列操作条目（v7）：blocking 位恒按参数承载（apply 侧固定立即式，
+     * 本夹具用于构造确定性回弹场景）。
+     */
+    static RaftLogEntry queueSample(long sessionId, long requestId, String key,
+                                    io.github.lamspace.openlatch.protocol.LockType kind,
+                                    io.github.lamspace.openlatch.protocol.QueueOp op,
+                                    boolean blocking, long capacity, byte[] element,
+                                    long delayMs, int maxElements, long opSeq,
+                                    long wallMs, long seq) {
+        io.github.lamspace.openlatch.protocol.QueueOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.QueueOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setLockType(kind).setBlocking(blocking)
+                        .setCapacity(capacity).setDelayMs(delayMs)
+                        .setMaxElements(maxElements).setOpSeq(opSeq);
+        if (element != null) {
+            rb.setElementBytes(com.google.protobuf.ByteString.copyFrom(element));
+        }
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.QUEUE_OP_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(QueueOpPayload.newBuilder()
                         .setSessionId(sessionId).setRequestId(requestId).setRequest(rb)
                         .build().toByteString())
                 .build();

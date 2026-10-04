@@ -282,6 +282,116 @@ class MessageLegalityTest {
     }
 
     @Test
+    void queue_message_payload_matrix_rejected_without_disconnect() {
+        EmbeddedChannel ch = channel(null);
+        ch.pipeline().fireChannelActive();
+        // v7 握手（低版本会话的 QUEUE 拒绝语义在 QueueGatingTest 钉死，
+        // 此处只验载荷与形状维度）。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7).setType(MessageType.HELLO)
+                .setRequestId(1)
+                .setHelloRequest(io.github.lamspace.openlatch.protocol.HelloRequest
+                        .newBuilder().setClientProtocolVersion(7))
+                .build());
+        readOut(ch);
+
+        // QUEUE_OP 无 payload / 错挂他种 payload：消息级拒绝、状态码在线路可见。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(2).build());
+        Envelope noPayload = readOut(ch);
+        assertThat(noPayload.getType()).isEqualTo(MessageType.QUEUE_OP);
+        assertThat(noPayload.getQueueOpResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(3)
+                .setReleaseRequest(ReleaseRequest.newBuilder().setKey("k"))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+
+        // 形状矩阵违例逐格（PUT 缺元素、非 PUT 携元素、DELAY 外携 delay、
+        // DRAIN 携 blocking、读携 op_seq、ACQUIRE 携队列形态）。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(4)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setCapacity(4).setOpSeq(1))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(5)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_TAKE)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setElementBytes(com.google.protobuf.ByteString.copyFromUtf8("x"))
+                        .setOpSeq(1))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(6)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_DRAIN)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setBlocking(true).setMaxElements(2).setOpSeq(1))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(7)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_SIZE)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setOpSeq(3))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(8)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PEEK)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE)
+                        .setDelayMs(1000))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        // ACQUIRE 携队列形态（12/13）属类型误用。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(9)
+                .setAcquireRequest(AcquireRequest.newBuilder().setKey("q")
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setWaitMs(0))
+                .build());
+        assertThat(readOut(ch).getAcquireResponse().getStatus())
+                .isEqualTo(StatusCode.INVALID_REQUEST);
+        assertThat(ch.isOpen()).isTrue();
+
+        // 同连接继续正常服务：合法队列写与锁获取照常。
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(10)
+                .setQueueOpRequest(io.github.lamspace.openlatch.protocol.QueueOpRequest
+                        .newBuilder().setKey("q")
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE)
+                        .setCapacity(4)
+                        .setElementBytes(com.google.protobuf.ByteString.copyFromUtf8("ok"))
+                        .setOpSeq(1))
+                .build());
+        assertThat(readOut(ch).getQueueOpResponse().getStatus()).isEqualTo(StatusCode.OK);
+        ch.writeInbound(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(11)
+                .setAcquireRequest(AcquireRequest.newBuilder().setKey("ok").setWaitMs(0))
+                .build());
+        assertThat(readOut(ch).getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(ch.isOpen()).isTrue();
+    }
+
+    @Test
     void dispatch_failure_becomes_internal_error_response_not_silent_hang() {
         AtomicBoolean notifyThrows = new AtomicBoolean(false);
         CoreEngine core = new CoreEngine(new CoreConfig(), new SystemClock(),

@@ -276,6 +276,16 @@ class ProtocolCodecTest {
         assertThat(StatusCode.INVALID_REQUEST.getNumber()).isEqualTo(9);
         // v1 预留、v2 启用：编号不变。
         assertThat(StatusCode.NOT_LEADER.getNumber()).isEqualTo(10);
+
+        // v7：队列消息对/形态/操作编号钉定。
+        assertThat(MessageType.QUEUE_OP.getNumber()).isEqualTo(18);
+        assertThat(LockType.LOCK_TYPE_QUEUE.getNumber()).isEqualTo(12);
+        assertThat(LockType.LOCK_TYPE_DELAY_QUEUE.getNumber()).isEqualTo(13);
+        assertThat(QueueOp.QUEUE_OP_PUT.getNumber()).isZero();
+        assertThat(QueueOp.QUEUE_OP_TAKE.getNumber()).isEqualTo(1);
+        assertThat(QueueOp.QUEUE_OP_DRAIN.getNumber()).isEqualTo(2);
+        assertThat(QueueOp.QUEUE_OP_PEEK.getNumber()).isEqualTo(3);
+        assertThat(QueueOp.QUEUE_OP_SIZE.getNumber()).isEqualTo(4);
     }
 
     /** 场景：v2 CLUSTER_VIEW 响应信封回环——成员表逐项等值，payload 分支为 cluster_view。 */
@@ -544,5 +554,168 @@ class ProtocolCodecTest {
         } catch (InvalidProtocolBufferException e) {
             throw new AssertionError("apply decode failed", e);
         }
+    }
+
+    /**
+     * 场景：v7 队列消息对回环——请求形状矩阵（PUT 全字段/TAKE 阻塞/DRAIN 批量/
+     * 读类零 op_seq）、元素 presence 三形态（缺省/零长度/4KB 二进制）判别与字节级
+     * 保真、应答 QUEUED/交付/两态可区分、raft 侧 QueueOpPayload/ApplyResult/
+     * SnapshotLock 队列字段（元素序、到期时刻、交付槽）整体等值。
+     */
+    @Test
+    void queueOperationRoundTrip() throws InvalidProtocolBufferException {
+        byte[] big = new byte[4096];
+        for (int i = 0; i < big.length; i++) {
+            big[i] = (byte) (i * 131 + 7);
+        }
+
+        // 请求形状：PUT 全字段（阻塞+容量主张+4KB 元素+写序号）
+        QueueOpRequest put = QueueOpRequest.newBuilder()
+                .setKey("q").setOp(QueueOp.QUEUE_OP_PUT)
+                .setLockType(LockType.LOCK_TYPE_QUEUE)
+                .setBlocking(true).setCapacity(8)
+                .setElementBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .setOpSeq(5L).build();
+        Envelope envPut = Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(31L)
+                .setQueueOpRequest(put).build();
+        Envelope parsedPut = roundTrip(envPut);
+        assertThat(parsedPut.hasQueueOpRequest()).isTrue();
+        assertThat(parsedPut.getQueueOpRequest()).isEqualTo(put);
+        assertThat(parsedPut.getQueueOpRequest().getElementBytes().toByteArray())
+                .containsExactly(big);
+
+        // 元素 presence 三形态：缺省（违例形）/零长度（合法空串元素）/4KB——序列化互异
+        QueueOpRequest absent = put.toBuilder().clearElementBytes().build();
+        QueueOpRequest emptyEl = put.toBuilder()
+                .setElementBytes(com.google.protobuf.ByteString.EMPTY).build();
+        assertThat(absent.hasElementBytes()).isFalse();
+        assertThat(emptyEl.hasElementBytes()).isTrue();
+        assertThat(emptyEl.getElementBytes().isEmpty()).isTrue();
+        assertThat(absent.toByteArray()).isNotEqualTo(emptyEl.toByteArray());
+
+        // DELAY 形态注入 + DRAIN 批量 + 读类零序号
+        QueueOpRequest delayed = QueueOpRequest.newBuilder()
+                .setKey("dq").setOp(QueueOp.QUEUE_OP_PUT)
+                .setLockType(LockType.LOCK_TYPE_DELAY_QUEUE)
+                .setCapacity(16).setDelayMs(3000)
+                .setElementBytes(com.google.protobuf.ByteString.copyFromUtf8("late"))
+                .setOpSeq(1L).build();
+        QueueOpRequest drain = QueueOpRequest.newBuilder()
+                .setKey("q").setOp(QueueOp.QUEUE_OP_DRAIN)
+                .setLockType(LockType.LOCK_TYPE_QUEUE)
+                .setMaxElements(64).setOpSeq(6L).build();
+        QueueOpRequest size = QueueOpRequest.newBuilder()
+                .setKey("q").setOp(QueueOp.QUEUE_OP_SIZE)
+                .setLockType(LockType.LOCK_TYPE_QUEUE).build();
+        assertThat(QueueOpRequest.parseFrom(delayed.toByteArray()).getDelayMs()).isEqualTo(3000);
+        assertThat(QueueOpRequest.parseFrom(drain.toByteArray()).getMaxElements()).isEqualTo(64);
+        assertThat(size.getOpSeq()).isZero();
+
+        // 应答形状：QUEUED 位次 / TAKE 交付 / PEEK 无元素两态 / DRAIN 有序列表 / SIZE+容量回显
+        QueueOpResponse queued = QueueOpResponse.newBuilder()
+                .setStatus(StatusCode.QUEUED).setOp(QueueOp.QUEUE_OP_PUT).setQueuePosition(3).build();
+        QueueOpResponse take = QueueOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(QueueOp.QUEUE_OP_TAKE)
+                .setElementBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .setCapacity(8).build();
+        QueueOpResponse peekAbsent = QueueOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(QueueOp.QUEUE_OP_PEEK).build();
+        QueueOpResponse peekEmptyEl = peekAbsent.toBuilder()
+                .setElementBytes(com.google.protobuf.ByteString.EMPTY).build();
+        assertThat(peekAbsent.hasElementBytes()).isFalse();
+        assertThat(peekEmptyEl.hasElementBytes()).isTrue();
+        assertThat(peekAbsent.toByteArray()).isNotEqualTo(peekEmptyEl.toByteArray());
+        QueueOpResponse drained = QueueOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(QueueOp.QUEUE_OP_DRAIN)
+                .addDrainedBytes(com.google.protobuf.ByteString.copyFromUtf8("a"))
+                .addDrainedBytes(com.google.protobuf.ByteString.EMPTY)
+                .addDrainedBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .build();
+        QueueOpResponse sized = QueueOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(QueueOp.QUEUE_OP_SIZE)
+                .setSize(3).setCapacity(8).build();
+        Envelope envTake = Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(32L)
+                .setQueueOpResponse(take).build();
+        assertThat(roundTrip(envTake).getQueueOpResponse().getElementBytes().toByteArray())
+                .containsExactly(big);
+        assertThat(parseQueueResponse(drained).getDrainedBytesList())
+                .containsExactly(com.google.protobuf.ByteString.copyFromUtf8("a"),
+                        com.google.protobuf.ByteString.EMPTY,
+                        com.google.protobuf.ByteString.copyFrom(big));
+        assertThat(parseQueueResponse(queued).getQueuePosition()).isEqualTo(3);
+        assertThat(parseQueueResponse(sized).getSize()).isEqualTo(3);
+
+        // raft 侧：QueueOpPayload 包裹 RaftLogEntry 回环
+        io.github.lamspace.openlatch.protocol.raft.QueueOpPayload payload =
+                io.github.lamspace.openlatch.protocol.raft.QueueOpPayload.newBuilder()
+                        .setSessionId(0x100000001L).setRequestId(31L).setRequest(put).build();
+        io.github.lamspace.openlatch.protocol.raft.RaftLogEntry entry =
+                io.github.lamspace.openlatch.protocol.raft.RaftLogEntry.newBuilder()
+                        .setType(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.QUEUE_OP_ENTRY)
+                        .setSeq(77L).setWallClockMs(123456789L)
+                        .setCommandPayload(payload.toByteString()).build();
+        try {
+            io.github.lamspace.openlatch.protocol.raft.RaftLogEntry parsedEntry =
+                    io.github.lamspace.openlatch.protocol.raft.RaftLogEntry.parseFrom(entry.toByteArray());
+            assertThat(parsedEntry).isEqualTo(entry);
+            assertThat(io.github.lamspace.openlatch.protocol.raft.QueueOpPayload
+                    .parseFrom(parsedEntry.getCommandPayload()).getRequest()).isEqualTo(put);
+        } catch (InvalidProtocolBufferException e) {
+            throw new AssertionError("raft entry decode failed", e);
+        }
+
+        // ApplyResult 队列回执字段回环（20/21/22）
+        io.github.lamspace.openlatch.protocol.raft.ApplyResult apply =
+                io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                        .setStatus(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK)
+                        .setQueueElementBytes(com.google.protobuf.ByteString.copyFrom(big))
+                        .addQueueDrainedBytes(com.google.protobuf.ByteString.copyFromUtf8("x"))
+                        .setQueueSize(9L).build();
+        io.github.lamspace.openlatch.protocol.raft.ApplyResult parsedApply = parseApply(apply);
+        assertThat(parsedApply).isEqualTo(apply);
+        assertThat(parsedApply.hasQueueElementBytes()).isTrue();
+        assertThat(parsedApply.getQueueElementBytes().toByteArray()).containsExactly(big);
+
+        // SnapshotLock 队列字段回环：元素序与到期时刻、交付槽（TAKE 单份/DRAIN 列表）
+        io.github.lamspace.openlatch.protocol.raft.SnapshotLock qLock =
+                io.github.lamspace.openlatch.protocol.raft.SnapshotLock.newBuilder()
+                        .setKey("q").setLockType(LockType.LOCK_TYPE_DELAY_QUEUE)
+                        .setQueueCapacity(16)
+                        .addQueueElements(io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement
+                                .newBuilder().setPayload(
+                                        com.google.protobuf.ByteString.copyFromUtf8("head"))
+                                .setExpiresAtMs(1000L))
+                        .addQueueElements(io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement
+                                .newBuilder().setPayload(com.google.protobuf.ByteString.EMPTY)
+                                .setExpiresAtMs(2000L))
+                        .addQueueDedupSlots(io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot
+                                .newBuilder().setSessionId(1L).setOpSeq(4L).setOp(1)
+                                .setElementBytes(com.google.protobuf.ByteString.copyFrom(big)))
+                        .addQueueDedupSlots(io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot
+                                .newBuilder().setSessionId(2L).setOpSeq(9L).setOp(2)
+                                .addDrainedBytes(com.google.protobuf.ByteString.copyFromUtf8("a"))
+                                .addDrainedBytes(com.google.protobuf.ByteString.copyFromUtf8("b")))
+                        .build();
+        try {
+            io.github.lamspace.openlatch.protocol.raft.SnapshotLock parsedLock =
+                    io.github.lamspace.openlatch.protocol.raft.SnapshotLock
+                            .parseFrom(qLock.toByteArray());
+            assertThat(parsedLock).isEqualTo(qLock);
+            assertThat(parsedLock.getQueueElementsList()).extracting(
+                    io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement::getExpiresAtMs)
+                    .containsExactly(1000L, 2000L);
+            assertThat(parsedLock.getQueueDedupSlots(1).getDrainedBytesList()).hasSize(2);
+        } catch (InvalidProtocolBufferException e) {
+            throw new AssertionError("snapshot lock decode failed", e);
+        }
+    }
+
+    /** 队列应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 QUEUE_OP 通道）。 */
+    private static QueueOpResponse parseQueueResponse(QueueOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(7)
+                .setType(MessageType.QUEUE_OP).setRequestId(33L)
+                .setQueueOpResponse(resp).build()).getQueueOpResponse();
     }
 }

@@ -37,7 +37,11 @@
                         ? (item.atomicKind == 'reference'
                             ? 'reference = ' + item.atomicPayloadSize + 'B ' + item.atomicPayloadPreview
                             : item.atomicKind + ' = ' + item.atomicValue)
-                        : (item.family == 'barrier' ? item.barrierParties + ' 方 · 世代 ' + item.barrierGeneration + ' · 到场 ' + item.barrierArrived : '')}">long = 0</td>
+                        : (item.family == 'barrier'
+                            ? item.barrierParties + ' 方 · 世代 ' + item.barrierGeneration + ' · 到场 ' + item.barrierArrived
+                            : (item.family == 'queue'
+                                ? item.queueCapacity + ' 容量 · 深度 ' + item.queueDepth + ' · 队首 ' + item.queueHeadPayloadSize + 'B ' + item.queueHeadPayloadPreview
+                                : ''))}">long = 0</td>
                 </tr>
                 <tr th:if="${row.value.itemsList.isEmpty()}">
                     <td colspan="6" class="empty">无条目</td>

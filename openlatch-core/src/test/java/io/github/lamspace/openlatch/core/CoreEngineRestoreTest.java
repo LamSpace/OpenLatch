@@ -224,7 +224,7 @@ class CoreEngineRestoreTest {
                 List.of(new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE, 0, 0, 0,
                         List.of(), 0, 0, 0, null, null,
                         new CoreStateRestore.AtomicRefState(new byte[] {1}, big, 5,
-                                holder, 8, true, new byte[] {2}, new byte[] {3}, 4))),
+                                holder, 8, true, new byte[] {2}, new byte[] {3}, 4), null)),
                 List.of(holder), 1));
         // 命中槽重放：返回槽内应答（恢复不重演操作规则），载荷字节级保真。
         AtomicRefOpResult replay = engine.atomicRefOp(new AtomicRefOpCommand(holder, 1, "r",
@@ -247,19 +247,19 @@ class CoreEngineRestoreTest {
     void referenceEntryStateGroupGuards() {
         // 引用形态缺状态组拒。
         assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE,
-                0, 0, 0, List.of(), 0, 0, 0, null, null, null))
+                0, 0, 0, List.of(), 0, 0, 0, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         // 标量形态携带引用状态组拒。
         assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_LONG,
                 0, 0, 0, List.of(), 0, 0, 0,
                 new CoreStateRestore.AtomicState(0, 1, 1, 0, 0, false, 0, 0, 0), null,
-                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0)))
+                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0), null))
                 .isInstanceOf(IllegalArgumentException.class);
         // 引用形态携租约/持有者拒。
         assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE,
                 3, 30_000, 1_000, List.of(new CoreStateRestore.Holder(1, 1, 1)), 0, 0, 0,
                 null, null,
-                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0)))
+                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0), null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

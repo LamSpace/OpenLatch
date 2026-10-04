@@ -485,6 +485,6 @@ public final class AtomicEntry implements KeyEntry {
                 List.of(), List.of(),
                 0, 0, 0, 0, List.of(),
                 kind, initial, value, version,
-                0, 0, 0, false, null, null, null);
+                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null);
     }
 }

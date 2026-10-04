@@ -25,8 +25,12 @@ import io.github.lamspace.openlatch.protocol.BarrierLeaveResponse;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.QueueOp;
+import io.github.lamspace.openlatch.protocol.QueueOpRequest;
+import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.raft.QueueOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.BarrierActionDonePayload;
@@ -546,6 +550,156 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * QUEUE_OP 集群路径（v7，Leader 权威车道）：挂起是 Leader 本地
+     * {@code WaitQueue} 双轨态、预检与挂起登记仅在当值 Leader 发生，故与
+     * LATCH_AWAIT 同型设角色门——非 Leader 回 {@code NOT_LEADER} 随附提示，
+     * 客户端改道既有车道。门控/形状/入口钳制先于一切（非法请求零日志，
+     * 钳定后的 DRAIN 上限随条目入日志保回放一致）。阻塞式预检读影子表：
+     * PUT 按容量空位判定（key 缺席视为可满足——定型创建经提交落地）、
+     * TAKE 按队首可见性判定（DELAY 要求队首到期不晚于当前时刻）；不可满足
+     * 则入轨回 {@code QUEUED}（零日志）。预检与提交间竞态致应用点
+     * {@code DENIED} 的回弹重挂由 {@code ReplicationGateway.queueSideEffects}
+     * 改写回执（判例锁预演失效改写）；唤醒推送同在该处。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code queue_op_request} 分支）
+     * @param ctx     连接上下文
+     */
+    public void handleQueueOp(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 7) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        QueueOpRequest req = msg.getQueueOpRequest();
+        StatusCode shapeBad = RequestDispatcher.validateQueueShape(req);
+        RequestDispatcher.QueueClamp clamp = shapeBad == null
+                ? RequestDispatcher.clampQueueRequest(req, config.maxValueBytes(),
+                        config.maxQueueCapacity(), config.maxDrainBytes())
+                : new RequestDispatcher.QueueClamp(shapeBad, null);
+        if (clamp.error() != null) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, clamp.error()));
+            return;
+        }
+        QueueOpRequest finalReq = clamp.request();
+        long now = System.currentTimeMillis();
+        if (finalReq.getBlocking()) {
+            var shadow = kernel.shadow();
+            String key = finalReq.getKey();
+            int track = finalReq.getOp() == QueueOp.QUEUE_OP_PUT ? 1 : 2;
+            // 重发队首门：已挂起且非队首的早到重发不提交（防插队，判例锁
+            // "队首已通知窗口禁止越过"）——回显其位次继续等待唤醒事件。
+            int parkedPos = waitQueue.trackPosition(session.sessionId(), msg.getRequestId(),
+                    key, track);
+            if (parkedPos > 1) {
+                writeSync(ctx, session, startNanos,
+                        queueOpLocalResponse(msg, StatusCode.QUEUED, parkedPos, finalReq));
+                return;
+            }
+            boolean satisfiable;
+            if (finalReq.getOp() == QueueOp.QUEUE_OP_PUT) {
+                satisfiable = !shadow.isQueue(key)
+                        || shadow.queueDepth(key) < shadow.queueCapacity(key);
+            } else {
+                long expiry = shadow.queueHeadExpiryMs(key);
+                satisfiable = shadow.queueDepth(key) > 0 && (expiry == 0 || expiry <= now);
+            }
+            if (!satisfiable) {
+                // 队首重发但不满足经幂等命中续约通知窗口（判例锁重发抵达）。
+                int pos = waitQueue.enqueueTrack(session.sessionId(), msg.getRequestId(),
+                        key, track, now);
+                StatusCode st = pos < 0 ? StatusCode.OVERLOADED : StatusCode.QUEUED;
+                writeSync(ctx, session, startNanos, queueOpLocalResponse(msg, st, pos, finalReq));
+                return;
+            }
+        }
+        ByteString payload = QueueOpPayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequestId(msg.getRequestId())
+                .setRequest(finalReq)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.QUEUE_OP_ENTRY, payload)
+                .whenComplete((r, err) -> {
+                    Envelope resp = err == null ? mapQueueOp(msg, r, finalReq)
+                            : commitFailure(msg, err);
+                    if (metrics != null) {
+                        metrics.recordQueue(finalReq.getOp(),
+                                resp.getQueueOpResponse().getStatus());
+                    }
+                    respondAsync(ctx, session, startNanos, resp);
+                });
+    }
+
+    /**
+     * {@link ApplyResult} → QueueOpResponse（v7）：状态码映射沿既有口径
+     * （{@code QUEUE_FULL}→{@code OVERLOADED} 判例锁深度护栏）；交付字段
+     * 按显式 presence 透传（空串元素=零长度存在，与"无元素"的缺省两态
+     * 可辨）；容量回显取影子表弱一致读数（仅便利，非裁决）。
+     *
+     * @param msg    原请求
+     * @param result 应用回执
+     * @param req    钳定后的请求（op 回显用）
+     * @return 应答信封
+     */
+    private Envelope mapQueueOp(Envelope msg, ApplyResult result, QueueOpRequest req) {
+        StatusCode st = switch (result.getStatus()) {
+            case OK -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case DENIED -> StatusCode.DENIED;
+            case QUEUE_FULL -> StatusCode.OVERLOADED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        QueueOpResponse.Builder b = QueueOpResponse.newBuilder()
+                .setStatus(st)
+                .setOp(req.getOp())
+                .setQueuePosition(result.getQueuePosition());
+        if (result.hasQueueElementBytes()) {
+            b.setElementBytes(result.getQueueElementBytes());
+        }
+        b.addAllDrainedBytes(result.getQueueDrainedBytesList());
+        if (result.getQueueSize() != 0) {
+            b.setSize(result.getQueueSize());
+        }
+        if (st == StatusCode.OK || st == StatusCode.QUEUED || st == StatusCode.DENIED) {
+            b.setCapacity(kernel.shadow().queueCapacity(req.getKey()));
+        }
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.QUEUE_OP)
+                .setRequestId(msg.getRequestId())
+                .setQueueOpResponse(b)
+                .build();
+    }
+
+    /**
+     * 本地挂起/拒绝的队列应答构造（不经 ApplyResult 的同步路径，
+     * 复用 {@link #mapQueueOp} 装配形态）。
+     *
+     * @param msg      原请求
+     * @param st       协议状态码（QUEUED/OVERLOADED）
+     * @param position 轨内位次（QUEUED 有效）
+     * @param req      钳定后的请求
+     * @return 应答信封
+     */
+    private Envelope queueOpLocalResponse(Envelope msg, StatusCode st, int position,
+            QueueOpRequest req) {
+        ApplyStatus as = st == StatusCode.QUEUED ? ApplyStatus.QUEUED : ApplyStatus.QUEUE_FULL;
+        return mapQueueOp(msg, ApplyResult.newBuilder()
+                .setStatus(as)
+                .setQueuePosition(position)
+                .build(), req);
+    }
+
+    /**
      * BARRIER_AWAIT 集群路径（ACQUIRE 车道 + 复制提交）：到场改变复制状态
      * （到场账簿、合拢与执行者指定、世代号），MUST 经日志——与 Latch
      * "await 零日志"的边界差异系设计使然（屏障到场是状态迁移事件）。
@@ -824,6 +978,7 @@ public final class ClusterRequestHandler {
             case BARRIER_AWAIT -> msg.hasBarrierAwaitRequest();
             case BARRIER_LEAVE -> msg.hasBarrierLeaveRequest();
             case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest();
+            case QUEUE_OP -> msg.hasQueueOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -838,6 +993,7 @@ public final class ClusterRequestHandler {
             case BARRIER_AWAIT -> msg.getBarrierAwaitRequest().getKey();
             case BARRIER_LEAVE -> msg.getBarrierLeaveRequest().getKey();
             case BARRIER_ACTION_DONE -> msg.getBarrierActionDoneRequest().getKey();
+            case QUEUE_OP -> msg.getQueueOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {

@@ -36,3 +36,9 @@
 | 有值引用 | atomic reference | ATOMIC 家族的载荷形态（v6）：一段不透明字节 + 版本戳，get/set/版本 CAS，服务端永不反序列化 |
 | 载荷钳制 | payload clamp | 有值引用载荷字节上限（`max-value-bytes`，默认 4KB）：仅在接入层判定，超限命令不入日志、零生效；下调不追溯存量 |
 | 截断预览 | truncated preview | 管理观察面对引用载荷的呈现形态：恒定长度（≤64B）转义前缀 + 真实字节数，全量载荷不出现在管理应答中 |
+| 定型容量 | declared capacity | 队列首建写入主张并定格的容量上限（v7，受服务端 `max-queue-capacity` 钳制）；后续非零主张不符即拒 |
+| 出队谓词 | dequeue predicate | 队首元素可否被消费之判定：QUEUE 形态恒真；DELAY 形态要求队首绝对到期不晚于判定时刻（未到期不得被越过） |
+| 到期折算 | expiry folding | 延时元素绝对到期时刻在应用点以条目携带时刻折算（判例租约 `expires_at`）；跨副本回放逐毫秒一致 |
+| 双轨等待 | dual-track waiting | 队列挂起的两种身份：等容量（put-waiter）与等元素（take-waiter），按轨独立计位次与唤醒（v7） |
+| 应用点回弹 | apply-point bounce | 预检放行提交后应用点不可满足：阻塞请求经改写回 QUEUED 原位续挂，对调用者透明（v7） |
+| 队首门 | head gate | 非队首的挂起者重发不得越过在队前辈直接生效（单机条目与 Leader 预检两路同判），保证唤醒授予序=挂起到达序（v7） |

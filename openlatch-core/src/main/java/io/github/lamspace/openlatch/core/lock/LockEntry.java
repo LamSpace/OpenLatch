@@ -570,7 +570,7 @@ public final class LockEntry implements KeyEntry {
         for (Waiter w : waiters) {
             waiterSnaps.add(new CoreInspection.WaiterSnapshot(
                     w.sessionId(), w.requestId(), w.threadId(), w.permits(),
-                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified()));
+                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified(), 0));
         }
         long remaining = leaseToken != 0 ? Math.max(0, leaseExpiresAtMs - now) : 0;
         return new CoreInspection.KeySnapshot(key, KeyFamily.LOCK, reentrant,
@@ -578,6 +578,6 @@ public final class LockEntry implements KeyEntry {
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
                 0, 0, 0, 0, List.of(),
                 null, 0, 0, 0,
-                0, 0, 0, false, null, null, null);
+                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null);
     }
 }

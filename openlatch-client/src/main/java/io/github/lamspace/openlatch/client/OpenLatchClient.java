@@ -1484,6 +1484,50 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程有界阻塞队列句柄（协议 v7）。容量 {@code capacity} 为定型主张，
+     * 随每次写携带：key 首建时以该值定格条目容量（受服务端
+     * {@code max-queue-capacity} 上限钳制），既有条目定型值与之不符时首个写操作
+     * 抛 {@link OpenLatchException}（判例 Semaphore/Latch 非零主张）。同一 key 的
+     * 队列与延时队列形态互斥（{@link #newDelayQueue} 建的 key 上本句柄被拒，
+     * 反之亦然）。句柄线程安全、无租约、无看门狗；元素生命周期契约与语义
+     * 降级/增强清单见 {@link OBlockingQueue} 接口级 Javadoc。
+     *
+     * @param key      队列键（非空）
+     * @param capacity 定型容量主张（{@code >= 1}）
+     * @return 有界队列句柄
+     * @throws IllegalArgumentException key 为空或容量非正
+     */
+    public OBlockingQueue newBlockingQueue(String key, long capacity) {
+        Objects.requireNonNull(key, "key");
+        if (capacity < 1) {
+            throw new IllegalArgumentException("capacity must be >= 1: " + capacity);
+        }
+        return new RemoteBlockingQueue(this, key, capacity,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE);
+    }
+
+    /**
+     * 创建跨进程延时队列句柄（{@link ODelayQueue}，协议 v7）：形态主张
+     * {@code DELAY_QUEUE}，出队按最早到期序、同到期保持到达序；容量定型与
+     * 形态互斥规则同 {@link #newBlockingQueue(String, long)}。延时注入与
+     * 相对 JDK {@code DelayQueue} 的签名差异（{@code offerDelayed} 改名）见
+     * {@link ODelayQueue} 接口级 Javadoc。
+     *
+     * @param key      队列键（非空）
+     * @param capacity 定型容量主张（{@code >= 1}）
+     * @return 延时队列句柄
+     * @throws IllegalArgumentException key 为空或容量非正
+     */
+    public ODelayQueue newDelayQueue(String key, long capacity) {
+        Objects.requireNonNull(key, "key");
+        if (capacity < 1) {
+            throw new IllegalArgumentException("capacity must be >= 1: " + capacity);
+        }
+        return new RemoteBlockingQueue(this, key, capacity,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE);
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。

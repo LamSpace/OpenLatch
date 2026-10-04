@@ -21,6 +21,7 @@
 | v4 | atomic variables (`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`): the `ATOMIC_OP` message pair, per-key version stamps and dedup slots |
 | v5 | cyclic barrier (`OBarrier`): `BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` message pairs, replicated generation ledgers, leave-breaks-the-generation contract |
 | v6 | atomic reference (`OAtomicReference`): `optional bytes` payload fields on the ATOMIC message pair (no new `MessageType`), ingress `maxValueBytes` clamp, payload snapshot/preview |
+| v7 | bounded & delay queues (`OBlockingQueue`/`ODelayQueue`): the `QUEUE_OP` message pair, `LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` kinds, per-session dedup slots, two-fulls split (DENIED vs OVERLOADED), capacity/drain ingress clamps, apply-point expiry folding, queue snapshot fields |
 
 Mixed-version rule: **server ≥ client**. Old clients (v1/v2) work fully against new servers;
 a newer client against an older server is rejected at handshake (explicit failure beats
@@ -28,7 +29,9 @@ silent behavioral downgrade). Atomic capabilities require server v4, barrier cap
 server v5 (v≤4 sessions sending `BARRIER_*` get an `INVALID_REQUEST` message-level
 rejection without disconnect), and reference-form payloads require server v6 (v≤5 sessions
 sending a reference-form `ATOMIC_OP` get an `INVALID_REQUEST` message-level rejection
-without disconnect — scalar atomics stay untouched); after the server is upgraded, v≤5
+without disconnect — scalar atomics stay untouched), and queue operations require server
+v7 (v≤6 sessions sending `QUEUE_OP` get an `INVALID_REQUEST` message-level rejection
+without disconnect, every other primitive unaffected); after the server is upgraded, v≤6
 clients keep their byte-for-byte behavior.
 
 ## Upgrade & rollback order

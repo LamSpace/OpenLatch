@@ -19,6 +19,7 @@ enum MessageType
   BARRIER_AWAIT 15
   BARRIER_LEAVE 16
   BARRIER_ACTION_DONE 17
+  QUEUE_OP 18
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -32,6 +33,8 @@ enum LockType
   LOCK_TYPE_ATOMIC_BOOLEAN 9
   LOCK_TYPE_BARRIER 10
   LOCK_TYPE_ATOMIC_REFERENCE 11
+  LOCK_TYPE_QUEUE 12
+  LOCK_TYPE_DELAY_QUEUE 13
 enum StatusCode
   OK 0
   QUEUED 1
@@ -53,6 +56,12 @@ enum AtomicOp
   ATOMIC_ADD 3
   ATOMIC_CAS 4
   ATOMIC_CAS_STAMPED 5
+enum QueueOp
+  QUEUE_OP_PUT 0
+  QUEUE_OP_TAKE 1
+  QUEUE_OP_DRAIN 2
+  QUEUE_OP_PEEK 3
+  QUEUE_OP_SIZE 4
 message Envelope
   protocol_version 1
   type 2
@@ -87,6 +96,8 @@ message Envelope
   barrier_leave_response 37
   barrier_action_done_request 38
   barrier_action_done_response 39
+  queue_op_request 40
+  queue_op_response 41
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -170,6 +181,7 @@ message AdminSummaryResponse
   version 9
   atomic_entries 10
   barrier_entries 11
+  queue_entries 12
 message AdminListKeysRequest
   token 1
   page 2
@@ -188,6 +200,10 @@ message AdminKeyInfo
   barrier_arrived 10
   atomic_payload_size 11
   atomic_payload_preview 12
+  queue_capacity 13
+  queue_depth 14
+  queue_head_payload_size 15
+  queue_head_payload_preview 16
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -209,6 +225,7 @@ message AdminKeyWaiterInfo
   waited_ms 4
   permits 5
   notified 6
+  queue_track 7
 message AdminKeyDetailResponse
   status 1
   family 2
@@ -232,6 +249,12 @@ message AdminKeyDetailResponse
   barrier_last_final 20
   atomic_payload_size 21
   atomic_payload_preview 22
+  queue_capacity 23
+  queue_depth 24
+  queue_head_expiry_ms 25
+  queue_total_payload_bytes 26
+  queue_head_payload_size 27
+  queue_head_payload_preview 28
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -284,3 +307,21 @@ message BarrierActionDoneRequest
   generation 2
 message BarrierActionDoneResponse
   status 1
+message QueueOpRequest
+  key 1
+  op 2
+  lock_type 3
+  blocking 4
+  capacity 5
+  element_bytes 6
+  delay_ms 7
+  max_elements 8
+  op_seq 9
+message QueueOpResponse
+  status 1
+  op 2
+  queue_position 3
+  element_bytes 4
+  drained_bytes 5
+  size 6
+  capacity 7

@@ -58,6 +58,9 @@ import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.QueueOp;
+import io.github.lamspace.openlatch.protocol.QueueOpRequest;
+import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.LatchCountDownResponse;
@@ -96,6 +99,18 @@ public final class RequestDispatcher {
     private final int maxValueBytes;
 
     /**
+     * v7 队列定型容量上限（单机分发入口钳制；引擎/条目侧不复核，钳制点
+     * 唯一在接入层，判例 {@code maxValueBytes}）。
+     */
+    private final int maxQueueCapacity;
+
+    /**
+     * v7 drainTo 应答字节预算（单机分发入口钳制，钳定后的 DRAIN 上限
+     * 随命令入引擎）。
+     */
+    private final long maxDrainBytes;
+
+    /**
      * 构造分发器（不埋点，既有测试夹具形态；载荷上限取内置默认 4096）。
      *
      * @param core 锁语义核心
@@ -116,17 +131,38 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 构造分发器（全参形态：单机分发按 {@code maxValueBytes} 对有值引用载荷
-     * 做入口钳制）。
+     * 构造分发器（v6 三参形态：队列限额取内置默认，既有装配与测试夹具
+     * 兼容）。
      *
      * @param core          锁语义核心
      * @param metrics       指标门面，可为 {@code null}（不埋点）
      * @param maxValueBytes 有值引用载荷字节上限（{@code >= 1}）
      */
     public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes) {
+        this(core, metrics, maxValueBytes,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_QUEUE_CAPACITY,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_DRAIN_BYTES);
+    }
+
+    /**
+     * 构造分发器（全参形态：单机分发按 {@code maxValueBytes} 对有值引用载荷
+     * 与队列元素做入口钳制、按 {@code maxQueueCapacity}/{@code maxDrainBytes}
+     * 对队列容量主张与 drain 上限做入口钳制——钳制点唯一在接入层，
+     * 引擎/条目侧不复核）。
+     *
+     * @param core             锁语义核心
+     * @param metrics          指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes    有值引用载荷/队列元素字节上限（{@code >= 1}）
+     * @param maxQueueCapacity 队列定型容量上限（{@code >= 1}）
+     * @param maxDrainBytes    drainTo 应答字节预算（{@code >= 1}）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes,
+            int maxQueueCapacity, long maxDrainBytes) {
         this.core = Objects.requireNonNull(core);
         this.metrics = metrics;
         this.maxValueBytes = maxValueBytes;
+        this.maxQueueCapacity = maxQueueCapacity;
+        this.maxDrainBytes = maxDrainBytes;
     }
 
     /**
@@ -167,6 +203,9 @@ public final class RequestDispatcher {
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest()
                     ? dispatchBarrierActionDone(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case QUEUE_OP -> msg.hasQueueOpRequest()
+                    ? dispatchQueueOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -252,6 +291,8 @@ public final class RequestDispatcher {
             // v5：parties 断言与动作回报不被受理同属形状非法；破障是在带裁决。
             case REJECT_BARRIER_PARTIES -> StatusCode.INVALID_REQUEST;
             case REJECT_BARRIER_ACTION -> StatusCode.INVALID_REQUEST;
+            // v7：队列容量断言不成立同属形状非法（非零主张判例）。
+            case REJECT_QUEUE_CAPACITY -> StatusCode.INVALID_REQUEST;
             case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
         };
     }
@@ -387,6 +428,154 @@ public final class RequestDispatcher {
             return StatusCode.INVALID_REQUEST;
         }
         return null;
+    }
+
+    /**
+     * 队列请求形状校验（v7，配置无关的形状矩阵，单机分发与集群 Leader
+     * 入口共用——违例以 {@code INVALID_REQUEST} 消息级拒绝、不断连、零扰动）：
+     * {@code lock_type} MUST 为队列双形态之一；元素仅 PUT 携带且 PUT MUST
+     * 携带（元素不可为 null——缺省 presence 即违例，与引用形态的 null
+     * 语义刻意不同）；{@code delay_ms} 仅 DELAY_QUEUE 形态的 PUT 可携非零
+     * （负值违例）；{@code max_elements} 仅 DRAIN 可携非零；{@code blocking}
+     * 仅 PUT/TAKE 可携 {@code true}；写类 op {@code op_seq ≥ 1}、读类
+     * （PEEK/SIZE）{@code op_seq} MUST 为 0；容量断言 MUST 非负。
+     * 尺寸钳制（元素字节/容量上限/drain 预算）经 {@link #clampQueueRequest}
+     * 另行执行，不含在本矩阵内。
+     *
+     * @param req 队列请求
+     * @return 非法时 {@code INVALID_REQUEST}；合法为 {@code null}
+     */
+    public static StatusCode validateQueueShape(QueueOpRequest req) {
+        io.github.lamspace.openlatch.protocol.LockType kind = req.getLockType();
+        if (kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE
+                && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        QueueOp op = req.getOp();
+        if (op == QueueOp.UNRECOGNIZED) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        boolean put = op == QueueOp.QUEUE_OP_PUT;
+        boolean take = op == QueueOp.QUEUE_OP_TAKE;
+        boolean drain = op == QueueOp.QUEUE_OP_DRAIN;
+        boolean read = op == QueueOp.QUEUE_OP_PEEK || op == QueueOp.QUEUE_OP_SIZE;
+        if (put != req.hasElementBytes()) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getBlocking() && !(put || take)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getCapacity() < 0 || req.getDelayMs() < 0 || req.getMaxElements() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getDelayMs() > 0 && !(put && kind
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getMaxElements() > 0 && !drain) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (read ? req.getOpSeq() != 0 : req.getOpSeq() < 1) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return null;
+    }
+
+    /**
+     * 队列入口钳制结果（v7）：拒绝时 {@code error} 非空、{@code request}
+     * 为 {@code null}；放行时 {@code request} 为钳定后的最终请求——DRAIN
+     * 提取上限折算为正值随条目入日志（全副本应用一致，apply 不读本地
+     * 配置，判例 v6 钳制唯一在接入层）。
+     *
+     * @param error   入口拒绝状态码（{@code null}=放行）
+     * @param request 钳定后的请求
+     */
+    public record QueueClamp(StatusCode error, QueueOpRequest request) {
+    }
+
+    /**
+     * 队列入口钳制（v7）：PUT 元素字节数超 {@code maxValueBytes} 拒；容量
+     * 主张超 {@code maxQueueCapacity} 拒；DRAIN 提取上限钳定到
+     * {@code min(主张值(0=取派生上限), maxQueueCapacity, floor(maxDrainBytes /
+     * maxValueBytes))}（下限 1）回写请求。超限 MUST 入口拒绝且零日志/零
+     * 引擎调用；钳制下调不追溯存量元素（既有大元素照常可读可消费）。
+     *
+     * @param req              队列请求（已经 {@link #validateQueueShape} 放行）
+     * @param maxValueBytes    单元素载荷上限
+     * @param maxQueueCapacity 容量主张上限
+     * @param maxDrainBytes    drain 应答字节预算
+     * @return 钳制结果
+     */
+    public static QueueClamp clampQueueRequest(QueueOpRequest req, int maxValueBytes,
+            long maxQueueCapacity, long maxDrainBytes) {
+        if (req.hasElementBytes() && req.getElementBytes().size() > maxValueBytes) {
+            return new QueueClamp(StatusCode.INVALID_REQUEST, null);
+        }
+        if (req.getCapacity() > maxQueueCapacity) {
+            return new QueueClamp(StatusCode.INVALID_REQUEST, null);
+        }
+        QueueOpRequest out = req;
+        if (req.getOp() == QueueOp.QUEUE_OP_DRAIN) {
+            long derived = Math.max(1L, Math.min(Math.max(1L, maxDrainBytes)
+                            / Math.max(1, maxValueBytes),
+                    Math.max(1L, maxQueueCapacity)));
+            int limit = req.getMaxElements();
+            if (limit <= 0 || limit > derived) {
+                out = req.toBuilder()
+                        .setMaxElements((int) Math.min(derived, Integer.MAX_VALUE))
+                        .build();
+            }
+        }
+        return new QueueClamp(null, out);
+    }
+
+    /**
+     * 协议队列请求 → core 命令（形态与操作映射；{@code blocking} 位原样
+     * 承载——单机路径由条目裁决挂起，集群 apply 侧固定立即式）。
+     *
+     * @param sessionId 引擎内部或单机会话 id
+     * @param requestId 信封请求 id
+     * @param req       队列请求（已过形状与钳制）
+     * @return core 命令
+     */
+    public static io.github.lamspace.openlatch.core.command.QueueOpCommand toQueueCommand(
+            long sessionId, long requestId, QueueOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, requestId, req.getKey(),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCoreQueueKind(req.getLockType().getNumber()),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCoreQueueOp(req.getOp()),
+                req.getBlocking(), req.getCapacity(),
+                req.hasElementBytes() ? req.getElementBytes().toByteArray() : null,
+                req.getDelayMs(), req.getMaxElements(), req.getOpSeq());
+    }
+
+    /**
+     * core 队列结果 → 协议应答（v7）：GRANTED 择用交付字段（TAKE/PEEK 显式
+     * presence——空队/未到期回缺省；DRAIN 空列表为合法结果；SIZE 读数），
+     * QUEUED 携位次，拒绝态交付字段全缺省；{@code capacity} 恒回显条目
+     * 定型值（key 尚不存在为 0）。
+     *
+     * @param msg 原请求信封
+     * @param r   core 结果
+     * @return 应答信封
+     */
+    public static Envelope toQueueOpResponse(Envelope msg,
+            io.github.lamspace.openlatch.core.result.QueueOpResult r) {
+        QueueOpResponse.Builder b = QueueOpResponse.newBuilder()
+                .setStatus(toLatchStatus(r.outcome()))
+                .setOp(msg.getQueueOpRequest().getOp())
+                .setQueuePosition(r.queuePosition())
+                .setSize(r.size())
+                .setCapacity(r.capacity());
+        if (r.element() != null) {
+            b.setElementBytes(com.google.protobuf.ByteString.copyFrom(r.element()));
+        }
+        for (byte[] element : r.drained()) {
+            b.addDrainedBytes(com.google.protobuf.ByteString.copyFrom(element));
+        }
+        return envelope(msg, MessageType.QUEUE_OP, x -> x.setQueueOpResponse(b));
     }
 
     /**
@@ -561,6 +750,38 @@ public final class RequestDispatcher {
         }
         return envelope(msg, MessageType.BARRIER_ACTION_DONE, b -> b.setBarrierActionDoneResponse(
                 BarrierActionDoneResponse.newBuilder().setStatus(status)));
+    }
+
+    /**
+     * 分发队列操作（v7）：v7 门控与形状校验、入口钳制先于核心调用——
+     * 非法请求零入核、消息级拒绝不断连（判例各门与原子通道钳制）。
+     * 单机路径的挂起由条目双轨承载（引擎条目内 awaiters，判例 Latch
+     * 单机形态），唤醒经引擎事件出口推送、延时到期由本机调度周期扫描
+     * 驱动。应答构造见 {@link #toQueueOpResponse}。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code queue_op_request} 分支）
+     * @return 应答信封
+     */
+    private Envelope dispatchQueueOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 7) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        QueueOpRequest req = msg.getQueueOpRequest();
+        StatusCode shapeBad = validateQueueShape(req);
+        QueueClamp clamp = shapeBad == null
+                ? clampQueueRequest(req, maxValueBytes, maxQueueCapacity, maxDrainBytes)
+                : new QueueClamp(shapeBad, null);
+        if (clamp.error() != null) {
+            return errorResponse(msg, clamp.error());
+        }
+        io.github.lamspace.openlatch.core.result.QueueOpResult r =
+                core.queueOp(toQueueCommand(session.sessionId(), msg.getRequestId(),
+                        clamp.request()));
+        if (metrics != null) {
+            metrics.recordQueue(clamp.request().getOp(), toLatchStatus(r.outcome()));
+        }
+        return toQueueOpResponse(msg, r);
     }
 
     /**
@@ -887,6 +1108,10 @@ public final class RequestDispatcher {
             // v4：ATOMIC 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
             case ATOMIC_OP -> b.setAtomicOpResponse(
                     AtomicOpResponse.newBuilder().setStatus(status));
+            // v7：QUEUE_OP 同规则——门控/形状/钳制拒绝的状态码在线路可见
+            // （SDK 的"不可重试→显式异常"分类依赖应答码形）。
+            case QUEUE_OP -> b.setQueueOpResponse(
+                    QueueOpResponse.newBuilder().setStatus(status));
             default -> {
             }
         }

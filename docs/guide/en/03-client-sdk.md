@@ -169,6 +169,58 @@ Semantic boundaries (know these; details in [01 core concepts §7.1](01-concepts
    6, a reference-form request fails with an explicit `OpenLatchException`
    (`INVALID_REQUEST`) — no retry, no silent downgrade.
 
+## Bounded and delay queues (OBlockingQueue / ODelayQueue, v7)
+
+Cross-process element shipping: a bounded FIFO queue and a delay queue (elements
+carry an expiry instant). Elements are opaque bytes (subject to the same
+per-element `max-value-bytes` clamp, 4KB default); capacity is formed by the
+handle that first writes.
+
+```java
+OBlockingQueue jobs = client.newBlockingQueue("job:queue", 64);      // capacity claim 64
+jobs.put(s("task-A"));                                                // blocking put (interruptible)
+if (jobs.offer(s("task-B"))) { ... }                                 // immediate: false when full
+byte[] item = jobs.take();                                           // blocking take (interruptible)
+byte[] maybe = jobs.poll(2, TimeUnit.SECONDS);                       // budgeted take (local clock)
+List<byte[]> batch = new ArrayList<>();
+int n = jobs.drainTo(batch, 32);                                     // batched drain (RTT amortizer)
+int depth = jobs.size();                                             // residency view (delay: incl. unexpired)
+
+ODelayQueue alarm = client.newDelayQueue("alarm:queue", 16);
+alarm.offerDelayed(s("remind me"), 5, TimeUnit.MINUTES);             // invisible to consumers until due
+String due = alarm.takeAsString();                                   // earliest expiry first, ties by arrival
+```
+
+Semantic boundaries (details in [01 §9](01-concepts.md)):
+
+1. **Elements belong to the key, not the session**: producer death never swallows
+   them (stronger than the JDK's same-process heap); elements survive until
+   consumed and nothing reclaims them server-side — a forgotten key is permanent
+   residency (see the console's queue observations);
+2. **The two "fulls" split**: element-full → `offer` false / `put` parks;
+   waiter-queue-full → `OpenLatchException` (`OVERLOADED`, the lock depth-guard
+   mapping). Server-side parking has no expiry; a client timeout/interruption is
+   terminal locally while the server-side waiter is retired by events and the
+   timeout sweep — meanwhile its queue slot still holds the position (an
+   abandoned waiter never blocks others' progress semantics, only their ranks);
+3. **Per-session dedup slots make resends safe**: `put` never double-inserts,
+   `take`/`drainTo` replays deliver **the same bytes**; a mid-flight session
+   switch aborts (exception) — re-check with `size()`/`peek()`, never blindly
+   revalue;
+4. **Elements are never null** (JDK `BlockingQueue` rejectNull precedent — the
+   deliberate opposite of `OAtomicReference`; a zero-length array is a legal
+   element); no `iterator`/`contains`/`remove(Object)` surface;
+5. **Delay form**: `offerDelayed(e, delay, unit)` is explicitly named (JDK
+   DelayQueue's `offer(e, timeout, unit)` delay-injection signature collides
+   in shape with the wait-budget meaning elsewhere); absolute expiry is folded
+   at the apply point and replicated (leader changes cannot re-judge); wake
+   precision is the server ready tick (`ready-tick-ms`, default 200ms) while
+   correctness never depends on it;
+6. Requires a **v7 handshake** — older servers answer `QUEUE_OP` with an
+   explicit `OpenLatchException` (`INVALID_REQUEST`), no retry, no downgrade;
+   `drainTo`'s actual count is bounded by the server's `max-drain-bytes` budget
+   and is authoritative in the return value.
+
 ## Cyclic barrier (OBarrier, v5)
 
 ```java

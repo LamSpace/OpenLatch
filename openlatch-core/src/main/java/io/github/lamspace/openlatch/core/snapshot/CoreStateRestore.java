@@ -88,11 +88,14 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      *                    了结记录；非 BARRIER 恒 {@code null}）
      * @param atomicRef   ATOMIC 有值引用条目的状态组（初值/载荷/版本戳与
      *                    去重槽；非该形态恒 {@code null}）
+     * @param queue       QUEUE/DELAY_QUEUE 条目的状态组（容量/元素列表/去重槽表；
+     *                    非队列形态恒 {@code null}）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
-                        AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef) {
+                        AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef,
+                        QueueState queue) {
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -107,7 +110,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    0, 0, 0, null, null, null);
+                    0, 0, 0, null, null, null, null);
         }
 
         /**
@@ -127,7 +130,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 long expiresAtMs, List<Holder> holders, int permitsTotal,
                 long latchTotal, long latchCount) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    permitsTotal, latchTotal, latchCount, null, null, null);
+                    permitsTotal, latchTotal, latchCount, null, null, null, null);
         }
 
         /**
@@ -164,6 +167,20 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             } else if (barrier != null) {
                 throw new IllegalArgumentException(
                         "non-barrier entry carries barrier state: key=" + key);
+            }
+            boolean queueKind = lockType == LockType.QUEUE || lockType == LockType.DELAY_QUEUE;
+            if (queueKind) {
+                if (queue == null) {
+                    throw new IllegalArgumentException(
+                            "queue entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "queue entry carries lease or holders: key=" + key);
+                }
+            } else if (queue != null) {
+                throw new IllegalArgumentException(
+                        "non-queue entry carries queue state: key=" + key);
             }
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
@@ -221,6 +238,18 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                     throw new IllegalArgumentException(
                             "barrier entry must not carry other-family state: key=" + key);
                 }
+            } else if (queueKind) {
+                // 队列自洽性首检完成租约/持有面；此处校验状态组本身与他族字段零携带。
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0
+                        || atomic != null || atomicRef != null) {
+                    throw new IllegalArgumentException(
+                            "queue entry must not carry other-family state: key=" + key);
+                }
+                if (queue.capacity() < 1 || queue.elements().size() > queue.capacity()) {
+                    throw new IllegalArgumentException(
+                            "bad queue state: key=" + key + " capacity=" + queue.capacity()
+                                    + " elements=" + queue.elements().size());
+                }
             } else if (atomicRefKind) {
                 // 引用条目自洽性已在家族首检完成（载荷两态原样直写，不校验）。
             } else {
@@ -254,7 +283,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
                     && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
-                    && !atomicKind && !atomicRefKind && holders.size() != 1) {
+                    && !atomicKind && !atomicRefKind && !queueKind && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -391,6 +420,38 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             if (completedGeneration == 0 && !completedArrivals.isEmpty()) {
                 throw new IllegalArgumentException("completed arrivals without completed generation");
             }
+        }
+    }
+
+    /**
+     * 队列条目的复制态状态组（快照/重建直写通道，数据载体）：定型容量、
+     * 元素列表与每会话去重槽表。元素列表序即队列序（序列化确定性前提：
+     * {@code QUEUE} 形态为到达序，{@code DELAY_QUEUE} 形态为到期序且同到期
+     * 到达序），槽表按会话 id 升序导出；载荷与交付字节均为不透明原样直写，
+     * 尺寸不校验——钳制属接入层，快照/日志内容视为已钳制。构造时对列表与
+     * 数组做防御性复制（维持本类型"深不可变"承诺）。
+     *
+     * @param capacity 定型容量（{@code >= 1}，建条目非零主张的沉淀值）
+     * @param elements 元素列表（队列序；每项载荷非 null，到期时刻毫秒——
+     *                 {@code QUEUE} 形态恒 0）
+     * @param slots    去重槽表（会话 id 升序；每会话至多一条，含最近一次
+     *                 已应用写操作的序号/操作与交付回执）
+     */
+    public record QueueState(long capacity,
+            java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.ElementState> elements,
+            java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState> slots) {
+
+        /**
+         * 构造并校验容量下界与列表深复制。
+         *
+         * @throws IllegalArgumentException 容量 {@code < 1}
+         */
+        public QueueState {
+            if (capacity < 1) {
+                throw new IllegalArgumentException("queue capacity must be >= 1: " + capacity);
+            }
+            elements = java.util.List.copyOf(elements);
+            slots = java.util.List.copyOf(slots);
         }
     }
 

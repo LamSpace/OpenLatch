@@ -90,6 +90,14 @@ public final class ServerMetrics {
     public static final String ATOMIC_TOTAL = "openlatch.server.atomic.total";
     /** v5：循环屏障操作计数（按操作/应答状态码维度），counter。 */
     public static final String BARRIER_TOTAL = "openlatch.server.barrier.total";
+    /** v7：队列操作计数（按操作/应答状态码维度），counter。 */
+    public static final String QUEUE_TOTAL = "openlatch.server.queue.total";
+    /**
+     * v7：单 key 队列元素深度最大值（抓取时刻采样），gauge——驻留口径
+     * （延时形态含未到期项）。与 {@link #QUEUE_DEPTH_MAX}（等待队列深度、
+     * 等待者口径）是两条互不相干的量纲线，MUST NOT 混名混义。
+     */
+    public static final String ELEMENTS_DEPTH_MAX = "openlatch.server.elements.depth.max";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -285,6 +293,33 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记录一次已受理（形状合法且经入口钳制）的队列操作应答：计数线
+     * {@code queue_total{op,status}}。双"满"语义分轨可观测——元素不可满足
+     * 的立即式以 {@code status=DENIED}、等待深度超限以 {@code status=
+     * OVERLOADED}（判例锁深度护栏映射）；挂起 {@code QUEUED}、回弹后续挂
+     * 亦 {@code QUEUED}（改写后应答）。形状非法的请求不计数（杜绝维度
+     * 伪造）。调用点在单机 {@code RequestDispatcher.dispatchQueueOp} 与
+     * 集群 {@code ClusterRequestHandler.handleQueueOp}——两形态同一收口口径。
+     *
+     * @param op     协议操作枚举（词表 put/take/drain/peek/size）
+     * @param status 应答协议状态码
+     */
+    public void recordQueue(io.github.lamspace.openlatch.protocol.QueueOp op,
+                            StatusCode status) {
+        Counter.builder(QUEUE_TOTAL)
+                .tag("op", switch (op) {
+                    case QUEUE_OP_PUT -> "put";
+                    case QUEUE_OP_TAKE -> "take";
+                    case QUEUE_OP_DRAIN -> "drain";
+                    case QUEUE_OP_PEEK -> "peek";
+                    case QUEUE_OP_SIZE -> "size";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
      * 租约到期强制释放计数（单机由扫描线程按 {@code expireDue()} 返回值
      * 累加；集群由状态机应用侧按实际释放逐条累加）。
      *
@@ -311,6 +346,7 @@ public final class ServerMetrics {
                 .tag("type", TYPE_SEMAPHORE).register(registry);
         Gauge.builder(WAITERS, core, c -> c.stats().totalWaiters()).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, core, c -> c.stats().maxQueueDepth()).register(registry);
+        Gauge.builder(ELEMENTS_DEPTH_MAX, core, CoreEngine::maxElementsDepth).register(registry);
         bindSessionsGauge(sessions);
     }
 
@@ -336,6 +372,7 @@ public final class ServerMetrics {
                 .tag("type", TYPE_SEMAPHORE).register(registry);
         Gauge.builder(WAITERS, waitQueue, WaitQueue::totalWaiters).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
+        Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
         bindSessionsGauge(sessions);
         bindClusterIsLeader(nodeId, () -> tracker.snapshot().leaderNodeId() == nodeId);
     }

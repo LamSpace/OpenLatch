@@ -36,3 +36,9 @@
 | atomic reference | the payload form of the ATOMIC family (v6): one opaque byte payload plus a version stamp, get/set/stamped-CAS, the server never deserializes |
 | payload clamp | the per-key reference-payload byte cap (`max-value-bytes`, default 4KB): enforced only at ingress, over-limit commands never enter the log and have zero effect, lowering the cap never retro-affects stored values |
 | truncated preview | the admin-plane rendering of a reference payload: a constant-length (≤64B) escaped prefix plus the true byte size; full payload bytes never appear in an admin response |
+| declared capacity | the capacity claim that forms a queue entry at first write (v7, clamped by `max-queue-capacity`); later non-zero mismatching claims are rejected |
+| dequeue predicate | whether the head element may be consumed: always true for QUEUE; for DELAY the head's absolute expiry must not exceed the judging instant (no skipping an unexpired head) |
+| expiry folding | a delay element's absolute expiry is computed at the apply point from the entry-carried timestamp (the lease `expires_at` precedent); byte-identical across replica replays |
+| dual-track waiting | the two queue waiter identities (waiting-for-capacity / waiting-for-elements), each with its own ranks and wake path (v7) |
+| apply-point bounce | a committed-but-raced queue op returns DENIED at the apply point and is rewritten to QUEUED at its track position — invisible to the caller (v7) |
+| head gate | a non-head parked waiter's resend may not overtake elders in its track (core entry and Leader precheck enforce it alike), pinning wake-grant order to park order (v7) |

@@ -31,6 +31,10 @@ enum RaftEntryType {
   BARRIER_AWAIT_ENTRY       = 10;
   BARRIER_LEAVE_ENTRY       = 11;
   BARRIER_ACTION_DONE_ENTRY = 12;
+  // v7：队列操作——写（put/take/drain）与读（peek/size）皆进日志（读应用为
+  // 零迁移，判例 ATOMIC GET）；等待挂起、唤醒推送与已通知时序是 Leader 本地态，
+  // 不入日志与快照；应用点不可满足的回执 DENIED 为零迁移判定。
+  QUEUE_OP_ENTRY            = 13;
 }
 
 // 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
@@ -102,6 +106,17 @@ message BarrierActionDonePayload {
   openlatch.BarrierActionDoneRequest request    = 2;
 }
 
+// v7：队列命令载荷。request 携带 op/形态/容量断言/元素/延迟/批量上限/op_seq；
+// 写操作的去重判定在应用侧按条目内每会话去重槽完成（同槽重放返回原交付回执，
+// TAKE/DRAIN 重放交付同一份字节），跨副本回放得出一致应答；延时元素的绝对
+// 到期时刻于应用点以条目携带时刻折算（expires_at = wall_clock_ms + delay_ms），
+// 任何副本任何物理时刻回放逐毫秒一致。
+message QueueOpPayload {
+  int64                      session_id  = 1;
+  int64                      request_id  = 2;  // 原 QUEUE_OP 信封 request_id（阻塞式回弹重挂的幂等位）
+  openlatch.QueueOpRequest   request     = 3;
+}
+
 // LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
 // wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
 message ExpirePayload {
@@ -156,6 +171,13 @@ message ApplyResult {
   // 标量位对引用形态恒 0。
   optional bytes atomic_old_value_bytes = 18; // 操作前载荷
   optional bytes atomic_value_bytes     = 19; // 操作后（或当前）载荷
+  // v7：QUEUE_OP_ENTRY 回执（status=OK/DENIED 时择用；QUEUED 不产生——挂起为
+  // Leader 本地裁决，不经应用点）。DENIED 回执 MUST NOT 携带元素/列表。
+  // 同槽重放时即重放本组（TAKE 的 queue_element_bytes / DRAIN 的
+  // queue_drained_bytes 为重放交付的同一份字节）。
+  optional bytes queue_element_bytes = 20; // TAKE 交付 / PEEK 读数（缺省=无元素）
+  repeated bytes queue_drained_bytes = 21; // DRAIN 按出队序交付列表
+  sint64         queue_size          = 22; // SIZE 读数（驻留口径；其余 op 恒 0）
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -210,6 +232,33 @@ message SnapshotLock {
   optional bytes atomic_ref_value       = 29; // 当前值（缺省=null）
   optional bytes atomic_ref_slot_old_value = 30; // 去重槽应答 old 载荷（槽空时缺省）
   optional bytes atomic_ref_slot_value     = 31; // 去重槽应答 value 载荷（槽空时缺省）
+  // v7 扩展（QUEUE 家族，lock_type ∈ {LOCK_TYPE_QUEUE, LOCK_TYPE_DELAY_QUEUE}；
+  // 其余家族不出现）。元素列表序列化序即队列序（跨副本摘要可比的确定性前提）；
+  // QUEUE 形态元素到期字段恒缺省（0），DELAY 形态逐毫秒保真；去重槽表每会话
+  // 至多一条（客户端同 key 在途写互斥纪律保证），TAKE/DRAIN 槽含已交付字节。
+  sint64 queue_capacity = 32;  // 定型容量（建条目非零主张的沉淀值）
+  repeated SnapshotQueueElement queue_elements = 33;      // 元素列表（队首在前）
+  repeated SnapshotQueueSlot    queue_dedup_slots = 34;   // 每会话去重槽表（会话 id 升序导出）
+}
+
+// v7：队列元素（载荷 + 绝对到期时刻）。载荷为不透明字节且非 null——空串元素
+// 以零长度表达；expires_at_ms 为应用点折算产物（EntryClock 确定化语义），
+// QUEUE 形态恒 0（缺省）。
+message SnapshotQueueElement {
+  bytes payload        = 1;  // 元素载荷字节（零长度=空串元素）
+  int64 expires_at_ms  = 2;  // 绝对到期时刻（0=无到期属性）
+}
+
+// v7：队列每会话去重槽（最近一次已应用写操作及其交付回执）。op 取
+// 0=PUT / 1=TAKE / 2=DRAIN：PUT 槽无交付字节（重放=OK 已插入）；TAKE 槽
+// element_bytes 为已交付元素（含空串元素的零长度形态）；DRAIN 槽 drained_bytes
+// 为按出队序的交付列表。SESSION_CLOSE 应用点摘除对应槽。
+message SnapshotQueueSlot {
+  int64  session_id    = 1;  // 槽主会话
+  uint64 op_seq        = 2;  // 槽内写序号（同 op_seq 重放命中本槽）
+  int32  op            = 3;  // 了结的写类 op（0=PUT/1=TAKE/2=DRAIN）
+  bytes  element_bytes = 4;  // TAKE 交付字节（重放交付同一份）
+  repeated bytes drained_bytes = 5; // DRAIN 交付列表（重放交付同一份）
 }
 
 // v5：循环屏障到场身份（(会话, 请求) 二元组，快照内列表项）。

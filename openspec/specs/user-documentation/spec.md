@@ -5,7 +5,7 @@ TBD - created by archiving change bilingual-user-guide. Update Purpose after arc
 ## Requirements
 ### Requirement: 双语用户指南分区与章节覆盖
 
-仓库 SHALL 提供 `docs/guide/zh/` 与 `docs/guide/en/` 双语对照用户指南，章节覆盖 MUST 完整：简介与架构、核心概念（租约、看门狗续租、锁丢失、等待-通知-重发、FIFO 公平、超时纪律、原子变量与版本戳、有值引用与小载荷边界、循环屏障与世代）、快速上手、客户端 SDK（各锁类型、同步原语、原子变量族 `OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`、有值引用 `OAtomicReference` 与循环屏障 `OBarrier` 的 API 及语义边界——含每操作一次网络往返、值不绑定会话归属、超时不确定窗口与自动重发裁决、ABA 与 stamped 形态的区分、条目常驻不回收、载荷不透明且服务端权威钳制（默认 4KB）、null 与空串可区分、无算术操作面、屏障的到场合拢/世代回卷/动作两阶段放行/离场即破障与相对 JDK 的异常形态差异）、Spring Boot starter（`@OpenLatch`、SpEL、锁先于事务、AOP 自调用局限）、集群部署与运维（拓扑、种子发现、Leader 迁移、滚动重启序与 supervisor 配置、载荷下的快照尺寸治理与版本回滚窗口注记）、安全（TLS/mTLS、业务 Token 与轮换流程、管理 Token 独立性）、管理控制台（含有值引用条目的大小+截断预览呈现）、可观测性（/metrics、/healthz、管理端口；`atomic.total` kind 词表含 `reference`）、故障排查与 FAQ（错误码语义如 NOT_LEADER/NOT_HELD/BARRIER_BROKEN、载荷超限 INVALID_REQUEST、恢复窗口、双活审计）、兼容性与协议版本（Java 25、Spring Boot 4.x only、协议 v1/v2/v3/v4/v5/v6 协商与"不做隐式兼容"、v6 有值引用需双端升级）、术语表（含版本戳、去重槽、初值主张、世代、了结记录、执行者、离场即破障、载荷钳制、截断预览条目）。指南 MUST 是用户细节的唯一权威载体，README 仅保留最小上手闭环与索引。
+仓库 SHALL 提供 `docs/guide/zh/` 与 `docs/guide/en/` 双语对照用户指南，章节覆盖 MUST 完整：简介与架构、核心概念（租约、看门狗续租、锁丢失、等待-通知-重发、FIFO 公平、超时纪律、原子变量与版本戳、有值引用与小载荷边界、循环屏障与世代、有界队列与延时可见性——容量定型、双"满"语义、元素绑定 key 不绑定会话、到期时刻应用点折算）、快速上手、客户端 SDK（各锁类型、同步原语、原子变量族 `OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`、有值引用 `OAtomicReference`、循环屏障 `OBarrier` 与队列 `OBlockingQueue`/`ODelayQueue` 的 API 及语义边界——含每操作一次网络往返与 `drainTo` 批量摊薄、值与元素不绑定会话归属、超时不确定窗口与自动重发裁决、ABA 与 stamped 形态的区分、条目常驻不回收、载荷不透明且服务端权威钳制（默认 4KB）、null 与空串可区分（引用形态）与元素不可为 null（队列形态，两语义差异须并置声明防混读）、无算术操作面、屏障的到场合拢/世代回卷/动作两阶段放行/离场即破障与相对 JDK 的异常形态差异、队列的阻塞/立即双形态与中断语义、延时元素的可见性规则与同到期 FIFO 增强、`offerDelayed` 对 JDK 签名的改名差异）、Spring Boot starter（`@OpenLatch`、SpEL、锁先于事务、AOP 自调用局限）、集群部署与运维（拓扑、种子发现、Leader 迁移、滚动重启序与 supervisor 配置、载荷下的快照尺寸治理与版本回滚窗口注记、队列维度的治理注记——条目日志率与 W6/W7 同型观察、`max-queue-capacity`/`max-drain-bytes`/`ready-tick-ms` 限额语义、队列存续期下调 `maxValueBytes` 的先清大元素警示、回滚前队列 key 清空或接受不可用）、安全（TLS/mTLS、业务 Token 与轮换流程、管理 Token 独立性）、管理控制台（含有值引用条目的大小+截断预览与队列条目的容量/深度/驻留字节/首元素预览呈现，全量元素列表不外发）、可观测性（/metrics、/healthz、管理端口；`atomic.total` kind 词表含 `reference`、`queue.total` op 词表与 `elements.depth.max`/`queue.depth.max` 两口径之辨）、故障排查与 FAQ（错误码语义如 NOT_LEADER/NOT_HELD/BARRIER_BROKEN、载荷超限 INVALID_REQUEST、元素满 DENIED 与等待满 OVERLOADED 的判读、队列挂起无响应的唤醒链排查、恢复窗口、双活审计）、兼容性与协议版本（Java 25、Spring Boot 4.x only、协议 v1/v2/v3/v4/v5/v6/v7 协商与"不做隐式兼容"、v7 队列需双端升级）、术语表（含版本戳、去重槽、初值主张、世代、了结记录、执行者、离场即破障、载荷钳制、截断预览、定型容量、出队谓词、到期折算、双轨等待、应用点回弹）。指南 MUST 是用户细节的唯一权威载体，README 仅保留最小上手闭环与索引。
 
 #### Scenario: 新用户完成学习闭环
 
@@ -31,6 +31,11 @@ TBD - created by archiving change bilingual-user-guide. Update Purpose after arc
 
 - **WHEN** 审阅指南与契约 Javadoc 中 `OBarrier` 相关段落
 - **THEN** 相对 JDK `CyclicBarrier` 的每项差异均有显式声明——增强面（参与者会话死亡即时破障而非静默挂起、破障跨进程可观测）与差异面（破障为世代局部无 JDK 粘滞语义、无 `reset()`、受检异常改非受检与 boolean 形态、`await` 超时会破障且连带他方、在途到场不跨会话自动重放、动作异常经离场路径放大为全体破障、`isBroken()` 为句柄本地读数）逐条列明，并给出与 JDK 代码迁移时的对照注记
+
+#### Scenario: 队列语义差异处有言明
+
+- **WHEN** 审阅指南与契约 Javadoc 中 `OBlockingQueue`/`ODelayQueue` 相关段落
+- **THEN** 相对 JDK `BlockingQueue`/`DelayQueue` 的每项差异均有显式声明——增强面（投递者进程死亡不吞元素、同到期时刻 FIFO、容量跨进程定型）、差异面（元素不可为 null 且为不透明字节、无 `iterator/contains/remove(Object)` 面、`offerDelayed` 改名之于 JDK `offer(e,timeout,unit)` 语义混读风险、`poll/offer(timeout)` 为客户端本地计时、延时到点唤醒精度为服务端 tick 级、阻塞消费经等待-通知-重发闭环且应用点竞态回弹续挂、条目常驻不回收与驻留成本、容量/载荷/drain 预算由服务端权威钳制）逐条列明，并给出与引用形态 null 语义"看似相仿实则相反"的防混读对照与回滚窗口警示（回滚至 v7 前二进制时队列条目不可用）
 ### Requirement: 指南内容纪律
 
 指南技术表述 MUST 与实现及定案验收口径一致（含"重启语义单机/集群分立"“锁可能丢失必须处理回调”等既有 README 正确表述的承接）；示例命令 MUST 可在通用环境复制执行（不依赖任何私有配置）；指南 MUST NOT 引用内部过程文档与代号（《详细设计说明书》、验收报告、Phase 代号、design DN 等——内部引用检查模式集扩展至 `docs/guide/**`）；对未提供的能力（如控制台写操作）MUST 如实标注"未提供"而非省略或暗示存在。

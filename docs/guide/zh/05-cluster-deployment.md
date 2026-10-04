@@ -30,6 +30,12 @@
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | 单键队列深度上限 |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | 单连接在途请求上限 |
 | `openlatch.server.limit.max-value-bytes` | `4096` | 有值引用（v6）单 key 载荷字节上限；判定仅在接入层（超限命令不入日志），取值 [1, 512KiB]；下调不追溯存量值 |
+| `openlatch.server.limit.max-queue-capacity` | `1024` | 队列（v7）定型容量主张上限；PUT 容量主张超限在入口拒绝（零日志），取值 [1, 65536]；配合每元素 `max-value-bytes` 构成单 key 驻留上界 |
+| `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo 应答字节预算（v7）：DRAIN 提取上限按 `预算/max-value-bytes` 折算钳定，钳定值随条目入日志（apply 不读本地配置），取值 [1, 512KiB] |
+| `openlatch.server.queue.ready-tick-ms` | `200` | 延时队列到点唤醒扫描周期（v7，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms |
+| `openlatch.server.limit.max-queue-capacity` | `1024` | 队列（v7）定型容量主张上限；PUT 容量主张超限在入口拒绝（零日志），取值 [1, 65536]；配合每元素 `max-value-bytes` 构成单 key 驻留上界 |
+| `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo 应答字节预算（v7）：DRAIN 提取上限按 `预算/max-value-bytes` 折算钳定，钳定值随条目入日志（apply 不读本地配置），取值 [1, 512KiB] |
+| `openlatch.server.queue.ready-tick-ms` | `200` | 延时队列到点唤醒扫描周期（v7，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms |
 | `openlatch.server.metrics.enabled` | `true` | 指标管理端点开关（Prometheus 抓取 `http://host:port/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0`=临时）；绑定冲突即启动失败——同机多节点须互异 |
 | `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理令牌；未配置 ⇒ 一切管理请求被拒 |
@@ -125,6 +131,11 @@ OpenLatchClient client = OpenLatchClient.builder()
   为 v6 新增，早于 v6 的二进制无法理解——回滚至 v6 前须先排空引用 key（写入
   全部 `set(null)` 不回收条目，故须接受回滚期内存驻留，或按上条清目录全量重加）。
   回滚期任何引用形态写入在旧 Leader 入口即被形状拒绝，不会污染复制面。
+- **v7 队列的回滚窗口**：队列条目（`queue_*` 快照字段、`QUEUE_OP_ENTRY` 日志条目、
+  形态 12/13）为 v7 新增，早于 v7 的二进制无法理解——回滚至 v7 前须把队列 key
+  消费清空（元素被 `take`/`drainTo` 摘净；条目本身仍常驻，接受回滚期空条目驻留
+  或按上条清目录全量重加）。回滚期任何 `QUEUE_OP` 消息在旧服务端以未知消息类型
+  拒绝，不会污染复制面。
 
 ### 载荷下的快照与日志尺寸治理（v6）
 
@@ -137,6 +148,21 @@ OpenLatchClient client = OpenLatchClient.builder()
   `max-value-bytes` × 常数"项；
 - 观测与断言：控制台/管理协议呈现每条目载荷大小与恒定长度的截断预览（全量字节
   不入管理应答），基准侧有"恰限载荷批量写 → 快照尺寸落界"的守门用例。
+
+### 队列维度的快照与日志治理（v7）
+
+- 单条队列 key 的快照驻留上界 ≈ `capacity × max-value-bytes`（元素全列表）
+  + `1 × max-value-bytes`（每会话去重槽的最近交付回执，SESSION_CLOSE 即摘除）；
+  快照尺寸随**队列 key 数 × 容量 × 元素上限**线性有界，MUST NOT 随 put/take
+  操作轮次累积（历史元素与版本不入快照）——有满容量恰限元素 + 交付槽的守门
+  回归断言钉死；
+- 日志条目率：队列写读皆全量经提交（判例 ATOMIC），热点队列 key 的条目率是
+  真实增长源；`drainTo` 是既有摊薄通道（一次摘多只一条日志）；延时到点唤醒
+  与挂起/回弹**不入日志**（Leader 本地等待队列承载）。生产观测到热点队列
+  条目率成为运维压力时按 WATCHLIST W9 触发评估；
+- 队列存续期间下调 `max-value-bytes`：既有更大元素的 drain 应答可能超出
+  `max-drain-bytes` 预算（钳制下调不追溯存量的直接后果，上界为 N × 历史元素
+  上限）——先清大元素或按容量估算预留，避免撞上帧上限。
 
 ## 5. 复制停摆自愈与 supervisor（必读运维事实）
 

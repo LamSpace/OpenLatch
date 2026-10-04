@@ -265,4 +265,76 @@ class AdminClusterTest {
         assertThat(admin(leader, leaderHandler, lConn, summary(12)).getAdminSummaryResponse()
                 .getAtomicEntries()).isPositive();
     }
+
+    /** QUEUE_OP PUT 信封（v7）。 */
+    private static Envelope queuePut(long rid, String key, byte[] element, long capacity,
+            long opSeq) {
+        io.github.lamspace.openlatch.protocol.QueueOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.QueueOpRequest.newBuilder()
+                        .setKey(key)
+                        .setOp(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT)
+                        .setLockType(io.github.lamspace.openlatch.protocol.LockType
+                                .LOCK_TYPE_QUEUE)
+                        .setCapacity(capacity).setOpSeq(opSeq);
+        if (element != null) {
+            rb.setElementBytes(com.google.protobuf.ByteString.copyFrom(element));
+        }
+        return Envelope.newBuilder().setProtocolVersion(7).setType(MessageType.QUEUE_OP)
+                .setRequestId(rid).setQueueOpRequest(rb).build();
+    }
+
+    @Test
+    void queueEntriesReplicateIntoShadowWithBoundedPreview() throws Exception {
+        ClusterHarness.Node leader = harness.leader();
+        ClusterHarness.Node follower = harness.nodes().stream()
+                .filter(n -> !n.isLeader()).findFirst().orElseThrow();
+        ClusterHarness.TestConn conn = harness.connect(leader);
+        conn.hello(1, 7);
+        // 200B 元素（前 10 字节可打印、其余 0xfe）+ 尾元素 "z"。
+        byte[] big = new byte[200];
+        java.util.Arrays.fill(big, (byte) 0xfe);
+        for (int i = 0; i < 10; i++) {
+            big[i] = (byte) ('a' + i);
+        }
+        assertThat(conn.request(queuePut(2, "cqueue", big, 4, 1))
+                .getQueueOpResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(conn.request(queuePut(3, "cqueue",
+                "z".getBytes(java.nio.charset.StandardCharsets.UTF_8), 0, 2))
+                .getQueueOpResponse().getStatus()).isEqualTo(StatusCode.OK);
+
+        // Follower 影子镜像追平：容量/深度/首元素大小与恒定截断预览（全量元素零外发）。
+        AdminRequestHandler followerHandler = handlerFor(follower);
+        ClusterHarness.TestConn fConn = harness.connect(follower);
+        fConn.hello(9, 7);
+        harness.awaitTrue(() -> admin(follower, followerHandler, fConn, keyDetail(10, "cqueue"))
+                .getAdminKeyDetailResponse().getQueueDepth() == 2,
+                10_000, "follower 队列镜像收敛");
+        AdminKeyDetailResponse d = admin(follower, followerHandler, fConn, keyDetail(11, "cqueue"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getFamily()).isEqualTo("queue");
+        assertThat(d.getQueueCapacity()).isEqualTo(4);
+        assertThat(d.getQueueHeadExpiryMs()).isZero();
+        assertThat(d.getQueueHeadPayloadSize()).isEqualTo(200);
+        assertThat(d.getQueueTotalPayloadBytes()).isEqualTo(201);
+        // 预览有界按 64 字节前缀计（转义膨胀上界 64×4+省略号），非按字符数。
+        assertThat(d.getQueueHeadPayloadPreview())
+                .startsWith("abcdefghij").contains("\\xfe").endsWith("…")
+                .hasSizeLessThan(264 + 8);
+        // 非队列 key 队列字段缺省。
+        AdminKeyDetailResponse absent = admin(follower, followerHandler, fConn,
+                keyDetail(12, "nope")).getAdminKeyDetailResponse();
+        assertThat(absent.getQueueCapacity()).isZero();
+
+        // SUMMARY 单列计数与 LIST_KEYS 行字段（Leader 视角）。
+        AdminRequestHandler leaderHandler = handlerFor(leader);
+        ClusterHarness.TestConn lConn = harness.connect(leader);
+        lConn.hello(13, 7);
+        assertThat(admin(leader, leaderHandler, lConn, summary(14)).getAdminSummaryResponse()
+                .getQueueEntries()).isEqualTo(1);
+        io.github.lamspace.openlatch.protocol.AdminKeyInfo row = admin(leader, leaderHandler,
+                lConn, listKeys(15, "cqueue")).getAdminListKeysResponse().getItemsList().get(0);
+        assertThat(row.getFamily()).isEqualTo("queue");
+        assertThat(row.getQueueDepth()).isEqualTo(2);
+        assertThat(row.getWaiterCount()).isZero();
+    }
 }

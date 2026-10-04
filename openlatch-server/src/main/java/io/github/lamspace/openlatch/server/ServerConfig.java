@@ -44,6 +44,16 @@ import java.util.Properties;
  * @param maxValueBytes            有值引用载荷字节上限（v6 小载荷钳制，默认
  *                                 4096；判定仅在接入层执行，节点本地配置
  *                                 MUST NOT 参与 apply 判定，见快照/复制规格）
+ * @param maxQueueCapacity         队列定型容量上限（v7，默认 1024；PUT 容量
+ *                                 主张的入口钳制上限，配合每元素
+ *                                 {@code maxValueBytes} 构成单 key 驻留上界；
+ *                                 同样仅在接入层判定）
+ * @param maxDrainBytes            drainTo 应答字节预算（v7，默认 256KiB；
+ *                                 DRAIN 提取上限派生基准——钳定后的 N 随条目
+ *                                 入日志，apply 不读本地配置）
+ * @param queueReadyTickMs         队列就绪扫描周期（v7，默认 200ms；延时形态
+ *                                 的唤醒精度，仅 Leader/单机调度消费，
+ *                                 MUST NOT 参与任何状态判定）
  */
 public record ServerConfig(
         int port,
@@ -57,7 +67,10 @@ public record ServerConfig(
         int maxKeyLength,
         int maxQueueDepthPerKey,
         int maxInflightPerConnection,
-        int maxValueBytes) {
+        int maxValueBytes,
+        int maxQueueCapacity,
+        long maxDrainBytes,
+        long queueReadyTickMs) {
 
     /** 指定配置文件路径的系统属性键。 */
     public static final String CONFIG_PATH_PROPERTY = "openlatch.config";
@@ -84,6 +97,19 @@ public record ServerConfig(
     public static final int DEFAULT_MAX_INFLIGHT_PER_CONNECTION = 1024;
     /** 默认有值引用载荷字节上限（2026-09 定位裁决：每 key 限额默认 4KB）。 */
     public static final int DEFAULT_MAX_VALUE_BYTES = 4096;
+
+    /** 队列定型容量上限默认值（v7）。 */
+    public static final int DEFAULT_MAX_QUEUE_CAPACITY = 1024;
+    /** 队列定型容量上限的配置顶格（v7，单 key 驻留治理边界）。 */
+    public static final int MAX_QUEUE_CAPACITY_CEILING = 65_536;
+    /** drainTo 应答字节预算默认值（v7，256KiB——默认 4KB 元素下派生 64 项上限）。 */
+    public static final long DEFAULT_MAX_DRAIN_BYTES = 256L * 1024L;
+    /** drainTo 应答字节预算的配置顶格（v7，与 {@code maxValueBytes} 同界）。 */
+    public static final long MAX_DRAIN_BYTES_CEILING = 512L * 1024L;
+    /** 队列就绪扫描周期默认值（v7，毫秒）。 */
+    public static final long DEFAULT_QUEUE_READY_TICK_MS = 200L;
+    /** 队列就绪扫描周期下限（v7，毫秒）。 */
+    public static final long MIN_QUEUE_READY_TICK_MS = 10L;
     /** 有值引用载荷字节上限的可配置上界（512KiB，为 1MiB 帧上限留信封编解码边际）。 */
     public static final int MAX_VALUE_BYTES_CEILING = 512 * 1024;
 
@@ -108,7 +134,8 @@ public record ServerConfig(
             int maxKeyLength, int maxQueueDepthPerKey, int maxInflightPerConnection) {
         this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
                 leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
-                maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES);
+                maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES,
+                DEFAULT_MAX_QUEUE_CAPACITY, DEFAULT_MAX_DRAIN_BYTES, DEFAULT_QUEUE_READY_TICK_MS);
     }
 
     /**
@@ -129,7 +156,10 @@ public record ServerConfig(
                 DEFAULT_MAX_KEY_LENGTH,
                 DEFAULT_MAX_QUEUE_DEPTH_PER_KEY,
                 DEFAULT_MAX_INFLIGHT_PER_CONNECTION,
-                DEFAULT_MAX_VALUE_BYTES);
+                DEFAULT_MAX_VALUE_BYTES,
+                DEFAULT_MAX_QUEUE_CAPACITY,
+                DEFAULT_MAX_DRAIN_BYTES,
+                DEFAULT_QUEUE_READY_TICK_MS);
     }
 
     /**
@@ -165,7 +195,10 @@ public record ServerConfig(
                 intOf(props, "openlatch.server.limit.max-key-length", base.maxKeyLength()),
                 intOf(props, "openlatch.server.limit.max-queue-depth-per-key", base.maxQueueDepthPerKey()),
                 intOf(props, "openlatch.server.limit.max-inflight-per-connection", base.maxInflightPerConnection()),
-                intOf(props, "openlatch.server.limit.max-value-bytes", base.maxValueBytes()));
+                intOf(props, "openlatch.server.limit.max-value-bytes", base.maxValueBytes()),
+                intOf(props, "openlatch.server.limit.max-queue-capacity", base.maxQueueCapacity()),
+                longOf(props, "openlatch.server.limit.max-drain-bytes", base.maxDrainBytes()),
+                longOf(props, "openlatch.server.queue.ready-tick-ms", base.queueReadyTickMs()));
         cfg.validate();
         return cfg;
     }
@@ -293,6 +326,21 @@ public record ServerConfig(
             throw new IllegalArgumentException(
                     "配置项 openlatch.server.limit.max-value-bytes 非法（应为 1–"
                             + MAX_VALUE_BYTES_CEILING + "）: " + maxValueBytes);
+        }
+        if (maxQueueCapacity < 1 || maxQueueCapacity > MAX_QUEUE_CAPACITY_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-queue-capacity 非法（应为 1–"
+                            + MAX_QUEUE_CAPACITY_CEILING + "）: " + maxQueueCapacity);
+        }
+        if (maxDrainBytes < 1 || maxDrainBytes > MAX_DRAIN_BYTES_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-drain-bytes 非法（应为 1–"
+                            + MAX_DRAIN_BYTES_CEILING + "）: " + maxDrainBytes);
+        }
+        if (queueReadyTickMs < MIN_QUEUE_READY_TICK_MS) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.queue.ready-tick-ms 非法（应 >= "
+                            + MIN_QUEUE_READY_TICK_MS + "）: " + queueReadyTickMs);
         }
     }
 }

@@ -87,5 +87,24 @@ public enum LockType {
      * （null 与空字节串为两个可区分的合法值），无 ADD 面；载荷尺寸钳制
      * 属接入层，条目侧不复核。ACQUIRE 携带本类型属请求形状错误，入口即拒。
      */
-    ATOMIC_REFERENCE
+    ATOMIC_REFERENCE,
+    /**
+     * 有界队列形态（枚举序与协议 {@code LOCK_TYPE_QUEUE} 数值 12 对齐）：
+     * 非锁家族类型，仅作 key 定型与操作判别——队列操作经门面独立入口
+     * （{@code queueOp}，命令为 {@code QueueOpCommand}）进入
+     * {@code QueueEntry}，不经获取/释放/续租命令通道；出队按到达序
+     * （FIFO）。元素为不透明字节且不可为 null（与有值引用形态的 null
+     * 语义刻意不同），容量由首次写入定型，元素绑定 key 不绑定会话。
+     * ACQUIRE 携带本类型属请求形状错误，入口即拒。
+     */
+    QUEUE,
+    /**
+     * 延时队列形态（枚举序与协议 {@code LOCK_TYPE_DELAY_QUEUE} 数值 13
+     * 对齐）：与 {@link #QUEUE} 同族互斥（同 key 跨形态以类型不匹配拒绝）。
+     * 出队按最早到期序、同到期时刻内保持到达序（相对 JDK
+     * {@code DelayQueue} 的语义增强，契约显式声明）；元素携带应用点
+     * 折算的绝对到期时刻，未到期仅不可见、不消失（到期不触发回收）。
+     * ACQUIRE 携带本类型属请求形状错误，入口即拒。
+     */
+    DELAY_QUEUE
 }

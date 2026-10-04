@@ -29,6 +29,8 @@
 | `openlatch.server.queue.depth.max` | Gauge | — | 单键最深队列 |
 | `openlatch.server.atomic.total` | Counter | `kind`、`op`、`status` | 原子变量操作计数（v4；v6 `kind` 增 `reference`、`op` 无 `add`；CAS 成败由应答 `applied` 承载、不占维度；超限/低版本拒绝走 `status="INVALID_REQUEST"` 线） |
 | `openlatch.server.barrier.total` | Counter | `op`=`await`/`leave`/`action_done`、`status` | 循环屏障操作计数（v5；破障了结以 `status="BARRIER_BROKEN"` 单列） |
+| `openlatch.server.queue.total` | Counter | `op`=`put`/`take`/`drain`/`peek`/`size`、`status` | 队列操作计数（v7；双"满"分轨：元素满立即式 `status="DENIED"`、等待深度超限 `status="OVERLOADED"`；挂起 `QUEUED`、入口拒绝 `INVALID_REQUEST` 各走其线；读写皆计） |
+| `openlatch.server.elements.depth.max` | Gauge | — | 单键队列**元素深度**峰值（v7，抓取时刻采样、驻留口径含未到期项）——与 `queue.depth.max`（等待者口径）是两条互不相干的量纲线 |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | 本节点是否为 Leader（仅集群启用时注册） |
 
 ### 告警参考（起步阈值，按业务校准）
@@ -36,7 +38,8 @@
 - `rate(openlatch_server_lease_expired_total[5m]) > 0` 持续——有客户端续租跑不赢租约（GC/网络/时钟）；
 - `openlatch_cluster_is_leader` 全零或高频翻转——选举风暴/多数派丢失，查 [09 §停摆](09-troubleshooting.md)；
 - `openlatch_server_waiters` 长期高企——锁热点，考虑键拆分或读写锁改造；
-- `increase(openlatch_server_acquire_total{status="NOT_LEADER"}[1m])` 陡增——Leader 切换进行中或客户端种子配置不全。
+- `increase(openlatch_server_acquire_total{status="NOT_LEADER"}[1m])` 陡增——Leader 切换进行中或客户端种子配置不全；
+- `openlatch_server_elements_depth_max` 长期贴近 `max-queue-capacity`——热点队列持续满员（消费能力不足或消费者泄漏）；配合控制台 `queue_entries` 基数看驻留总量（v7）。
 
 ## 客户端指标
 

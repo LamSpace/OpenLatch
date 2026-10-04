@@ -23,6 +23,7 @@ import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
+import io.github.lamspace.openlatch.protocol.raft.QueueOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.server.session.ServerSession;
@@ -111,6 +112,18 @@ public final class ReplicationGateway implements ApplyObserver {
     public void setExpiryDriver(LeaseExpiryDriver driver) {
         this.expiryDriver = driver;
     }
+
+    /**
+     * 回挂队列就绪驱动（v7，装配后期绑定）。
+     *
+     * @param driver 就绪驱动，可为 {@code null}（摘挂）
+     */
+    public void setQueueReadyDriver(QueueReadyDriver driver) {
+        this.queueReadyDriver = driver;
+    }
+
+    /** v7 队列就绪驱动（当选首扫钩子；可为未挂载）。 */
+    private volatile QueueReadyDriver queueReadyDriver;
 
     /**
      * 回挂会话协调器（装配后期绑定）。
@@ -229,6 +242,10 @@ public final class ReplicationGateway implements ApplyObserver {
             if (driver != null) {
                 driver.onLeadershipGained();
             }
+            QueueReadyDriver qdriver = queueReadyDriver;
+            if (qdriver != null) {
+                qdriver.onLeadershipGained();
+            }
         }
         SessionCoordinator coordinator = sessionCoordinator;
         if (coordinator != null) {
@@ -246,6 +263,12 @@ public final class ReplicationGateway implements ApplyObserver {
      * @return 改写后的回执（当前仅"预演失效→排队"一处改写）
      */
     private ApplyResult leaderSideEffects(RaftLogEntry entry, ApplyResult result) {
+        // v7：队列侧效（回弹重挂 + 双轨唤醒）独立分支即返——其 DENIED 回弹
+        // 与锁"预演失效改写"同型但判据不同（轨道、满足性谓词），MUST NOT
+        // 落入下方锁改写臂。
+        if (entry.getType() == RaftEntryType.QUEUE_OP_ENTRY) {
+            return queueSideEffects(entry, result);
+        }
         switch (entry.getType()) {
             case LOCK_ACQUIRE_ENTRY -> {
                 if (result.getStatus() == ApplyStatus.OK) {
@@ -267,7 +290,10 @@ public final class ReplicationGateway implements ApplyObserver {
         // 预演失效改写：提交时判定可授予、应用时锁已被占——
         // 原请求愿意排队（wait_ms != 0）则在应用点登记本地队列并回 QUEUED；
         // 立即式保持 DENIED。仅改写本节点在途请求的回执。
-        if (result.getStatus() == ApplyStatus.DENIED
+        // v7 注记：类型守卫收口——队列的 DENIED 回弹经 queueSideEffects 独立
+        // 承载，MUST NOT 被本臂以 AcquirePayload 误解析。
+        if (entry.getType() == RaftEntryType.LOCK_ACQUIRE_ENTRY
+                && result.getStatus() == ApplyStatus.DENIED
                 && pending.containsKey(entry.getSeq())) {
             try {
                 var ap = io.github.lamspace.openlatch.protocol.raft.AcquirePayload
@@ -424,6 +450,91 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
+     * 队列条目 Leader 侧效（v7）。两件事——
+     * <ol>
+     *   <li><b>回弹重挂</b>：预检放行提交、应用点 {@code DENIED}（并发竞态
+     *       使元素被抢先摘走/容量被抢先占满）且原请求携 {@code blocking}
+     *       时，把该 (会话,请求) 挂回对应轨道并改写回执为 {@code QUEUED}
+     *       （位次为轨内新位——判例锁"预演失效改写"；挂满回
+     *       {@code QUEUE_FULL}，由分发层映射 OVERLOADED 终结本次重发）；
+     *       立即式保持 DENIED 原样透传。</li>
+     *   <li><b>双轨唤醒</b>：{@code PUT} 落地后若队首元素可消费（QUEUE 形态
+     *       有深度即可；DELAY 形态须队首到期不晚于本时刻）唤醒 take 轨队首；
+     *       {@code TAKE}/{@code DRAIN} 交付后按影子表深度与容量的空位判定
+     *       唤醒 put 轨队首。谓词全部基于影子表（复制状态镜像）判定，
+     *       推送仅提示、消费仍经提交路径在应用点终判。</li>
+     * </ol>
+     * 非本节点在途的条目（Follower 提交或转发而来）不改写回执，仅执行
+     * 唤醒推送（挂起登记属当值 Leader 车道，与锁改写臂的 pending 守卫同理）。
+     *
+     * @param entry  已应用条目（{@link RaftEntryType#QUEUE_OP_ENTRY}）
+     * @param result 原始回执
+     * @return 改写后的回执（非回弹路径原样返回）
+     */
+    private ApplyResult queueSideEffects(RaftLogEntry entry, ApplyResult result) {
+        long now = System.currentTimeMillis();
+        try {
+            var qp = QueueOpPayload.parseFrom(entry.getCommandPayload().toByteArray());
+            var req = qp.getRequest();
+            String qkey = req.getKey();
+            var op = req.getOp();
+            if (result.getStatus() == ApplyStatus.DENIED && req.getBlocking()
+                    && pending.containsKey(entry.getSeq())) {
+                int track = op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT
+                        ? 1 : 2;
+                int pos = waitQueue.enqueueTrack(qp.getSessionId(), qp.getRequestId(),
+                        qkey, track, now);
+                if (pos > 0) {
+                    return ApplyResult.newBuilder()
+                            .setStatus(ApplyStatus.QUEUED)
+                            .setQueuePosition(pos)
+                            .build();
+                }
+                return ApplyResult.newBuilder().setStatus(ApplyStatus.QUEUE_FULL).build();
+            }
+            if (result.getStatus() == ApplyStatus.OK) {
+                // 交付/入队成功即摘本 (会话,请求) 的挂起项（判例锁授予出队）——
+                // 残留陈旧队首会挡住同轨后继者的唤醒推进。
+                waitQueue.onGranted(qp.getSessionId(), qp.getRequestId());
+                if (op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT) {
+                    if (queueElementVisible(qkey, now)) {
+                        for (WaitQueue.Waiter w : waitQueue.onElementReady(qkey, now, true)) {
+                            pushAwaitNotify(w, qkey);
+                        }
+                    }
+                } else if (op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_TAKE
+                        || op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_DRAIN) {
+                    boolean free = kernel.shadow().queueDepth(qkey)
+                            < kernel.shadow().queueCapacity(qkey);
+                    for (WaitQueue.Waiter w : waitQueue.onCapacityFreed(qkey, now, free)) {
+                        pushAwaitNotify(w, qkey);
+                    }
+                }
+            }
+        } catch (InvalidProtocolBufferException e) {
+            log.warn("queue op payload unparsable in side effects (seq={})", entry.getSeq());
+        }
+        return result;
+    }
+
+    /**
+     * 队首元素可见性判定（唤醒谓词，影子表口径）：QUEUE 形态队首到期恒 0
+     * ——有深度即可见；DELAY 形态要求队首绝对到期时刻不晚于给定时刻。
+     *
+     * @param key 队列键
+     * @param now 判定时刻（epoch 毫秒，与条目折算的到期时刻同域）
+     * @return 队首可消费为 {@code true}
+     */
+    private boolean queueElementVisible(String key, long now) {
+        var shadow = kernel.shadow();
+        if (shadow.queueDepth(key) <= 0) {
+            return false;
+        }
+        long expiry = shadow.queueHeadExpiryMs(key);
+        return expiry == 0 || expiry <= now;
+    }
+
+    /**
      * 推送 AWAIT_NOTIFY（Leader 本地连接投递；跨接入节点转发不在本方法职责）。
      * 应用线程内仅做查表与非阻塞写投递。
      *
@@ -498,6 +609,36 @@ public final class ReplicationGateway implements ApplyObserver {
                 continue;
             }
             pushAwaitNotify(w, w.key());
+        }
+    }
+
+    /**
+     * 队列就绪扫描（v7，{@code QueueReadyDriver} 与当选首扫的共用体）：
+     * 遍历存在挂起等待者的队列键（由等待队列反查，非全表扫描影子表），
+     * take 轨按队首可见性（DELAY 形态须到期不晚于当前时刻）、put 轨按
+     * 容量空位（兼作事件唤醒丢失的自愈兜底）推进队首并推送
+     * {@code AWAIT_NOTIFY}。零日志、零状态变更——推送只是重发提示，
+     * 消费与创建的终判恒在应用点；已通知窗口内不重复推送。
+     *
+     * @param now 扫描时刻（epoch 毫秒，与条目折算到期时刻同域）
+     */
+    public void sweepQueueReady(long now) {
+        if (!isLeaderAuthoritative()) {
+            return;
+        }
+        for (String key : waitQueue.trackKeys(2)) {
+            if (!queueElementVisible(key, now)) {
+                continue;
+            }
+            for (WaitQueue.Waiter w : waitQueue.onElementReady(key, now, true)) {
+                pushAwaitNotify(w, key);
+            }
+        }
+        for (String key : waitQueue.trackKeys(1)) {
+            boolean free = kernel.shadow().queueDepth(key) < kernel.shadow().queueCapacity(key);
+            for (WaitQueue.Waiter w : waitQueue.onCapacityFreed(key, now, free)) {
+                pushAwaitNotify(w, key);
+            }
         }
     }
 

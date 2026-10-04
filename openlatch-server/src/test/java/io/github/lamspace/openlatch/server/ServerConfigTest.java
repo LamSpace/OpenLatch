@@ -73,6 +73,10 @@ class ServerConfigTest {
                 openlatch.server.limit.max-key-length = 64
                 openlatch.server.limit.max-queue-depth-per-key = 16
                 openlatch.server.limit.max-inflight-per-connection = 8
+                openlatch.server.limit.max-value-bytes = 2048
+                openlatch.server.limit.max-queue-capacity = 512
+                openlatch.server.limit.max-drain-bytes = 65536
+                openlatch.server.queue.ready-tick-ms = 100
                 """);
 
         ServerConfig cfg = ServerConfig.load(file.toString());
@@ -88,6 +92,30 @@ class ServerConfigTest {
         assertThat(cfg.maxKeyLength()).isEqualTo(64);
         assertThat(cfg.maxQueueDepthPerKey()).isEqualTo(16);
         assertThat(cfg.maxInflightPerConnection()).isEqualTo(8);
+        assertThat(cfg.maxValueBytes()).isEqualTo(2048);
+        assertThat(cfg.maxQueueCapacity()).isEqualTo(512);
+        assertThat(cfg.maxDrainBytes()).isEqualTo(65_536L);
+        assertThat(cfg.queueReadyTickMs()).isEqualTo(100L);
+    }
+
+    @Test
+    void v7_queue_limits_out_of_range_fail_fast() throws IOException {
+        // 逐界：容量 0/顶格上、drain 预算 0/顶格上、ready-tick 下限。
+        for (String line : new String[] {
+                "openlatch.server.limit.max-queue-capacity = 0",
+                "openlatch.server.limit.max-queue-capacity = 65537",
+                "openlatch.server.limit.max-drain-bytes = 0",
+                "openlatch.server.limit.max-drain-bytes = 524289",
+                "openlatch.server.queue.ready-tick-ms = 9",
+        }) {
+            Path file = tempDir.resolve("bad-queue-limit.properties");
+            Files.writeString(file, line + "\n");
+            String key = line.substring(0, line.indexOf(' '));
+            assertThatThrownBy(() -> ServerConfig.load(file.toString()))
+                    .as("越界值应拒绝: %s", line)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(key);
+        }
     }
 
     @Test

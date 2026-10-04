@@ -59,6 +59,17 @@ class ServerMetricsVocabularyTest {
         metrics.recordAtomic(LockType.LOCK_TYPE_ATOMIC_REFERENCE, AtomicOp.ATOMIC_SET, StatusCode.INVALID_REQUEST);
         metrics.recordBarrier("await", StatusCode.QUEUED);
         metrics.recordBarrier("action_done", StatusCode.BARRIER_BROKEN);
+        // v7：队列操作计数线（op 词表五值各一形态 + 双"满"分轨）。
+        metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT,
+                StatusCode.OK);
+        metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_TAKE,
+                StatusCode.DENIED);
+        metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_DRAIN,
+                StatusCode.QUEUED);
+        metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PEEK,
+                StatusCode.OK);
+        metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_SIZE,
+                StatusCode.OVERLOADED);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -71,6 +82,8 @@ class ServerMetricsVocabularyTest {
         assertThat(scrape).contains("openlatch_server_waiters");
         assertThat(scrape).contains("openlatch_server_sessions");
         assertThat(scrape).contains("openlatch_server_queue_depth_max");
+        // v7：元素深度线与等待队深线两口径并存且不同名。
+        assertThat(scrape).contains("openlatch_server_elements_depth_max");
         assertThat(scrape).contains("openlatch_cluster_is_leader{node_id=\"7\"} 1");
     }
 
@@ -87,6 +100,11 @@ class ServerMetricsVocabularyTest {
         assertThat(scrape).contains("openlatch_server_atomic_total{kind=\"reference\",op=\"set\",status=\"INVALID_REQUEST\"} 1");
         assertThat(scrape).contains("openlatch_server_barrier_total{op=\"await\",status=\"QUEUED\"} 1");
         assertThat(scrape).contains("openlatch_server_barrier_total{op=\"action_done\",status=\"BARRIER_BROKEN\"} 1");
+        assertThat(scrape).contains("openlatch_server_queue_total{op=\"put\",status=\"OK\"} 1");
+        assertThat(scrape).contains("openlatch_server_queue_total{op=\"take\",status=\"DENIED\"} 1");
+        assertThat(scrape).contains("openlatch_server_queue_total{op=\"drain\",status=\"QUEUED\"} 1");
+        assertThat(scrape).contains("openlatch_server_queue_total{op=\"peek\",status=\"OK\"} 1");
+        assertThat(scrape).contains("openlatch_server_queue_total{op=\"size\",status=\"OVERLOADED\"} 1");
         // 不得出现 *_total_total 双后缀。
         assertThat(scrape).doesNotContain("_total_total");
     }

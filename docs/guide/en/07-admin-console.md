@@ -53,3 +53,9 @@ Invalid config (empty address list, port clash, blank admin token) fails startup
 Observation reads are **weakly consistent snapshots**: detail reflects a best-effort read at
 request time from each node's local replica; brief gaps or degraded markers during leader
 changes are expected and not alert-worthy by themselves. Metric meanings: [08](08-observability.md).
+
+Queue entries (v7) render as: overview `QUEUE entries` count; the keys table shows
+capacity · depth · head element size + constant-length truncated preview (delay kinds
+also the head expiry); the detail page adds total resident bytes and a waiters column
+splitting the two tracks (waiting-for-capacity / waiting-for-elements). Full element
+bytes never ship in any admin response — the same anti-amplification rule as v6 payloads.

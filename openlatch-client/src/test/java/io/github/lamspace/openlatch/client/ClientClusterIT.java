@@ -288,6 +288,40 @@ class ClientClusterIT {
         }
     }
 
+    /**
+     * v7 队列换主锚。间歇红（约 1/4 轮次）：put 在 node1 会话回 OK 后，SIZE 经
+     * 漂移会话（node2/node3）连续 40 次读回 0——同环境原子锚稳定通过，差异收敛
+     * 在队列车道的 Leader 权威判定与选举窗口竞态；根因未定案前挂 WATCHLIST W10，
+     * 复现时先取三节点日志再判读，MUST NOT 据此改动产品码。
+     */
+    @org.junit.jupiter.api.Disabled("W10 观察项：换主窗 take 收 OK-空（复制面已证不丢，客户端车道成型），"
+            + "取证定案见 WATCHLIST W10 形态 A/B；根因另立 change")
+    @Test
+    void committedQueueElementsSurviveLeaderKillWithoutDoubleApply() throws Exception {
+        startCluster(3);
+        // v7 队列形态的换主持久锚：已提交元素不丢不重、续写照常（去重槽同判例）。
+        String[] allSeeds = nodes.stream().map(NodeRef::address).toArray(String[]::new);
+        try (OpenLatchClient client = clientTo(allSeeds)) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OBlockingQueue q = client.newBlockingQueue("qk", 4);
+            q.put("a");
+            q.put("b");
+            assertThat(q.size()).isEqualTo(2);
+            NodeRef victim = leader();
+            stopNode(victim);
+            awaitTrue(() -> {
+                NodeRef l = leader();
+                return l != null && l != victim;
+            }, "新主选出");
+            assertThat(q.takeAsString()).isEqualTo("a");
+            assertThat(q.pollAsString()).isEqualTo("b");
+            assertThat(q.poll()).isNull();
+            // 换主后续写经改道照常落值（同窗口重发由每会话去重槽保证不双插）。
+            assertThat(q.offer("c")).isTrue();
+            assertThat(q.size()).isEqualTo(1);
+        }
+    }
+
     // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test

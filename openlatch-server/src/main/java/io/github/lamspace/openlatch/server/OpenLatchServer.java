@@ -82,12 +82,12 @@ public final class OpenLatchServer {
 
     /**
      * 服务器自身协议版本（握手响应 {@code server_protocol_version} 回此值）。
-     * v6 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
+     * v7 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
      * {@value #PROTOCOL_VERSION} 的客户端版本；应答信封的 {@code protocol_version}
      * 回显客户端请求版本，低版本客户端因此看到与既有阶段同形的响应。
      * 各版本专属语义（新锁类型/新消息）由接入层按会话握手版本门控。
      */
-    public static final int PROTOCOL_VERSION = 6;
+    public static final int PROTOCOL_VERSION = 7;
 
     /** 握手可接受的最小客户端协议版本（v1 客户端在集群模式下持续可用）。 */
     public static final int MIN_CLIENT_PROTOCOL_VERSION = 1;
@@ -322,7 +322,8 @@ public final class OpenLatchServer {
         ServerSessionHandler handler = clusterConfig.enabled()
                 ? new ServerSessionHandler(null, config, sessions, null, cluster, adminHandler, authConfig)
                 : new ServerSessionHandler(core, config, sessions,
-                        new RequestDispatcher(core, metrics, config.maxValueBytes()),
+                        new RequestDispatcher(core, metrics, config.maxValueBytes(),
+                                config.maxQueueCapacity(), config.maxDrainBytes()),
                         null, adminHandler, authConfig);
         ServerChannelInitializer initializer = new ServerChannelInitializer(
                 config.idleTimeoutMs(), handler, channels, sslContext);
@@ -353,10 +354,12 @@ public final class OpenLatchServer {
         startedAtMs = System.currentTimeMillis();
         log.info("OpenLatch server started: port={}, protocolVersion={}, maxKeyLength={}, "
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, maxValueBytes={}, "
+                        + "maxQueueCapacity={}, maxDrainBytes={}, "
                         + "defaultLeaseMs={}, clusterEnabled={}, clusterNodeId={}, metricsPort={}, "
                         + "adminEnabled={}, authEnabled={}, tlsEnabled={}, mTls={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
-                config.maxInflightPerConnection(), config.maxValueBytes(), config.defaultLeaseMs(),
+                config.maxInflightPerConnection(), config.maxValueBytes(),
+                config.maxQueueCapacity(), config.maxDrainBytes(), config.defaultLeaseMs(),
                 clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort(),
                 adminConfig.isConfigured(), authConfig.isEnabled(), tlsConfig.enabled(),
                 tlsConfig.requireClientCert());
@@ -508,7 +511,9 @@ public final class OpenLatchServer {
      * 启动租约扫描调度器：单守护线程（{@code openlatch-lease-sweeper}），
      * 以 {@code leaseTickIntervalMs} 为固定周期调用 {@code expireDue}
      * （回收过期租约）与 {@code sweepNotifiedHeads}（清扫超时未重发的
-     * 已通知队首）。单次扫描抛出的运行时异常仅记日志，不中断后续调度。
+     * 已通知队首）；另以 {@code queueReadyTickMs} 为独立周期调用
+     * {@code wakeQueueReady}（v7 单机队列延时唤醒，零状态变更的纯提示）。
+     * 单次扫描抛出的运行时异常仅记日志，不中断后续调度。
      * 仅由 {@link #start} 调用一次。
      */
     private void startScheduler() {
@@ -527,6 +532,16 @@ public final class OpenLatchServer {
                 log.error("lease sweep failed", e);
             }
         }, tickMs, tickMs, TimeUnit.MILLISECONDS);
+        // v7：单机队列就绪扫描（延时形态唤醒提示，判例集群侧 QueueReadyDriver
+        // 的 Leader 扫描臂）——独立周期 ready-tick-ms，零状态变更。
+        long readyTick = config.queueReadyTickMs();
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                core.wakeQueueReady();
+            } catch (RuntimeException e) {
+                log.error("queue ready sweep failed", e);
+            }
+        }, readyTick, readyTick, TimeUnit.MILLISECONDS);
     }
 
     /**

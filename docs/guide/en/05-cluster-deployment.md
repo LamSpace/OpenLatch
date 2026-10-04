@@ -31,6 +31,9 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | per-key queue depth cap |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | inflight cap per connection |
 | `openlatch.server.limit.max-value-bytes` | `4096` | per-key payload cap for atomic references (v6); enforced only at ingress (over-limit commands never enter the log), range [1, 512KiB]; lowering the cap never retro-affects stored values |
+| `openlatch.server.limit.max-queue-capacity` | `1024` | ceiling for declared queue capacity claims (v7); an over-ceiling PUT claim is ingress-rejected with zero log entries, range [1, 65536]; combined with per-element `max-value-bytes` it bounds a key's residency |
+| `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo reply byte budget (v7): the DRAIN extraction limit is clamped by budget/`max-value-bytes` and the clamped N rides the log entry (apply never reads local config), range [1, 512KiB] |
+| `openlatch.server.queue.ready-tick-ms` | `200` | delayed-queue ready-scan period (v7, Leader/standalone scheduler; affects wake-up latency precision only, never state adjudication), minimum 10ms |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -133,6 +136,31 @@ availability is carried by the server-side self-healing watchdog, not by restart
   the entry, so either accept the memory residency during the rollback window, or clear
   & re-add per the previous bullet). While on the older binary, any reference-form write
   is shape-rejected at the old leader's ingress and never pollutes the replication face.
+- **v7 queue rollback window**: queue entries (`queue_*` snapshot fields,
+  `QUEUE_OP_ENTRY` log records, kinds 12/13) are v7 additions pre-v7 binaries
+  cannot interpret — before rolling back below v7, drain queue keys to empty
+  (`take`/`drainTo` everything; the entry itself stays, so accept an empty
+  entry's residency or clear & re-add per the earlier bullet). On the older
+  binary any `QUEUE_OP` message is rejected as an unknown message type and
+  never pollutes the replication face.
+
+### Queue-dimension snapshot and log governance (v7)
+
+- A single queue key's snapshot residency is bounded by `capacity ×
+  max-value-bytes` (the element list) plus one `max-value-bytes` per session
+  dedup slot (latest delivery receipt; dropped at SESSION_CLOSE). Total snapshot
+  size is linear in queue keys × capacity × element ceiling and must never
+  accumulate with put/take rounds (no element history ships) — a gated
+  regression with full-capacity max-size elements plus delivery slots pins this.
+- Log entry rate: every queue write and read rides the commit (the ATOMIC GET
+  precedent), so hot queue keys are a real log-growth source; `drainTo` is the
+  built-in amortizer (many elements, one entry), and delayed wake-ups/parking/
+  bounces never enter the log (Leader-local). Production pressure on a hot
+  queue key's entry rate triggers WATCHLIST W9's evaluation path.
+- Lowering `max-value-bytes` while a queue holds oversized legacy elements can
+  push an actual drain reply above the `max-drain-bytes` budget (the direct
+  cost of "never retro-affect"); drain such keys first or size budgets ahead —
+  the frame ceiling remains the hard backstop.
 
 ### Payload snapshot & log size governance (v6)
 

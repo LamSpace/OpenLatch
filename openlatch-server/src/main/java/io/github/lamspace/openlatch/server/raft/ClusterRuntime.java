@@ -52,6 +52,8 @@ public final class ClusterRuntime {
     private final SessionCoordinator sessionCoordinator;
     /** 租约到期驱动（Leader 扫描提交）。 */
     private final LeaseExpiryDriver expiryDriver;
+    /** v7 队列就绪驱动（Leader 延时唤醒扫描）。 */
+    private final QueueReadyDriver queueReadyDriver;
     /** 写请求集群处理器。 */
     private final ClusterRequestHandler requestHandler;
     /** Leader 提示单源视图（HELLO/NOT_LEADER/CLUSTER_VIEW 共用）。 */
@@ -67,19 +69,22 @@ public final class ClusterRuntime {
      * @param gateway        复制网关
      * @param sessionCoordinator 会话协调器
      * @param expiryDriver   到期驱动
+     * @param queueReadyDriver v7 队列就绪驱动
      * @param requestHandler 写请求处理器
      * @param leaderTracker  Leader 提示视图
      * @param stallWatchdog  复制停摆自愈看门狗
      */
     private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
                            ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
-                           LeaseExpiryDriver expiryDriver, ClusterRequestHandler requestHandler,
+                           LeaseExpiryDriver expiryDriver, QueueReadyDriver queueReadyDriver,
+                           ClusterRequestHandler requestHandler,
                            LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
         this.sessionCoordinator = sessionCoordinator;
         this.expiryDriver = expiryDriver;
+        this.queueReadyDriver = queueReadyDriver;
         this.requestHandler = requestHandler;
         this.leaderTracker = leaderTracker;
         this.stallWatchdog = stallWatchdog;
@@ -128,6 +133,11 @@ public final class ClusterRuntime {
                 gateway, config.leaseTickIntervalMs(), metrics);
         gateway.setExpiryDriver(expiryDriver);
         expiryDriver.start();
+        // v7：队列就绪驱动（Leader 侧延时唤醒扫描，零日志纯提示）。
+        QueueReadyDriver queueReadyDriver = new QueueReadyDriver(subsystem, gateway,
+                config.queueReadyTickMs());
+        gateway.setQueueReadyDriver(queueReadyDriver);
+        queueReadyDriver.start();
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
                 waitQueue, config, leaderTracker, metrics);
         if (metrics != null) {
@@ -140,7 +150,7 @@ public final class ClusterRuntime {
         ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
-                expiryDriver, handler, leaderTracker, stallWatchdog);
+                expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog);
     }
 
     /**
@@ -160,6 +170,7 @@ public final class ClusterRuntime {
         stallWatchdog.close();
         gateway.close();
         sessionCoordinator.close();
+        queueReadyDriver.close();
         expiryDriver.close();
         subsystem.close();
         log.info("cluster runtime down: node={}", subsystem.clusterConfig().nodeId());

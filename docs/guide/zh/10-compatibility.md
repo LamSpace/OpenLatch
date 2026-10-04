@@ -21,9 +21,10 @@
 | v4 | 原子变量（`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`）：`ATOMIC_OP` 消息对、每 key 版本戳与去重槽 |
 | v5 | 循环屏障（`OBarrier`）：`BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` 消息对、世代账簿复制、离场即破障 |
 | v6 | 有值引用（`OAtomicReference`）：ATOMIC 消息对 `optional bytes` 载荷字段（无新 `MessageType`）、`maxValueBytes` 入口钳制、载荷快照/预览 |
+| v7 | 有界队列（`OBlockingQueue`）与延时队列（`ODelayQueue`）：`QUEUE_OP` 消息对、`LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` 形态、每会话去重槽、双"满"分轨、容量/drain 入口钳制、延时应用点折算、队列快照字段 |
 
 混布规则：**服务端版本 ≥ 客户端版本**。旧客户端（v1/v2）连新服务端完全可用；
-新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 ≥5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；v6 有值引用要求服务端 ≥6（v≤5 会话发引用形态 `ATOMIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，标量原子不受波及）；服务端升级后旧客户端（v≤5）行为逐项不变。
+新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 ≥5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；v6 有值引用要求服务端 ≥6（v≤5 会话发引用形态 `ATOMIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，标量原子不受波及）；v7 队列要求服务端 ≥7（v≤6 会话发 `QUEUE_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；服务端升级后旧客户端（v≤6）行为逐项不变。
 
 ## 升级与回滚顺序
 

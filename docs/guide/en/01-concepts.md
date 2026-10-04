@@ -160,6 +160,47 @@ Generation numbers increase monotonically per key; responses echo them so a
 resend settles against its own generation. Arrival is a stateful request: on a
 session switch an in-flight await is abandoned, never replayed.
 
+## 9. Bounded queues and delay visibility
+
+`OBlockingQueue`/`ODelayQueue` (protocol v7) mirror the JDK `BlockingQueue`/
+`DelayQueue` as coordination-plane primitives carrying **small payload
+elements** (each element subject to the same `max-value-bytes` clamp, 4KB
+default). Elements live in the replicated log, owned by no session:
+
+- **Elements are bound to the key, not to a session (stronger than the JDK)** —
+  a producer's process death **never swallows elements**: where a JDK queue dies
+  with its heap, here elements persist until consumed. Conversely, nothing
+  consumes them by itself — entries and elements are never reclaimed server-side,
+  so a forgotten key is real memory/snapshot cost (the console shows depth and
+  total resident bytes).
+- **Capacity is always declared (no unbounded form)** — the first write's
+  `capacity` claim forms the entry (server ceiling `max-queue-capacity`,
+  default 1024); a handle claiming a different capacity is rejected. The two
+  "fulls" are distinct: **element-full** makes `offer` return false and `put`
+  park; **waiter-queue-full** (the `max-queue-depth-per-key` guard) rejects a
+  parking request with `OVERLOADED`.
+- **`put/take` ride the wait-notify-resend loop** — same machinery as Latch/
+  Barrier awaits; an apply-point race (precheck said yes, commit lost the race)
+  bounces back into waiting transparently. `offer/poll(timeout)` budgets are
+  client-side clocks; parked waits have no server-side expiry (contract).
+- **Per-session dedup slots make resends safe**: a replayed `put` never
+  double-inserts; a replayed `take`/`drainTo` delivers **the exact same bytes**.
+- **Elements are never null** — the JDK `BlockingQueue` rejectNull contract
+  (deliberately the *opposite* of `OAtomicReference`, where null is a first-class
+  value); a zero-length byte array is a legal element.
+- **Delay form** — injection carries a relative delay; the **absolute expiry is
+  folded at the apply point from the entry timestamp** and replicated
+  deterministically (leader changes cannot re-judge). Unexpired elements are
+  invisible to every consumption path but count in `size()`; dequeue order is
+  (earliest expiry, then arrival) — the per-tie FIFO is an enhancement over the
+  JDK. The delayed-injection method is named `offerDelayed(e, delay, unit)`,
+  **not** JDK's `offer(e, timeout, unit)`: that signature means "delay" on a
+  DelayQueue but "wait budget" on a BlockingQueue — renaming avoids the trap.
+  Wake-up granularity is the server-side ready tick (`ready-tick-ms`, default
+  200ms); correctness never depends on it.
+- **No `iterator`/`contains`/`remove(Object)` surface**; batch consumption rides
+  `drainTo` (subject to the `max-drain-bytes` reply budget).
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -173,6 +214,7 @@ session switch an in-flight await is abandoned, never replayed.
 | Atomic variables | — | value has no owner (death never rolls back); every write bumps the version stamp by 1; ABA only eliminated by `*Stamped` forms; entries never reclaimed (v4) |
 | Atomic reference | — | opaque payload ≤ `maxValueBytes` (default 4KB, clamped authoritatively at ingress, zero effect on overflow); null and empty-string are distinct; version stamp/dedup isomorphic with scalars; entry and payload never reclaimed (v6) |
 | Cyclic barrier | — | N-party rendezvous, reusable generations; **leaving breaks the current generation** (death/timeout/interrupt/break — stronger than the JDK); no sticky broken state, no `reset()`; the last arriver runs the action (v5) |
+| Bounded queue | — | elements bound to the key, not the session (**producer death never swallows them** — stronger than the JDK); declared capacity, two "fulls" split (element-full = false/park, waiter-full = OVERLOADED); dedup slots: no double-insert, identical replay; elements never null; delay form folds expiry at the apply point, per-tie FIFO (v7) |
 
 ## Next
 

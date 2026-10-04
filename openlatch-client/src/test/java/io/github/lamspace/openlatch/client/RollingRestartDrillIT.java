@@ -150,6 +150,10 @@ class RollingRestartDrillIT {
             OCountDownLatch la = a.newCountDownLatch("roll-latch", 2);
             la.init();
             assertThat(la.countDown()).isEqualTo(1);
+            // v7 队列：滚动前由 A 投递两元素——验证跨全量滚动存续与非归属会话消费。
+            OBlockingQueue qSeed = a.newBlockingQueue("roll-queue", 8);
+            qSeed.put("roll-1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            qSeed.put("roll-2".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
             // 全量滚动（leader 先序）：逐节点停止→重启→等端口与选主。
             Node leader0 = waitLeader(nodes);
@@ -181,6 +185,31 @@ class RollingRestartDrillIT {
 
             // 许可池终态：A 归还或到期后满量可再取（两径之一，不赌时序）。
             awaitSemUntilFull(b, "roll-sem", 3, 120_000);
+            // v7 队列跨滚动：深度存续 + 另一会话（B）按到达序 drain 摘净——
+            // 元素绑定 key 不绑定会话的演练级可执行化（A 会话历经 leader 宕机
+            // 可能已换代，仍不影响这两元素的可消费性）。
+            OBlockingQueue qProbe = b.newBlockingQueue("roll-queue", 8);
+            long qDeadline = System.currentTimeMillis() + 60_000;
+            int depth = -1;
+            while (System.currentTimeMillis() < qDeadline) {
+                try {
+                    depth = qProbe.size();
+                    if (depth == 2) {
+                        break;
+                    }
+                } catch (OpenLatchException transientQ) {
+                    // 改道/重连窗（含超时子类）：重试收敛。
+                }
+                Thread.sleep(500);
+            }
+            assertThat(depth).as("队列深度跨三节点滚动存续").isEqualTo(2);
+            List<byte[]> drained = new ArrayList<>();
+            assertThat(qProbe.drainTo(drained, 8)).isEqualTo(2);
+            assertThat(new String(drained.get(0), java.nio.charset.StandardCharsets.UTF_8))
+                    .isEqualTo("roll-1");
+            assertThat(new String(drained.get(1), java.nio.charset.StandardCharsets.UTF_8))
+                    .isEqualTo("roll-2");
+            assertThat(qProbe.size()).isZero();
             System.out.println("[drill-C] extended primitives survived rolling restart");
         } finally {
             if (a != null) {

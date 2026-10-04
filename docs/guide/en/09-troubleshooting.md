@@ -88,6 +88,28 @@ Criteria: failover recovery <10s with no double-award; rolling both orders "last
 45s budget ⇒ zero residual"; partitioned minority cannot grant or release, lock survives,
 auto-convergence after healing; sampler red only if all rounds ABORTED.
 
+## Queue (v7) triage cheat sheet
+
+- **`offer` returning `false` vs an `OVERLOADED` throw**: the first is the normal
+  element-full immediate outcome (queue full, reject like JDK `offer`); the second
+  means the **waiter queue** for that key hit `max-queue-depth-per-key` — parking
+  requests are being rejected. Both signal consumers falling behind producers, at
+  different severities (the second says the backlog itself has grown);
+- **`put`/`take` returning nothing for a long time**: check three things — (1) whether
+  the other side really frees capacity / delivers elements (console queue section:
+  depth plus the two waiter tracks); (2) Leader stability — parkings die with the
+  term and are re-parked by the client (ranks reset per term, fairness holds within
+  one); (3) on delay queues the due-time wake is tick-granular (`ready-tick-ms`,
+  ~200ms): if nothing is ever delivered and depth includes unexpired elements, audit
+  the business-side `delay` inputs (absolute expiry folds from server entry clocks,
+  not client clocks);
+- **`OpenLatchException(INVALID_REQUEST)` on a queue op** means one of: over-large
+  element (beyond `max-value-bytes`), mismatched capacity claim, QUEUE vs DELAY_QUEUE
+  form conflict on one key, or a v≤6 session — the status text pinpoints which;
+- **"elements nobody consumed still occupy memory"**: by contract — elements bind to
+  the key, nothing reclaims them server-side. Scheduled cleanup rides on business key
+  naming (round/tenant prefixes) plus the console's residency readouts.
+
 ## 7. FAQ
 
 **Q: Can I use it for distributed transactions?** No — locks are coordination primitives

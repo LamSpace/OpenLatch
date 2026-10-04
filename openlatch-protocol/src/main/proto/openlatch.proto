@@ -25,6 +25,7 @@ enum MessageType {
   BARRIER_AWAIT       = 15; // v5：循环屏障到场等待（QUEUED/AWAIT_NOTIFY 复用，独立通道）
   BARRIER_LEAVE       = 16; // v5：循环屏障离场/破障（在队离场、超时、中断、显式 break 共用）
   BARRIER_ACTION_DONE = 17; // v5：循环屏障动作了结（执行者回报 barrierAction 完成）
+  QUEUE_OP         = 18;   // v7：队列操作（独立消息对，不走 ACQUIRE；读写皆全量经提交）
 }
 
 // 锁类型。
@@ -41,6 +42,8 @@ enum LockType {
   LOCK_TYPE_ATOMIC_BOOLEAN = 9;  // v4：原子 boolean 形态判别（值域 {0,1}）
   LOCK_TYPE_BARRIER        = 10; // v5：循环屏障定型判别（屏障操作经 BARRIER_* 消息）
   LOCK_TYPE_ATOMIC_REFERENCE = 11; // v6：原子有值引用形态判别（仅 ATOMIC_OP 消息携带；载荷为不透明字节，≤maxValueBytes 由接入层钳制）
+  LOCK_TYPE_QUEUE        = 12; // v7：有界队列形态判别（仅 QUEUE_OP 消息携带；出队按到达序；ACQUIRE 携带属违例）
+  LOCK_TYPE_DELAY_QUEUE  = 13; // v7：延时队列形态判别（仅 QUEUE_OP 消息携带；出队按最早到期序、同到期保持到达序；ACQUIRE 携带属违例）
 }
 
 // 状态码。
@@ -107,6 +110,8 @@ message Envelope {
     BarrierLeaveResponse      barrier_leave_response      = 37;  // v5
     BarrierActionDoneRequest  barrier_action_done_request  = 38;  // v5
     BarrierActionDoneResponse barrier_action_done_response = 39;  // v5
+    QueueOpRequest            queue_op_request             = 40;  // v7
+    QueueOpResponse           queue_op_response            = 41;  // v7
   }
 }
 
@@ -180,7 +185,7 @@ message LeaseRenewResponse {
 
 message AwaitNotify {
   string key            = 1;
-  int64  request_id_ref = 2;  // 指向原 ACQUIRE/LATCH_AWAIT/BARRIER_AWAIT 的 request_id
+  int64  request_id_ref = 2;  // 指向原 ACQUIRE/LATCH_AWAIT/BARRIER_AWAIT/QUEUE_OP 的 request_id
 }
 
 // v3：屏障倒计数（Phase 3 详设 §2.1/design D1 精化）。count 为本次扣减量；
@@ -248,6 +253,7 @@ message AdminSummaryResponse {
   string     version          = 9;  // 服务端版本
   int32      atomic_entries   = 10; // v4：ATOMIC 条目数（无持有语义，单列，判例 latch_entries）
   int32      barrier_entries  = 11; // v5：BARRIER 条目数（无持有语义，单列，判例 latch_entries/atomic_entries）
+  int32      queue_entries    = 12; // v7：QUEUE 条目数（两形态合并计数；无持有语义，单列，判例 latch_entries/atomic_entries/barrier_entries）
 }
 
 message AdminListKeysRequest {
@@ -273,6 +279,11 @@ message AdminKeyInfo {
   // 构造的恒定长度截断转义文本，全量载荷不外发）。
   int32  atomic_payload_size    = 11; // 当前值字节数（null 值恒 0）
   string atomic_payload_preview = 12; // 截断转义预览（null 值恒空串）
+  // v7：队列条目的观察字段（非 QUEUE 家族恒 0/空串；family 词表增 queue）。
+  sint64 queue_capacity           = 13; // 定型容量（非 QUEUE 恒 0）
+  int32  queue_depth              = 14; // 当前元素数（驻留口径，延时形态含未到期项；非 QUEUE 恒 0）
+  int32  queue_head_payload_size  = 15; // 队首元素字节数（空队恒 0）
+  string queue_head_payload_preview = 16; // 队首元素截断转义预览（空队恒空串；全量元素不外发）
 }
 
 message AdminListKeysResponse {
@@ -305,6 +316,7 @@ message AdminKeyWaiterInfo {
   int64  waited_ms   = 4;
   int32  permits     = 5;  // 请求许可数（锁/屏障恒 1）
   bool   notified    = 6;
+  int32  queue_track = 7;  // v7：队列挂起轨道判别（0=非队列等待者、1=等容量 put-waiter、2=等元素 take-waiter）
 }
 
 message AdminKeyDetailResponse {
@@ -337,6 +349,15 @@ message AdminKeyDetailResponse {
   // （空引号标记），两态可区分。全量载荷 MUST NOT 出现在应答中。
   int32  atomic_payload_size    = 21;  // 当前值字节数（null 值恒 0）
   string atomic_payload_preview = 22;  // 截断转义预览（null 值恒空串）
+  // v7：队列条目的观察字段（非 QUEUE 家族恒 0/空串）。预览沿用原子引用同一
+  // 截断转义纪律：长度恒定不随配置或元素大小膨胀，全量元素列表 MUST NOT 出现。
+  sint64 queue_capacity             = 23;  // 定型容量（非 QUEUE 恒 0）
+  int32  queue_depth                = 24;  // 当前元素数（驻留口径；非 QUEUE 恒 0）
+  int64  queue_head_expiry_ms       = 25;  // 队首元素绝对到期时刻（DELAY_QUEUE 形态、受理节点
+                                           // 时钟读数；非 DELAY 形态或空队恒 0）
+  int64  queue_total_payload_bytes  = 26;  // 元素载荷字节之和（驻留治理观察；非 QUEUE 恒 0）
+  int32  queue_head_payload_size    = 27;  // 队首元素字节数（空队恒 0）
+  string queue_head_payload_preview = 28;  // 队首元素截断转义预览（空队恒空串）
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -447,4 +468,53 @@ message BarrierActionDoneRequest {
 
 message BarrierActionDoneResponse {
   StatusCode status = 1;  // OK=世代已合拢放行 / BARRIER_BROKEN=世代已破（幂等）/ 错误码
+}
+
+// v7：队列操作类型（QUEUE_OP_REQUEST.op）。写 = PUT/TAKE/DRAIN，读 = PEEK/SIZE；
+// 读写皆全量经提交（判例 v4 GET），读类条目应用为零迁移、op_seq 填 0 不参与去重。
+enum QueueOp {
+  QUEUE_OP_PUT   = 0;  // 入队（承载 put/offer 双语义，见 blocking）
+  QUEUE_OP_TAKE  = 1;  // 出队消费（承载 take/poll 双语义，见 blocking）
+  QUEUE_OP_DRAIN = 2;  // 批量摘取（恒立即式，空队回空列表非错误）
+  QUEUE_OP_PEEK  = 3;  // 队首读数（与 TAKE 同出队谓词；延时形态未到期回缺省）
+  QUEUE_OP_SIZE  = 4;  // 驻留元素数（延时形态含未到期项）
+}
+
+// v7：队列操作请求（QUEUE_OP）。lock_type 取 LOCK_TYPE_QUEUE(12)/LOCK_TYPE_DELAY_QUEUE(13)
+// 之一作形态判别（其余值携 QUEUE_OP 属形状违例；ACQUIRE 携带 12/13 同规则拒绝）。
+// 容量定型断言判例 permits_total/parties：非零主张建条目或比对、0 为不主张；
+// 对不存在 key 的 PUT 主张必须非零（协调面无无界队列）。形态定型后不可变更，
+// 跨形态请求（QUEUE↔DELAY_QUEUE）按类型互拒。形状互斥矩阵在入口裁决：
+// element_bytes 仅 PUT 携带且 MUST 存在（元素不可为 null——缺省即违例；
+// 与有值引用形态 "null 为一等公民" 的 presence 语义刻意不同）；delay_ms 仅
+// LOCK_TYPE_DELAY_QUEUE 形态的 PUT 携带（≥0 相对延迟，绝对到期时刻由应用点
+// 以条目携带时刻折算，请求侧 MUST NOT 预折算）；max_elements 仅 DRAIN 携带
+// （>0 上限，0=取服务端钳制上限，实际钳定值随条目入日志）；blocking 仅
+// PUT/TAKE 携带（true=不可满足时挂起回 QUEUED，false=立即回 DENIED）；
+// PEEK/SIZE 的 op_seq MUST 为 0。
+message QueueOpRequest {
+  string         key           = 1;
+  QueueOp        op            = 2;
+  LockType       lock_type     = 3;
+  bool           blocking      = 4;   // 仅 PUT/TAKE 有意义（其余 op 携 true 为违例）
+  sint64         capacity      = 5;   // 容量定型断言（>=0，0=不主张）
+  optional bytes element_bytes = 6;   // PUT 的元素（不透明字节，≤maxValueBytes 由接入层钳制；
+                                      // 缺省=违例，零长度=合法空串元素）
+  sint64         delay_ms      = 7;   // 延时注入（仅 DELAY_QUEUE 形态 PUT；其余携带非零为违例）
+  int32          max_elements  = 8;   // DRAIN 提取上限（>0；0=服务端钳制上限；非 DRAIN 携非零为违例）
+  uint64         op_seq        = 9;   // 会话内单调写序号（GET/读类填 0 不参与去重）
+}
+
+// v7：队列操作应答。拒绝态字段为零值形；双"满"语义分轨——元素队列不可满足的
+// 立即式回 DENIED，等待挂起深度超限回 QUEUE_FULL（均为既有状态码，语义不同）。
+// QUEUED 时 queue_position 有效（1 起），后续经 AWAIT_NOTIFY 同 request_id 重发兑现。
+message QueueOpResponse {
+  StatusCode       status          = 1;   // OK / QUEUED / DENIED / QUEUE_FULL / 错误码
+  QueueOp          op              = 2;
+  int32            queue_position  = 3;   // QUEUED 时有效
+  optional bytes   element_bytes   = 4;   // TAKE 交付/PEEK 读数（显式 presence：缺省=无元素/空队/未到期，
+                                          // 零长度=空串元素——两态可区分）
+  repeated bytes   drained_bytes   = 5;   // DRAIN 按出队序的交付列表（空列表为合法结果）
+  sint64           size            = 6;   // SIZE 读数（仅 SIZE op 有效，其余恒 0）
+  sint64           capacity        = 7;   // 条目定型容量回显（未定型/拒绝路径为 0）
 }

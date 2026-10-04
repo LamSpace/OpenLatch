@@ -362,6 +362,83 @@ class AdminProtocolTest {
     }
 
     @Test
+    void queueEntriesVisibleInSummaryListAndDetailWithTrack() {
+        // v7 预设：一个队列 key 灌入两个元素（恰限 64KB 大元素 + 小元素），
+        // 一次 TAKE 交付、一次挂起等待（等元素轨）。
+        byte[] big = new byte[64 * 1024 - 1024];
+        java.util.Arrays.fill(big, (byte) 0x21);
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 600, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 4, big, 0, 0, 1));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 601, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 0, "tail".getBytes(java.nio.charset.StandardCharsets.UTF_8), 0, 0, 2));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 602, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                false, 0, null, 0, 0, 3));
+        // 延时条目 + 挂起消费者（put 满挂起走等容量轨）：容量 1 的 delay 队列。
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 603, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 1, new byte[0], 60_000, 0, 4));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 604, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                true, 0, null, 0, 0, 5));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 605, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                true, 0, null, 0, 0, 6));
+
+        AdminSummaryResponse s = admin(adminSummary(30, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getQueueEntries()).isEqualTo(2);
+
+        AdminKeyInfo row = admin(adminListKeys(31, TOKEN, 0, 10, "queue:"))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("queue:a")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("queue");
+        assertThat(row.getHolders()).isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getQueueCapacity()).isEqualTo(4);
+        assertThat(row.getQueueDepth()).isEqualTo(1); // 恰限大元素已被 TAKE
+        assertThat(row.getQueueHeadPayloadSize())
+                .isEqualTo("tail".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        assertThat(row.getQueueHeadPayloadPreview()).isEqualTo("tail");
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(32, TOKEN, "queue:a"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getFamily()).isEqualTo("queue");
+        assertThat(d.getQueueCapacity()).isEqualTo(4);
+        assertThat(d.getQueueDepth()).isEqualTo(1);
+        assertThat(d.getQueueHeadExpiryMs()).isZero(); // QUEUE 形态无到期属性
+        assertThat(d.getQueueTotalPayloadBytes()).isEqualTo(4);
+        // 大元素零外发：观察应答远小于曾驻留的 64KB 级载荷。
+        assertThat(d.toByteArray().length).isLessThan(4096);
+        // 去重槽镜像不观察（明细不外发槽表）；挂起等待经等待队列视图：queue:d
+        // 两挂起者分列位次与轨道。
+        AdminKeyDetailResponse dd = admin(adminKeyDetail(33, TOKEN, "queue:d"))
+                .getAdminKeyDetailResponse();
+        assertThat(dd.getQueueDepth()).isEqualTo(1);
+        assertThat(dd.getQueueHeadExpiryMs()).isGreaterThan(0); // DELAY 形态读数
+        assertThat(dd.getWaitersCount()).isEqualTo(2);
+        assertThat(dd.getWaiters(0).getQueueTrack()).isEqualTo(2); // 等元素
+        assertThat(dd.getWaiters(1).getQueueTrack()).isEqualTo(2);
+        assertThat(dd.getWaiters(0).getPosition()).isEqualTo(1);
+        assertThat(dd.getWaiters(1).getPosition()).isEqualTo(2);
+        // 锁条目队列字段恒缺省。
+        core.acquire(new AcquireCommand(sessionId, 610, "plain-queue", LockType.REENTRANT,
+                11, 30_000, true));
+        AdminKeyDetailResponse lock = admin(adminKeyDetail(34, TOKEN, "plain-queue"))
+                .getAdminKeyDetailResponse();
+        assertThat(lock.getQueueCapacity()).isZero();
+        assertThat(lock.getQueueDepth()).isZero();
+        assertThat(lock.getQueueHeadPayloadPreview()).isEmpty();
+    }
+
+    @Test
     void barrierEntriesVisibleInSummaryListAndDetail() {
         long w = core.sessionOpened();
         core.acquire(new AcquireCommand(w, 432, "plain", LockType.REENTRANT, 22, 30_000, true));

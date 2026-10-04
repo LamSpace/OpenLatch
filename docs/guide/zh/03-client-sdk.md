@@ -155,6 +155,47 @@ if (flag.compareAndSet(null, s("init"))) { doInit(); }               // 期望 n
 5. 需 **v6 握手**：对握版本上限低于 6 的服务端，引用形态请求以显式
    `OpenLatchException`（`INVALID_REQUEST`）失败，不重发、不降级。
 
+## 有界队列与延时队列（OBlockingQueue / ODelayQueue，v7）
+
+跨进程元素搬运原语：有界 FIFO 队列与延时队列（元素带到期时刻）。元素为不透明字节
+（同受 `max-value-bytes` 每元素钳制，默认 4KB），容量由首建句柄定型。
+
+```java
+OBlockingQueue jobs = client.newBlockingQueue("job:queue", 64);      // 容量主张 64
+jobs.put(s("任务A"));                                                 // 阻塞投递（可中断）
+if (jobs.offer(s("任务B"))) { ... }                                  // 立即式：队满回 false
+byte[] item = jobs.take();                                           // 阻塞消费（可中断）
+byte[] maybe = jobs.poll(2, TimeUnit.SECONDS);                       // 带预算消费（本地计时）
+List<byte[]> batch = new ArrayList<>();
+int n = jobs.drainTo(batch, 32);                                     // 批量摘取（摊薄 RTT）
+int depth = jobs.size();                                             // 驻留口径（延时含未到期）
+
+ODelayQueue alarm = client.newDelayQueue("alarm:queue", 16);
+alarm.offerDelayed(s("5 分钟后提醒"), 5, TimeUnit.MINUTES);           // 到期前一切消费通道不可见
+String due = alarm.takeAsString();                                   // 最早到期先出，同到期按到达序
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §9](01-concepts.md)）：
+
+1. **元素绑定 key 不绑定会话**：投递者进程死亡不吞元素（增强于 JDK 同进程堆消散语义）；
+   元素存活至被消费，服务端无自动回收——忘删 key 即永久驻留（驻留成本见控制台队列观察）；
+2. **双"满"分轨**：元素满时 `offer` 回 `false`、`put` 挂起等空位；等待挂起队列满时挂起
+   请求抛 `OpenLatchException`（`OVERLOADED`，沿用锁深度护栏映射）；服务端对挂起不设
+   到期期限，客户端超时/中断即本地终态（服务端挂起项由事件与超时清扫收敛，期间其队列
+   位次仍占位——被放弃的挂起者不影响他人语义，只影响他人位次）；
+3. **幂等由每会话去重槽承载**：超时/改道窗口内同序号自动重发——`put` 不双插、
+   `take`/`drainTo` 重放交付**同一份字节**；会话中途切换则放弃（抛异常），用
+   `size()`/`peek()` 复核，不盲目换值重试；
+4. **元素不可为 null**（判例 JDK `BlockingQueue` rejectNull；与 `OAtomicReference` 的
+   null 语义相反，零长度空字节串是合法元素）；无 `iterator`/`contains`/`remove(Object)` 面；
+5. **延时形态**：`offerDelayed(e, delay, unit)` 显式命名（JDK `DelayQueue.offer(e,timeout,unit)`
+   的"延迟"签名与阻塞队列族"等待预算"同形异义，改名防混读）；绝对到期时刻由服务端
+   应用点折算、随复制日志确定化（换主不改判）；到点唤醒精度为服务端 tick 级
+   （`ready-tick-ms`，默认 200ms），消费正确性不依赖精度；
+6. 需 **v7 握手**：低版本服务上队列请求以显式 `OpenLatchException`（`INVALID_REQUEST`）
+   失败，不重发、不降级；`drainTo` 实际摘取数受服务端 `max-drain-bytes` 预算钳制，
+   以返回值为准。
+
 ## 循环屏障（OBarrier，v5）
 
 ```java

@@ -21,14 +21,16 @@
 | `openlatch.server.queue.depth.max` | Gauge | — |
 | `openlatch.server.atomic.total` | Counter | `kind`（`long`/`integer`/`boolean`/`reference`）、`op`（`get`/`set`/`get_and_set`/`add`/`cas`/`cas_stamped`）、`status` |
 | `openlatch.server.barrier.total` | Counter | `op`（`await`/`leave`/`action_done`）、`status` |
+| `openlatch.server.queue.total` | Counter | `op`（`put`/`take`/`drain`/`peek`/`size`）、`status` |
+| `openlatch.server.elements.depth.max` | Gauge | — |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` |
 
-`status` 标签值 MUST 取响应的协议状态码名（如 `OK`、`QUEUED`、`LOCK_HELD`、`NOT_LEADER`、`INVALID_REQUEST`、`INTERNAL_ERROR`；屏障在带裁决新增可取值 `BARRIER_BROKEN`）。`locks.held` 的 `type` 标签取条目家族名（`lock`/`semaphore`）——core 条目由首次请求定型家族但不携带单一协议类型（`REENTRANT`/`SIMPLE`/`FAIR` 同族互通、`READ`/`WRITE` 是请求维度），家族是两部署形态唯一一致可导出的维度；BARRIER 与 LATCH/ATOMIC（含 `reference` 形态）同判例不入该 Gauge（无持有语义）。有值引用形态的计数线 `kind="reference"`；其 `op` 维度不新增取值（该形态无 `add` 合法请求——超限/ADD 等入口拒绝以 `status="INVALID_REQUEST"` 计数线承载）。指标名与标签 MUST 在单一命名点定义，任何部署形态下落地的线路名以映射表为准。
+`status` 标签值 MUST 取响应的协议状态码名（如 `OK`、`QUEUED`、`LOCK_HELD`、`NOT_LEADER`、`INVALID_REQUEST`、`INTERNAL_ERROR`；屏障在带裁决新增可取值 `BARRIER_BROKEN`；队列的在带裁决 `DENIED`（元素不可满足的立即式）与 `OVERLOADED`（等待深度超限）为既有状态码取值，双"满"语义在计数线上以状态码区分）。`locks.held` 的 `type` 标签取条目家族名（`lock`/`semaphore`）——core 条目由首次请求定型家族但不携带单一协议类型（`REENTRANT`/`SIMPLE`/`FAIR` 同族互通、`READ`/`WRITE` 是请求维度），家族是两部署形态唯一一致可导出的维度；BARRIER、LATCH、ATOMIC（含 `reference` 形态）与 QUEUE 同判例不入该 Gauge（无持有语义）。**既有 `queue.depth.max` 的口径钉死为"等待队列深度"**（等待者计数，抓取时刻单键峰值），新增 `elements.depth.max` 为"队列条目元素深度"（驻留元素数，抓取时刻单键峰值）——两者 MUST NOT 混名混义；`waiters` Gauge 计数 MUST 涵盖队列双轨挂起等待者（与锁/Semaphore 等待同口径合计）。队列计数线 `queue.total` 按 `{op, status}` 归线（`QUEUED` 挂起、`DENIED` 立即式不可满足与回弹、入口拒绝 `INVALID_REQUEST` 各走其状态码线；读写皆计）。指标名与标签 MUST 在单一命名点定义，任何部署形态下落地的线路名以映射表为准。
 
 #### Scenario: 指标逐项可见
 
 - **WHEN** 服务器启动后抓取 `/metrics`
-- **THEN** 上表十二项（`is_leader` 仅集群启用时）各至少一条线存在，名称与标签与映射口径逐项一致
+- **THEN** 上表十四项（`is_leader` 仅集群启用时）各至少一条线存在，名称与标签与映射口径逐项一致
 
 #### Scenario: 未使用指标不虚构
 
@@ -44,6 +46,11 @@
 
 - **WHEN** 依次发生一次 `QUEUED` 到场、一次 TRIPPED 重发了结（`OK`）、一次破障了结（`BARRIER_BROKEN`）、一次超时离场（`leave`/`OK`）与一次执行者动作了结（`action_done`/`OK`）
 - **THEN** `openlatch_server_barrier_total` 按 `{op, status}` 五线各 +1，破障计数以 `status="BARRIER_BROKEN"` 单列可观测
+
+#### Scenario: 队列操作计数按维度归线与两满分轨
+
+- **WHEN** 满容量队列上依次发生一次成功 `PUT`（`OK`）、一次挂起 `PUT`（`QUEUED`）、一次立即式 `offer` 被拒（`DENIED`）、一次超等待深度的挂起 `PUT`（`OVERLOADED`）、一次空队 `poll`（`DENIED`）与一次超限元素入口拒绝（`INVALID_REQUEST`），随后队列驻留深度非零
+- **THEN** `openlatch_server_queue_total` 六线 `{put,OK}`、`{put,QUEUED}`、`{put,DENIED}`、`{put,OVERLOADED}`、`{take,DENIED}`、`{put,INVALID_REQUEST}` 各 +1；`openlatch_server_elements_depth_max` 反映抓取时刻单键最大元素数，且 `openlatch_server_queue_depth_max` 仍为等待者口径不受元素影响
 ### Requirement: 指标配置与管理端点生命周期
 
 指标经独立配置类从同一 Properties 文件加载：`openlatch.server.metrics.enabled`（默认 `true`）、`openlatch.server.metrics.port`（默认 `9412`，允许 `0` 表示操作系统分配临时端口）。非法值 MUST 启动时快速失败并给出明确错误信息；既有配置项与构造面 MUST NOT 变化。启用时管理 HTTP 服务 MUST 随服务器启动绑定端口、随关停序列解除绑定；绑定失败 MUST 与锁端口冲突同策略（启动失败退出，不进入半启动）。关闭时管理端口 MUST NOT 监听。

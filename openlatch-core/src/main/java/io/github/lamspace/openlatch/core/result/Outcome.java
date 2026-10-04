@@ -121,6 +121,14 @@ public enum Outcome {
      */
     REJECT_BARRIER_ACTION,
     /**
+     * 拒绝：队列容量断言不成立——建条目（PUT/阻塞 TAKE）未携带
+     * {@code > 0} 的容量主张（协调面无无界队列），或既有队列条目上
+     * 非零主张与定型容量不符；条目状态零扰动，server 层映射协议
+     * {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
+     * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
+     */
+    REJECT_QUEUE_CAPACITY,
+    /**
      * 在带裁决：循环屏障等待项所属世代已破障（离场即破障：在队到场者
      * 超时离场/本地中断/会话死亡/显式 {@code breakBarrier()} 任一触发）；
      * 非请求错误，连接与会话不受影响，server 层映射协议同名状态码

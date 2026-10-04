@@ -24,6 +24,7 @@ import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
+import io.github.lamspace.openlatch.core.command.QueueOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
@@ -34,6 +35,7 @@ import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LatchEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
+import io.github.lamspace.openlatch.core.lock.QueueEntry;
 import io.github.lamspace.openlatch.core.lock.SemaphoreEntry;
 import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
@@ -47,6 +49,7 @@ import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
+import io.github.lamspace.openlatch.core.result.QueueOpResult;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
@@ -181,6 +184,16 @@ public final class CoreEngine {
                         rs.slotApplied(), rs.slotOldValue(), rs.slotValue(),
                         rs.slotVersion());
                 lockTable.computeIfAbsent(en.key(), k -> re);
+                continue;
+            }
+            if (en.lockType() == LockType.QUEUE || en.lockType() == LockType.DELAY_QUEUE) {
+                // 队列条目：容量/元素（含到期时刻）/去重槽直写快照原值
+                // （恢复不重演入队出队判定）；双轨挂起为 Leader 本地态恒空，
+                // 尺寸不复核（钳制属接入层，判例引用/原子形态）。
+                CoreStateRestore.QueueState qs = en.queue();
+                QueueEntry qe = QueueEntry.restored(en.key(), en.lockType(), qs.capacity(),
+                        qs.elements(), qs.slots());
+                lockTable.computeIfAbsent(en.key(), k -> qe);
                 continue;
             }
             if (en.lockType() == LockType.BARRIER) {
@@ -375,7 +388,8 @@ public final class CoreEngine {
         // LATCH/BARRIER/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
         // 属请求形状错误，协议层门控之后由本守卫兜底。
         if (cmd.lockType() == LockType.LATCH || cmd.lockType() == LockType.BARRIER
-                || familyOf(cmd.lockType()) == KeyFamily.ATOMIC) {
+                || familyOf(cmd.lockType()) == KeyFamily.ATOMIC
+                || familyOf(cmd.lockType()) == KeyFamily.QUEUE) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         KeyFamily family = familyOf(cmd.lockType());
@@ -439,6 +453,7 @@ public final class CoreEngine {
             case LATCH -> KeyFamily.LATCH;
             case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN, ATOMIC_REFERENCE -> KeyFamily.ATOMIC;
             case BARRIER -> KeyFamily.BARRIER;
+            case QUEUE, DELAY_QUEUE -> KeyFamily.QUEUE;
         };
     }
 
@@ -471,6 +486,10 @@ public final class CoreEngine {
             // ACQUIRE 携带屏障定型在入口即拒（见 acquire 守卫）。
             case BARRIER -> throw new IllegalStateException(
                     "barrier entries are created only via barrier channels");
+            // 队列条目只能经队列命令通道（queueOp）创建（形态/容量由首次
+            // 写入定型），ACQUIRE 携队列定型在入口即拒（见 acquire 守卫）。
+            case QUEUE -> throw new IllegalStateException(
+                    "queue entries are created only via queue channels");
         };
     }
 
@@ -802,6 +821,86 @@ public final class CoreEngine {
     }
 
     /**
+     * 队列操作：QUEUE 家族唯一命令入口。判定顺序——会话存在 → key 合法 →
+     * 条目定位（缺条目时分派表决定零迁移读数或定型创建）→ 家族互拒 →
+     * 权威会话校验与触及登记 → 条目内判定。缺条目分派表：PEEK/SIZE/DRAIN
+     * 为零迁移读数（分别回 null/0/空列表，不建条目——判例 ATOMIC GET）；
+     * 非阻塞 TAKE 回 DENIED（poll 空语义，不建条目）；PUT 与阻塞 TAKE 须携
+     * 非零容量主张——主张 ≤0 回 {@link Outcome#REJECT_QUEUE_CAPACITY}
+     * （协调面无无界队列），非零即以该容量与形态定型创建条目（判例
+     * Semaphore 总量主张建条目预检）并紧接执行本操作。触及集登记为
+     * 等待/去重槽的清理路径供给（会话关闭经 removeSession 摘除双轨挂起与
+     * 该会话槽），不构成元素归属表达——元素绑定 key 而非会话。唤醒收集经
+     * {@code fireNotify} 在条目锁外触发（与锁/Latch/Barrier 同机制）；
+     * 队列条目常驻不回收（isEmpty 恒 false，无移除分支）。
+     *
+     * @param cmd 队列命令（形状合法性与尺寸钳制已由接入层受理，条目与
+     *            引擎 MUST NOT 复核载荷尺寸/容量上限/批量预算）
+     * @return 操作结果（择用规则见 {@link QueueOpResult}）
+     * @throws IllegalArgumentException {@code cmd.kind()} 非队列形态
+     * @throws NullPointerException     {@code cmd} 为 null
+     */
+    public QueueOpResult queueOp(QueueOpCommand cmd) {
+        if (familyOf(cmd.kind()) != KeyFamily.QUEUE) {
+            throw new IllegalArgumentException("not a queue kind: " + cmd.kind());
+        }
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return QueueOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return QueueOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                switch (cmd.op()) {
+                    case PEEK -> {
+                        return QueueOpResult.grantedPeek(null, 0);
+                    }
+                    case SIZE -> {
+                        return QueueOpResult.grantedSize(0, 0);
+                    }
+                    case DRAIN -> {
+                        return QueueOpResult.grantedDrain(List.of(), 0);
+                    }
+                    case TAKE -> {
+                        if (!cmd.blocking()) {
+                            return QueueOpResult.rejected(Outcome.DENIED);
+                        }
+                    }
+                    default -> {
+                        // PUT 与阻塞 TAKE 落入下方定型创建。
+                    }
+                }
+                if (cmd.capacity() <= 0) {
+                    return QueueOpResult.rejected(Outcome.REJECT_QUEUE_CAPACITY);
+                }
+                e = lockTable.computeIfAbsent(key,
+                        k -> QueueEntry.created(k, cmd.kind(), cmd.capacity()));
+            }
+            List<Waiter> notify = new ArrayList<>();
+            QueueOpResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (e.family() != KeyFamily.QUEUE || !(e instanceof QueueEntry qe)) {
+                    return QueueOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    return QueueOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                result = qe.op(cmd, now, config, config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, key);
+            return result;
+        }
+    }
+
+    /**
      * 循环屏障到场（含旧世代重发）：BARRIER 家族的主命令入口。
      *
      * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 校验 →
@@ -971,6 +1070,31 @@ public final class CoreEngine {
     }
 
     /**
+     * 队列条目的复制态导出（v7，判例 {@link #barrierReplicatedState}）：
+     * 形态/容量/元素列表（队列序）/每会话去重槽表（会话升序）的自包含
+     * 快照，供影子表镜像与快照序列化消费。条目锁内拷贝，弱一致于条目间、
+     * 自洽于条目内。
+     *
+     * @param key 队列键
+     * @return 复制态快照；非队列条目或不存在为 {@code null}
+     */
+    public QueueEntry.ReplicatedState queueReplicatedState(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return e instanceof QueueEntry qe ? qe.replicatedState() : null;
+        }
+    }
+
+    /**
      * key 形状校验的共享出口：空与超长分别回
      * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
      * 合法返回 {@code null}。
@@ -1060,7 +1184,7 @@ public final class CoreEngine {
                     case LOCK -> heldLocks++;
                     case SEMAPHORE -> heldSemaphores++;
                     default -> {
-                        // LATCH/ATOMIC/BARRIER 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
+                        // LATCH/ATOMIC/BARRIER/QUEUE 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
                     }
                 }
             }
@@ -1070,6 +1194,52 @@ public final class CoreEngine {
             }
         }
         return new CoreStats(heldLocks, heldSemaphores, totalWaiters, maxQueueDepth, sessions.size());
+    }
+
+    /**
+     * 队列元素深度观察读数（v7，{@code elements.depth.max} gauge 单机口径）：
+     * 全部队列 key 的当前元素数最大值（驻留口径，延时形态含未到期项）。
+     * 弱一致遍历（逐条目锁内读深度、条目间无全局原子性），MUST NOT 用于
+     * 任何裁决路径。
+     *
+     * @return 单键最大元素深度；无队列返回 0
+     */
+    public int maxElementsDepth() {
+        int max = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (e instanceof QueueEntry qe) {
+                int d = qe.depth();
+                if (d > max) {
+                    max = d;
+                }
+            }
+        }
+        return max;
+    }
+
+    /**
+     * 队列就绪唤醒（v7，单机形态延时扫描的引擎入口）：逐队列条目在条目
+     * 锁内尝试唤醒 take 轨队首（DELAY 形态要求队首到期不晚于引擎时钟、
+     * QUEUE 形态要求存在可消费元素——谓词收口在条目内），收集的通知经
+     * 事件出口在条目锁外触发。由服务端调度线程周期调用（集群形态由
+     * Leader 侧就绪驱动经影子表判定，不经本方法）。
+     *
+     * @return 本轮唤醒的等待项数
+     */
+    public int wakeQueueReady() {
+        long now = clock.nowMs();
+        int count = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (!(e instanceof QueueEntry qe)) {
+                continue;
+            }
+            List<Waiter> notify = new ArrayList<>();
+            synchronized (qe) {
+                count += qe.wakeReadyHeads(now, config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, e.key());
+        }
+        return count;
     }
 
     /**
@@ -1102,6 +1272,7 @@ public final class CoreEngine {
                     case AtomicEntry ae -> snapshots.add(ae.snapshot(now));
                     case AtomicRefEntry re -> snapshots.add(re.snapshot(now));
                     case BarrierEntry be -> snapshots.add(be.snapshot(now));
+                    case QueueEntry qe -> snapshots.add(qe.snapshot(now));
                     default -> {
                         // 未知实现不入快照（理论不可达：条目类已穷尽）。
                     }
@@ -1140,6 +1311,7 @@ public final class CoreEngine {
                 case AtomicEntry ae -> ae.snapshot(now);
                 case AtomicRefEntry re -> re.snapshot(now);
                 case BarrierEntry be -> be.snapshot(now);
+                case QueueEntry qe -> qe.snapshot(now);
                 default -> null;
             };
         }

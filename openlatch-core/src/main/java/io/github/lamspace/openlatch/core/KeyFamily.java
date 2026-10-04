@@ -52,5 +52,7 @@ public enum KeyFamily {
     /** 原子变量家族（{@code AtomicEntry}）：值不绑定会话归属，常驻不回收。 */
     ATOMIC,
     /** 循环屏障家族（{@code BarrierEntry}）：世代会合可复用，离场即破障。 */
-    BARRIER
+    BARRIER,
+    /** 有界队列家族（{@code QueueEntry}）：元素绑定 key 不绑定会话，常驻不回收。 */
+    QUEUE
 }

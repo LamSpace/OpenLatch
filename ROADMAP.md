@@ -29,7 +29,7 @@
 | 候选原语 | JDK 对应 | 核心语义 | 关键验收点 | 状态 |
 |---|---|---|---|---|
 | `OAtomicReference` | `AtomicReference` | 引标量形态之上的有值引用:引用值 get/set/版本 CAS,≤`maxValueBytes` | 超限 `INVALID_REQUEST`;快照膨胀回归测 | 已落地([提案归档](openspec/changes/archive/2026-10-04-add-oatomic-reference/)) |
-| `OBlockingQueue` | `BlockingQueue` + `DelayQueue` 变体 | 有界队列 `put`/`take`/`offer`/`poll`/`drainTo`;延时形态 = 元素带到期时刻(服务端定时器基建先例:租约到期) | FIFO 公平套件同款;元素生命周期绑定 key 而非会话——持有者死亡不吞元素,需契约声明 | 未启动 |
+| `OBlockingQueue` | `BlockingQueue` + `DelayQueue` 变体 | 有界队列 `put`/`take`/`offer`/`poll`/`drainTo`;延时形态 = 元素带到期时刻(服务端定时器基建先例:租约到期) | FIFO 公平套件同款;元素生命周期绑定 key 而非会话——持有者死亡不吞元素,需契约声明 | 已落地([提案归档](openspec/changes/archive/2026-10-04-add-oblocking-queue/)) |
 | `OTopic` | `Flow.Publisher`/`SubmissionPublisher` | 广播发布/订阅,协调级消息限额;**弱背压为显式契约**(慢消费者缓冲满的丢弃/断连策略在提案中裁决) | 多订阅者 fan-out E2E;取消订阅回收服务端订阅条目(防泄漏) | 未启动 |
 
 ## 三档 — 需求信号出现再评估
@@ -38,7 +38,7 @@
 |---|---|---|---|
 | `OCondition` | `Condition` | 锁 key 下的服务端等待集(`await`/`signal`/`signalAll`,唤醒后重新竞争)。等待队列与推送机制现成,但虚假唤醒承诺、signal 权限、与租约到期交互需专章设计 | 未启动 |
 | `OPhaser` | `Phaser` | Barrier 的泛化(动态注册/分层派生),Barrier 落地后自然延伸 | 未启动 |
-| 延时触发(定时单次标记) | `Timer` | 由 `OBlockingQueue` 延时形态覆盖即可,不单立 | 挂起 |
+| 延时触发(定时单次标记) | `Timer` | 由 `OBlockingQueue` 延时形态覆盖即可,不单立——已随 v7 落地兑现 | 挂起 |
 
 ## 工程改进(非对外 API 面,各立小 change)
 
