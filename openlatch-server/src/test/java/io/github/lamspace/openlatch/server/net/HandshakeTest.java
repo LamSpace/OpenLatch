@@ -268,9 +268,26 @@ class HandshakeTest {
     }
 
     @Test
+    void v8_hello_accepted_with_version_echo() {
+        // v8 握手进入接受区间，回显请求版本 8（topic 能力对 v8 会话开放）。
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(8)
+                .setType(MessageType.HELLO)
+                .setRequestId(49)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(8))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(8);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(resp.getHelloResponse().getServerProtocolVersion())
+                .isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
+    }
+
+    @Test
     void wrong_protocol_version_rejected_and_disconnected() {
-        // v7 起接受区间为 [1,7]：越界版本（8）拒绝并断连。
-        ch.writeInbound(hello(1, 8, ""));
+        // v8 起接受区间为 [1,8]：越界版本（9）拒绝并断连。
+        ch.writeInbound(hello(1, 9, ""));
 
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);

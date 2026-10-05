@@ -31,6 +31,9 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
 | `openlatch.server.barrier.total` | Counter | `op`=`await`/`leave`/`action_done`, `status` | cyclic barrier operations (v5; broken settlements surface as `status="BARRIER_BROKEN"`) |
 | `openlatch.server.queue.total` | Counter | `op`=`put`/`take`/`drain`/`peek`/`size`, `status` | queue operations (v7; the two "fulls" split: element-full immediate `status="DENIED"` vs waiter-queue-full `status="OVERLOADED"`; parking `QUEUED`, ingress rejects `INVALID_REQUEST`; reads count too) |
 | `openlatch.server.elements.depth.max` | Gauge | — | peak per-key **element depth** (v7, scrape-time sample, residency incl. unexpired delay items) — a different dimension from `queue.depth.max` (waiter depth); never conflate the two |
+| `openlatch.server.topic.total` | Counter | `op`=`subscribe`/`unsubscribe`/`publish`, `status` | topic operations (v8; subscribes are always immediate — no `QUEUED` line; `REJECT_SUBSCRIBERS` is its own in-band line; dedup-slot replays count as `OK`; **slow-consumer drops never take a rejection shape** — see `topic.dropped.total`) |
+| `openlatch.server.topic.dropped.total` | Counter | — | server-side drop-newest losses (v8; the only server-side loss counter — sustained growth means consumers can't keep up) |
+| `openlatch.server.topic.subscribers.max` | Gauge | — | peak per-key **subscriber count** (v8, scrape-time) — the third distinct depth dimension beside `queue.depth.max` (waiters) and `elements.depth.max` (elements); subscribers are never counted in `waiters` |
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | leadership gauge (registered in cluster mode only) |
 
 ### Starter alerts (calibrate per workload)
@@ -45,6 +48,12 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
 - `openlatch_server_elements_depth_max` pinned near `max-queue-capacity` — a hot queue
   running full (consumers lagging or leaking); read it together with the console's
   `queue_entries` cardinality for total residency (v7).
+- `rate(openlatch_server_topic_dropped_total[5m])` above your business-calibrated
+  tolerance — some subscription can't keep up with the broadcast rate (scale the
+  consumer, or split the topic key per [05 topic governance](05-cluster-deployment.md));
+  nonzero `increase(openlatch_server_topic_total{op="subscribe",status="REJECT_SUBSCRIBERS"}[5m])`
+  — the per-key subscriber cap is reached: hunt leaked subscriptions (missing
+  `unsubscribe`) or raise `max-subscribers-per-key` (v8).
 
 ## Client metrics
 
@@ -70,5 +79,5 @@ scrape_configs:
 ## Three observation layers
 
 Metrics (this page, aggregates) → console ([07](07-admin-console.md), structural detail:
-tables/queues/sessions) → node logs (watchdog & stall event lines). Troubleshooting usually
+tables/queues/topics/sessions) → node logs (watchdog & stall event lines). Troubleshooting usually
 descends in this order.

@@ -20,6 +20,8 @@ enum MessageType
   BARRIER_LEAVE 16
   BARRIER_ACTION_DONE 17
   QUEUE_OP 18
+  TOPIC_OP 19
+  TOPIC_MESSAGE 20
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -49,6 +51,7 @@ enum StatusCode
   NOT_LEADER 10
   INTERNAL_ERROR 11
   BARRIER_BROKEN 12
+  REJECT_SUBSCRIBERS 13
 enum AtomicOp
   ATOMIC_GET 0
   ATOMIC_SET 1
@@ -62,6 +65,10 @@ enum QueueOp
   QUEUE_OP_DRAIN 2
   QUEUE_OP_PEEK 3
   QUEUE_OP_SIZE 4
+enum TopicOp
+  TOPIC_OP_SUBSCRIBE 0
+  TOPIC_OP_UNSUBSCRIBE 1
+  TOPIC_OP_PUBLISH 2
 message Envelope
   protocol_version 1
   type 2
@@ -98,6 +105,9 @@ message Envelope
   barrier_action_done_response 39
   queue_op_request 40
   queue_op_response 41
+  topic_op_request 42
+  topic_op_response 43
+  topic_message 44
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -182,6 +192,7 @@ message AdminSummaryResponse
   atomic_entries 10
   barrier_entries 11
   queue_entries 12
+  topic_entries 13
 message AdminListKeysRequest
   token 1
   page 2
@@ -204,6 +215,7 @@ message AdminKeyInfo
   queue_depth 14
   queue_head_payload_size 15
   queue_head_payload_preview 16
+  topic_subscribers 17
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -226,6 +238,10 @@ message AdminKeyWaiterInfo
   permits 5
   notified 6
   queue_track 7
+message AdminTopicSubscriberInfo
+  session_id 1
+  subscription_id 2
+  subscribed_at_ms 3
 message AdminKeyDetailResponse
   status 1
   family 2
@@ -255,6 +271,8 @@ message AdminKeyDetailResponse
   queue_total_payload_bytes 26
   queue_head_payload_size 27
   queue_head_payload_preview 28
+  topic_subscribers 29
+  topic_subscribers_info 30
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -325,3 +343,20 @@ message QueueOpResponse
   drained_bytes 5
   size 6
   capacity 7
+message TopicOpRequest
+  key 1
+  op 2
+  payload_bytes 3
+  op_seq 4
+message TopicOpResponse
+  status 1
+  op 2
+  subscription_id 3
+  topic_seq 4
+message TopicMessage
+  key 1
+  subscription_id 2
+  topic_seq 3
+  publisher_sid 4
+  publish_ts_ms 5
+  payload_bytes 6

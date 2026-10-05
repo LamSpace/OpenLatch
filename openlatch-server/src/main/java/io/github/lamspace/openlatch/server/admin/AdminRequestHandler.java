@@ -112,9 +112,11 @@ public final class AdminRequestHandler {
     private final ServerSessionRegistry sessions;
     /** 运行时长供给（毫秒），装配自 {@link OpenLatchServer#uptimeMs()}。 */
     private final LongSupplier uptimeMs;
+    /** v8 单机形态 topic 登记表（集群形态为 {@code null}，经运行时取）。 */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry standaloneTopics;
 
     /**
-     * 构造管理处理器。
+     * 构造管理处理器（既有五参形态：无 topic 面，订阅维恒零）。
      *
      * @param config        管理配置（令牌）
      * @param standaloneCore 单机核心引擎；集群形态传 {@code null}
@@ -125,11 +127,86 @@ public final class AdminRequestHandler {
     public AdminRequestHandler(AdminConfig config, CoreEngine standaloneCore,
                                ClusterRuntime cluster, ServerSessionRegistry sessions,
                                LongSupplier uptimeMs) {
+        this(config, standaloneCore, cluster, sessions, uptimeMs, null);
+    }
+
+    /**
+     * 构造管理处理器（v8 全参形态）。
+     *
+     * @param config         管理配置（令牌）
+     * @param standaloneCore 单机核心引擎；集群形态传 {@code null}
+     * @param cluster        集群运行时；单机形态传 {@code null}
+     * @param sessions       本节点连接注册表
+     * @param uptimeMs       服务器运行时长供给（毫秒）
+     * @param standaloneTopics 单机形态 topic 登记表；集群形态传 {@code null}
+     *                        （数据源经 {@code ClusterRuntime.topicRegistry()}）
+     */
+    public AdminRequestHandler(AdminConfig config, CoreEngine standaloneCore,
+                               ClusterRuntime cluster, ServerSessionRegistry sessions,
+                               LongSupplier uptimeMs,
+                               io.github.lamspace.openlatch.server.topic.TopicRegistry standaloneTopics) {
         this.config = config;
         this.standaloneCore = standaloneCore;
         this.cluster = cluster;
         this.sessions = sessions;
         this.uptimeMs = uptimeMs;
+        this.standaloneTopics = standaloneTopics;
+    }
+
+    /**
+     * topic 登记表数据源（单机=自持；集群=运行时持有）与可见性判定：
+     * 订阅登记为 Leader 本地态，集群形态非 Leader MUST NOT 呈现（读数
+     * 口径判例 {@code wait_queue_leader_only}）。
+     *
+     * @return 可呈现时的登记表；不可见为 {@code null}
+     */
+    private io.github.lamspace.openlatch.server.topic.TopicRegistry topicsVisible() {
+        if (cluster == null) {
+            return standaloneTopics;
+        }
+        return leaderNow() ? cluster.topicRegistry() : null;
+    }
+
+    /**
+     * 订阅者明细 → 管理应答列表（会话 id、路由键、建立时刻；已交付
+     * 消息内容与字节零外发——观察面防放大纪律的 topic 延伸）。
+     *
+     * @param topics 登记表（非空）
+     * @param key    topic 键
+     * @return 应答项列表（未登记键为空列表）
+     */
+    private static java.util.List<io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo>
+            topicSubscriberInfos(io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                 String key) {
+        java.util.List<io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo> out =
+                new ArrayList<>();
+        for (var sv : topics.subscribers(key)) {
+            out.add(io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo.newBuilder()
+                    .setSessionId(sv.sessionId()).setSubscriptionId(sv.subscriptionId())
+                    .setSubscribedAtMs(sv.subscribedAtMs()).build());
+        }
+        return out;
+    }
+
+    /**
+     * v8：topic 键的明细应答（{@code family=topic}）——仅订阅数与订阅者
+     * 列表两维；无持有/等待/租约区段（"无此语义"以零值形呈现，消费者侧
+     * 按 family 分派渲染）。已交付消息内容 MUST NOT 出现在应答中。
+     *
+     * @param msg    请求信封
+     * @param topics 登记表（调用方保证可见性）
+     * @param key    topic 键
+     * @return 应答信封
+     */
+    private Envelope topicDetail(Envelope msg,
+            io.github.lamspace.openlatch.server.topic.TopicRegistry topics, String key) {
+        io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse resp =
+                io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse.newBuilder()
+                        .setStatus(StatusCode.OK).setFamily("topic")
+                        .setTopicSubscribers(topics.subscriberCount(key))
+                        .addAllTopicSubscribersInfo(topicSubscriberInfos(topics, key))
+                        .build();
+        return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(resp));
     }
 
     /**
@@ -251,6 +328,9 @@ public final class AdminRequestHandler {
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    // v8：订阅登记键数（Leader/单机视角；无持有语义单列）。
+                    .setTopicEntries(standaloneTopics == null ? 0
+                            : standaloneTopics.topicKeyCount())
                     .setTotalWaiters(st.totalWaiters())
                     .setNodeRole("SINGLE");
         } else {
@@ -277,6 +357,9 @@ public final class AdminRequestHandler {
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    // v8：订阅登记键数仅 Leader 视角呈现（降级残留随下次当选
+                    // 一并清零，非 Leader 恒 0——判例等待队列 Leader 门控）。
+                    .setTopicEntries(leaderNow() ? cluster.topicRegistry().topicKeyCount() : 0)
                     .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
                     .setNodeRole(currentRole());
         }
@@ -405,6 +488,20 @@ public final class AdminRequestHandler {
                 rows.add(row.build());
             }
         }
+        // v8：Leader/单机视角合并订阅登记键（family=topic；holders/租约/等待
+        // 恒零值形）。非 Leader 无登记来源，列表如实不含 topic 行——不呈现
+        // 伪零行（与"未知 key 明确未命中"同纪律）。
+        io.github.lamspace.openlatch.server.topic.TopicRegistry topics = topicsVisible();
+        if (topics != null) {
+            for (String tkey : topics.topicKeys()) {
+                if (matches(tkey, prefix)) {
+                    rows.add(AdminKeyInfo.newBuilder()
+                            .setKey(tkey).setFamily("topic")
+                            .setTopicSubscribers(topics.subscriberCount(tkey))
+                            .build());
+                }
+            }
+        }
         rows.sort(Comparator.comparing(AdminKeyInfo::getKey));
         // 页号乘法经 long 折算防 int 溢出（越界页号按空页语义呈现，不抛异常）。
         long fromL = (long) req.getPage() * req.getPageSize();
@@ -448,6 +545,12 @@ public final class AdminRequestHandler {
         if (cluster == null) {
             CoreInspection.KeySnapshot snap = standaloneCore.inspectKey(req.getKey());
             if (snap == null) {
+                // v8：引擎无条目时回查 topic 登记（一 key 一形态的互斥呈现——
+                // topic 键不在 LockTable，明细来自 Leader/单机本地登记表）。
+                var topics = topicsVisible();
+                if (topics != null && topics.subscriberCount(req.getKey()) > 0) {
+                    return topicDetail(msg, topics, req.getKey());
+                }
                 return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(
                         b.setStatus(StatusCode.NOT_HELD)));
             }
@@ -507,6 +610,12 @@ public final class AdminRequestHandler {
         } else {
             ShadowTable.AdminEntryView v = cluster.core().shadow().adminEntry(req.getKey());
             if (v == null) {
+                // v8：复制态无条目时回查 Leader 本地登记（非 Leader 不可见，
+                // topic 键在其视角如实未命中——MUST NOT 空壳成功）。
+                var topics = topicsVisible();
+                if (topics != null && topics.subscriberCount(req.getKey()) > 0) {
+                    return topicDetail(msg, topics, req.getKey());
+                }
                 return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(
                         b.setStatus(StatusCode.NOT_HELD)));
             }

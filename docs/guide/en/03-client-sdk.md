@@ -256,6 +256,66 @@ Semantic boundaries (details in [01 Core concepts §8](01-concepts.md)):
    stateful) — that await throws `OpenLatchException` while the old generation has
    already broken via session cleanup; awaits hold no lease and emit no renewals.
 
+## Broadcast pub/sub (`OTopic`, v8)
+
+A cross-process broadcast channel: one key, one channel; each message reaches
+all subscribers registered at that moment. Message bodies are opaque bytes
+(per-message `max-value-bytes` clamp, default 4KB).
+
+```java
+OTopic news = client.newTopic("evt:orders");
+
+news.publish(s("order paid"));                                // sync: accepted (NOT delivered)
+long seq = news.publish("accepted".getBytes(StandardCharsets.UTF_8));
+news.publishAsync(s("fire and forget"));                      // async single shot, no auto resend
+
+OTopicSubscription watch = news.subscribe(m -> {
+    handle(m.payload(), m.topicSeq(), m.publisherSessionId()); // ascending seq per subscription
+});
+long lost = watch.droppedCount();                              // loss estimate (see 2 below)
+watch.close();                                                 // == news.unsubscribe() (idempotent)
+```
+
+Semantic boundaries (details in [01 Concepts §10](01-concepts.md)):
+
+1. **At-most-once**: a successful `publish` means accepted-and-enqueued for
+   fan-out, never received. Disconnects, buffer overflow and the leader-change
+   window lose messages with no server-side retransmission. Use
+   `OBlockingQueue` when delivery must survive;
+2. **Weak backpressure = drop-newest, two buffer tiers**: the server-side
+   per-subscription buffer (`max-subscription-buffer`, default 256) drops the
+   newest message and counts it when full; the SDK's local tier does the same.
+   Slow subscribers never backpressure publishers and are never disconnected
+   (deliberately unlike JDK `SubmissionPublisher`'s overflow-close — closing
+   would kill the session and release its locks). Losses surface only via
+   `droppedCount()` (same-term `topic_seq` gap inference + local overflow,
+   baseline reset across terms);
+3. **Ordering**: `topic_seq` ascends strictly within one subscription during
+   one Leader term; no global order across publishers/subscriptions; after a
+   leader change seqs restart and the gap is never replayed — the SDK
+   re-subscribes automatically and delivery resumes;
+4. **Retry dedup is same-Leader only**: same-`op_seq` resends hit the dedup
+   slot and never double-fan-out; retries across a leader change (including
+   manual ones) **may double-deliver** — consumer idempotence is required;
+5. **Listener threading**: callbacks are serialized per subscription (the JDK
+   `Flow.Subscriber.onNext` no-reentrancy promise) on an SDK dispatcher
+   thread, never on the network EventLoop; handler exceptions are swallowed
+   and logged without breaking delivery. Hand off heavy work to your own
+   executor;
+6. **Subscriptions bind to the session**: subscriber process death
+   unsubscribes (the deliberate inverse of the queue's "death never swallows
+   elements" — queues hold resident data, topics hold delivery events).
+   Long-lived subscribers should `unsubscribe()`; registrations have a
+   standing registry + buffer cost;
+7. Requires a **v8 handshake** (upgrade servers first, then clients):
+   v≤7 sessions sending `TOPIC_OP` get an `INVALID_REQUEST` message-level
+   rejection without disconnect. Message bodies are mandatory and non-null
+   (queue-element precedent — the inverse of the reference form's null), with
+   zero length as a legal empty message;
+8. **Colliding keys**: subscribing/publishing on a key occupied by another
+   family is ingress-rejected (`INVALID_REQUEST`, best-effort, no race
+   guarantee) — "one key, one form" is an application contract for topics.
+
 ## Async usage
 
 ```java

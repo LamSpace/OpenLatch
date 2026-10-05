@@ -33,6 +33,8 @@ import io.github.lamspace.openlatch.client.OAtomicReference;
 import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OBlockingQueue;
 import io.github.lamspace.openlatch.client.ODelayQueue;
+import io.github.lamspace.openlatch.client.OTopic;
+import io.github.lamspace.openlatch.client.OTopicSubscription;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
@@ -74,6 +76,8 @@ public final class BenchmarkMain {
     private static final int QUEUE_FANOUT_ITEMS = 256;
     /** 队列 drain 相的每轮批量（v7）。 */
     private static final int QUEUE_DRAIN_BATCH = 32;
+    /** topic 扇出相订阅者连接数（v8，独立会话订阅同键）。 */
+    private static final int TOPIC_FANOUT_SUBSCRIBERS = 8;
 
     /**
      * 私有构造：入口类。
@@ -143,6 +147,9 @@ public final class BenchmarkMain {
                     WARMUP_MS / 2);
             runQueueDrain(client, WARMUP_MS / 2);
             runQueueDelay(client, WARMUP_MS / 2);
+            // topic 相（v8）热身：发布受理 RTT（零订阅）与 1×8 扇出交付。
+            runTopicPublish(client, WARMUP_MS / 2);
+            runTopicFanout(client, server.port(), TOPIC_FANOUT_SUBSCRIBERS, WARMUP_MS / 2);
             List<long[]> queueHandoffThroughput = new ArrayList<>();
             List<double[]> queueHandoffLatencies = new ArrayList<>();
             List<long[]> queueFanoutThroughput = new ArrayList<>();
@@ -150,6 +157,10 @@ public final class BenchmarkMain {
             List<long[]> queueDrainThroughput = new ArrayList<>();
             List<double[]> queueDrainLatencies = new ArrayList<>();
             List<double[]> queueDelayOvershoot = new ArrayList<>();
+            List<long[]> topicPublishThroughput = new ArrayList<>();
+            List<double[]> topicPublishLatencies = new ArrayList<>();
+            List<long[]> topicFanoutThroughput = new ArrayList<>();
+            List<double[]> topicFanoutLatencies = new ArrayList<>();
             List<long[]> refSmallThroughput = new ArrayList<>();
             List<double[]> refSmallLatencies = new ArrayList<>();
             List<long[]> refBigThroughput = new ArrayList<>();
@@ -236,6 +247,13 @@ public final class BenchmarkMain {
                 queueDrainLatencies.add(qd.latencies);
                 Result qy = runQueueDelay(client, SAMPLE_MS);
                 queueDelayOvershoot.add(qy.latencies);
+                Result tp = runTopicPublish(client, SAMPLE_MS);
+                topicPublishThroughput.add(new long[] {tp.opsPerSec});
+                topicPublishLatencies.add(tp.latencies);
+                Result tf = runTopicFanout(client, server.port(),
+                        TOPIC_FANOUT_SUBSCRIBERS, SAMPLE_MS);
+                topicFanoutThroughput.add(new long[] {tf.opsPerSec});
+                topicFanoutLatencies.add(tf.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
@@ -246,6 +264,8 @@ public final class BenchmarkMain {
             report = report + renderQueueSection(queueHandoffThroughput, queueHandoffLatencies,
                     queueFanoutThroughput, queueFanoutLatencies, queueDrainThroughput,
                     queueDrainLatencies, queueDelayOvershoot);
+            report = report + renderTopicSection(topicPublishThroughput, topicPublishLatencies,
+                    topicFanoutThroughput, topicFanoutLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -870,6 +890,124 @@ public final class BenchmarkMain {
         }
         return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
                 overshoot.sortedSamples());
+    }
+
+    /**
+     * topic 发布受理相（v8）：零订阅 hot loop 下 publish 的受理路径 RTT 与
+     * 吞吐（fan-out 面为空的纯提交开销基线，含去重槽写与 seq 分配）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果（ops=publish 次数，延迟为单发布 RTT）
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runTopicPublish(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OTopic topic = client.newTopic("bench:topic:pub");
+        byte[] message = "bench-topic-message".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            topic.publish(message);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * topic 扇出交付相（v8）：主连接持续 publish，{@code subscribers} 条独立
+     * 连接订阅同键；吞吐计受理 publish 数（广播 ops 放大为 ops×subscribers），
+     * 延迟取发布→订阅 0 收到首份交付的跨线程时延（订阅侧本地缓冲丢弃不影响
+     * 本相断言——至多一次基线本就允许丢）。
+     *
+     * @param client      发布端客户端
+     * @param port        服务端端口（订阅端另建连接）
+     * @param subscribers 订阅端连接数
+     * @param millis      采样时长
+     * @return 结果
+     * @throws InterruptedException 建连/采样被打断
+     * @throws java.util.concurrent.ExecutionException 订阅端建连失败
+     * @throws java.util.concurrent.TimeoutException 订阅端建连超时
+     */
+    private static Result runTopicFanout(OpenLatchClient client, int port, int subscribers,
+            long millis) throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        OTopic publisher = client.newTopic("bench:topic:fanout");
+        byte[] message = "bench-topic-fanout".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        java.util.concurrent.ConcurrentHashMap<Long, Long> inflight =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        java.util.List<OpenLatchClient> subClients = new ArrayList<>();
+        java.util.List<OTopicSubscription> subs = new ArrayList<>();
+        try {
+            for (int i = 0; i < subscribers; i++) {
+                OpenLatchClient subClient = OpenLatchClient.builder()
+                        .address("127.0.0.1:" + port)
+                        .defaultWaitTimeout(Duration.ofSeconds(60))
+                        .build();
+                subClient.connectAsync().get(10, TimeUnit.SECONDS);
+                subClients.add(subClient);
+                final boolean first = i == 0;
+                subs.add(subClient.newTopic("bench:topic:fanout").subscribe(m -> {
+                    if (first) {
+                        Long start = inflight.remove(m.topicSeq());
+                        if (start != null) {
+                            reservoir.record(System.nanoTime() - start);
+                        }
+                    }
+                }));
+            }
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                long start = System.nanoTime();
+                long seq = publisher.publish(message);
+                ops.incrementAndGet();
+                if (inflight.size() > 8_192) {
+                    inflight.clear(); // 慢订阅滞后窗：丢弃最旧基线（本相只测交付能力）
+                }
+                inflight.put(seq, start);
+            }
+        } finally {
+            for (OTopicSubscription sub : subs) {
+                sub.close();
+            }
+            for (OpenLatchClient subClient : subClients) {
+                subClient.shutdown();
+            }
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 渲染 topic 相小节（v8），追加至统一基线报告。
+     *
+     * @param publishThroughput 发布受理吞吐批
+     * @param publishLatencies  发布 RTT 延迟批
+     * @param fanoutThroughput  扇出受理吞吐批
+     * @param fanoutLatencies   扇出交付时延批（订阅 0 视角）
+     * @return Markdown 小节
+     */
+    private static String renderTopicSection(List<long[]> publishThroughput,
+            List<double[]> publishLatencies, List<long[]> fanoutThroughput,
+            List<double[]> fanoutLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## topic 相（v8）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| 零订阅发布受理（RTT 基线） | ").append(medianOps(publishThroughput))
+                .append(" | ").append(fmt(medianQuantile(publishLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(publishLatencies, 0.99))).append(" |\n");
+        sb.append("| 1×8 扇出交付（发布→首订阅时延） | ")
+                .append(medianOps(fanoutThroughput))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.99))).append(" |\n");
+        return sb.toString();
     }
 
     /**

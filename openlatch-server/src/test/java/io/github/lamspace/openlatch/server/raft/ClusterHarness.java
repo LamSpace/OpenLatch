@@ -494,6 +494,7 @@ final class ClusterHarness implements AutoCloseable {
                 case BARRIER_ACTION_DONE ->
                         node.runtime.requestHandler().handleBarrierActionDone(session, msg, ctx);
                 case QUEUE_OP -> node.runtime.requestHandler().handleQueueOp(session, msg, ctx);
+                case TOPIC_OP -> node.runtime.requestHandler().handleTopicOp(session, msg, ctx);
                 default -> throw new IllegalArgumentException("not a write: " + msg.getType());
             }
             return awaitOutbound(10_000);

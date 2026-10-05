@@ -59,3 +59,7 @@ capacity · depth · head element size + constant-length truncated preview (dela
 also the head expiry); the detail page adds total resident bytes and a waiters column
 splitting the two tracks (waiting-for-capacity / waiting-for-elements). Full element
 bytes never ship in any admin response — the same anti-amplification rule as v6 payloads.
+Topic keys (v8) render the subscriber count and a subscriber list (session id,
+subscription id, subscribed-at); the registry is Leader-local, so only Leader-sourced
+pages show topic rows (follower views are an honest NOT_HELD, never an empty-shell
+success) and delivered message content never leaves the observation surface.

@@ -256,6 +256,8 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                         .handleBarrierActionDone(session, msg, ctx);
                 case QUEUE_OP -> cluster.requestHandler()
                         .handleQueueOp(session, msg, ctx);
+                case TOPIC_OP -> cluster.requestHandler()
+                        .handleTopicOp(session, msg, ctx);
                 case CLUSTER_VIEW -> {
                     // 只读查询：任意节点以 LeaderTracker 单源 + 本地配置作答，
                     // 不产生日志条目（v2 客户端种子发现/诊断）。
@@ -314,6 +316,9 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                     cluster.sessionCoordinator().submitClose(sessionId);
                 } else {
                     core.sessionClosed(sessionId);
+                    // v8：单机路径 topic 收口——死亡即退订（集群路径经
+                    // SESSION_CLOSE 应用点由 ReplicationGateway 摘除）。
+                    dispatcher.onSessionClosedTopics(sessionId);
                 }
             }
         }

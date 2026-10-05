@@ -61,6 +61,9 @@ import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.QueueOp;
 import io.github.lamspace.openlatch.protocol.QueueOpRequest;
 import io.github.lamspace.openlatch.protocol.QueueOpResponse;
+import io.github.lamspace.openlatch.protocol.TopicOp;
+import io.github.lamspace.openlatch.protocol.TopicOpRequest;
+import io.github.lamspace.openlatch.protocol.TopicOpResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.LatchCountDownResponse;
@@ -158,11 +161,63 @@ public final class RequestDispatcher {
      */
     public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes,
             int maxQueueCapacity, long maxDrainBytes) {
+        this(core, metrics, maxValueBytes, maxQueueCapacity, maxDrainBytes,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_KEY_LENGTH, null);
+    }
+
+    /**
+     * v8 topic 登记表；{@code null}=装配不含 topic 面（既有夹具形态，
+     * TOPIC_OP 抵达时回 {@code INTERNAL_ERROR} 并记 WARN）。
+     */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
+    /** 锁键长度上限（UTF-8 字节；topic 路径不经引擎，键校验在本层执行）。 */
+    private final int maxKeyLength;
+
+    /**
+     * 构造分发器（v8 全参形态）：追加 topic 登记表与键长上限——
+     * TOPIC_OP 单机路径由本层完成门控、形状、键长与 {@code maxValueBytes}
+     * 钳制后交 {@code topics}（零日志：不经引擎、不进状态机）。
+     *
+     * @param core             锁语义核心
+     * @param metrics          指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes    有值引用载荷/队列元素/topic 消息体字节上限（{@code >= 1}）
+     * @param maxQueueCapacity 队列定型容量上限（{@code >= 1}）
+     * @param maxDrainBytes    drainTo 应答字节预算（{@code >= 1}）
+     * @param maxKeyLength     锁键长度上限（{@code >= 1}，topic 键校验用）
+     * @param topics           topic 登记表，可为 {@code null}（夹具无 topic 面）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes,
+            int maxQueueCapacity, long maxDrainBytes, int maxKeyLength,
+            io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         this.core = Objects.requireNonNull(core);
         this.metrics = metrics;
         this.maxValueBytes = maxValueBytes;
         this.maxQueueCapacity = maxQueueCapacity;
         this.maxDrainBytes = maxDrainBytes;
+        this.maxKeyLength = maxKeyLength;
+        this.topics = topics;
+    }
+
+    /**
+     * topic 登记表只读口（装配与测试观察）；夹具形态为 {@code null}。
+     *
+     * @return 登记表或 {@code null}
+     */
+    public io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry() {
+        return topics;
+    }
+
+    /**
+     * 单机路径会话关闭钩子：摘除该会话的 topic 登记、缓冲与去重槽
+     * （死亡即退订）。由接入层断连清理在 {@code core.sessionClosed} 之后
+     * 调用；{@code topics} 为 {@code null} 时为空操作。
+     *
+     * @param sessionId 关闭的会话 id
+     */
+    public void onSessionClosedTopics(long sessionId) {
+        if (topics != null) {
+            topics.removeSession(sessionId);
+        }
     }
 
     /**
@@ -206,6 +261,9 @@ public final class RequestDispatcher {
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case QUEUE_OP -> msg.hasQueueOpRequest()
                     ? dispatchQueueOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case TOPIC_OP -> msg.hasTopicOpRequest()
+                    ? dispatchTopicOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -785,6 +843,117 @@ public final class RequestDispatcher {
     }
 
     /**
+     * topic 请求形状互斥矩阵（v8，两路共用）：PUBLISH 必携 {@code
+     * payload_bytes}（缺省即违例，判例 v7 元素纪律）且 {@code op_seq >= 1}；
+     * SUBSCRIBE/UNSUBSCRIBE 不携带载荷且 {@code op_seq == 0}；
+     * {@code UNRECOGNIZED} 拒绝。判定唯一在接入层，登记表不复核。
+     *
+     * @param req topic 请求
+     * @return 非法时 {@code INVALID_REQUEST}；合法为 {@code null}
+     */
+    public static StatusCode validateTopicShape(TopicOpRequest req) {
+        TopicOp op = req.getOp();
+        if (op == TopicOp.UNRECOGNIZED) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return switch (op) {
+            case TOPIC_OP_PUBLISH -> req.hasPayloadBytes() && req.getOpSeq() >= 1
+                    ? null : StatusCode.INVALID_REQUEST;
+            case TOPIC_OP_SUBSCRIBE, TOPIC_OP_UNSUBSCRIBE ->
+                    !req.hasPayloadBytes() && req.getOpSeq() == 0
+                    ? null : StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INVALID_REQUEST;
+        };
+    }
+
+    /**
+     * topic 键校验（v8，两路共用）：空键回 {@code KEY_EMPTY}、超长按
+     * {@code KEY_TOO_LONG}——与引擎 acquire 的键纪律同码形（topic 不经引擎，
+     * 校验上收到接入层）。
+     *
+     * @param key          topic 键
+     * @param maxKeyLength 键长上限（UTF-8 字节）
+     * @return 非法状态码；合法为 {@code null}
+     */
+    public static StatusCode validateTopicKey(String key, int maxKeyLength) {
+        if (key.isEmpty()) {
+            return StatusCode.KEY_EMPTY;
+        }
+        if (key.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > maxKeyLength) {
+            return StatusCode.KEY_TOO_LONG;
+        }
+        return null;
+    }
+
+    /**
+     * 分发 topic 操作（v8，单机路径）：v8 门、形状互斥、键校验、载荷
+     * {@code maxValueBytes} 钳制、撞 key 只读探测（引擎条目在场即拒，
+     * 内部裁决 {@code REJECT_TYPE_MISMATCH}、线路送达 {@code INVALID_REQUEST}，
+     * 判例引擎形状拒绝映射）先于登记表调用——全部拒绝态零登记、零扇出。
+     * 受理成功后按操作分派：SUBSCRIBE 幂等登记（达上限回
+     * {@code REJECT_SUBSCRIBERS}）、UNSUBSCRIBE 幂等摘除、PUBLISH 经去重槽
+     * 受理并入 fan-out（至多一次：{@code OK} 不承诺交付）。计数线在
+     * 受理点记录（形状非法不计数，杜绝维度伪造，判例 atomic/queue）。
+     *
+     * @param session 已握手会话（握手门闩保证会话在场）
+     * @param msg     请求信封（{@code topic_op_request} 分支）
+     * @return 应答信封（同型 topic_op_response）
+     */
+    private Envelope dispatchTopicOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 8) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        if (topics == null) {
+            java.util.logging.Logger.getLogger(RequestDispatcher.class.getName())
+                    .warning("TOPIC_OP dispatched without topic registry assembly");
+            return errorResponse(msg, StatusCode.INTERNAL_ERROR);
+        }
+        TopicOpRequest req = msg.getTopicOpRequest();
+        StatusCode shapeBad = validateTopicShape(req);
+        if (shapeBad != null) {
+            return errorResponse(msg, shapeBad);
+        }
+        StatusCode keyBad = validateTopicKey(req.getKey(), maxKeyLength);
+        if (keyBad != null) {
+            return errorResponse(msg, keyBad);
+        }
+        if (req.hasPayloadBytes() && req.getPayloadBytes().size() > maxValueBytes) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        long nowMs = System.currentTimeMillis();
+        String key = req.getKey();
+        TopicOpResponse.Builder out = TopicOpResponse.newBuilder().setOp(req.getOp());
+        switch (req.getOp()) {
+            case TOPIC_OP_SUBSCRIBE -> {
+                if (core.inspectKey(key) != null) {
+                    return errorResponse(msg, StatusCode.INVALID_REQUEST);
+                }
+                var r = topics.subscribe(session.sessionId(), key, nowMs);
+                out.setStatus(r.status()).setSubscriptionId(r.subscriptionId());
+            }
+            case TOPIC_OP_UNSUBSCRIBE -> {
+                topics.unsubscribe(session.sessionId(), key);
+                out.setStatus(StatusCode.OK);
+            }
+            case TOPIC_OP_PUBLISH -> {
+                if (core.inspectKey(key) != null) {
+                    return errorResponse(msg, StatusCode.INVALID_REQUEST);
+                }
+                var r = topics.publish(session.sessionId(), key, req.getOpSeq(),
+                        req.getPayloadBytes().toByteArray(), nowMs);
+                out.setStatus(StatusCode.OK).setTopicSeq(r.topicSeq());
+            }
+            default -> {
+                return errorResponse(msg, StatusCode.INVALID_REQUEST);
+            }
+        }
+        if (metrics != null) {
+            metrics.recordTopic(req.getOp(), out.getStatus());
+        }
+        return envelope(msg, MessageType.TOPIC_OP, b -> b.setTopicOpResponse(out));
+    }
+
+    /**
      * 协议形态数值 → core 原子形态（枚举序对齐 7/8/9）；其余回 {@code null}。
      *
      * @param number 协议 {@code LockType} 数值
@@ -1112,6 +1281,11 @@ public final class RequestDispatcher {
             // （SDK 的"不可重试→显式异常"分类依赖应答码形）。
             case QUEUE_OP -> b.setQueueOpResponse(
                     QueueOpResponse.newBuilder().setStatus(status));
+            // v8：TOPIC_OP 同规则——门控/形状/钳制/撞 key 拒绝的状态码在线路
+            // 可见且 op 回显（判例 QUEUE_OP；默认实例形态的 OK 伪成功违例）。
+            case TOPIC_OP -> b.setTopicOpResponse(TopicOpResponse.newBuilder()
+                    .setStatus(status)
+                    .setOp(request.getTopicOpRequest().getOp()));
             default -> {
             }
         }

@@ -42,3 +42,9 @@
 | dual-track waiting | the two queue waiter identities (waiting-for-capacity / waiting-for-elements), each with its own ranks and wake path (v7) |
 | apply-point bounce | a committed-but-raced queue op returns DENIED at the apply point and is rewritten to QUEUED at its track position — invisible to the caller (v7) |
 | head gate | a non-head parked waiter's resend may not overtake elders in its track (core entry and Leader precheck enforce it alike), pinning wake-grant order to park order (v7) |
+| broadcast term | the lifetime of one Leader's authority for broadcasts: `topic_seq` is ordered only within a term and restarts at leader change — cross-term sequence numbers are not comparable (v8) |
+| topic_seq | the accepted sequence number of a broadcast message within a term (Leader memory, never logged); strictly ascending per subscription, and its gaps are the subscriber's loss-estimate basis (v8) |
+| weak backpressure | the explicit broadcast backpressure contract: per-subscription buffers on two tiers, drop-newest when full — no backpressure to publishers, no disconnects, drops counted but never announced (v8) |
+| drop-newest | the overflow policy: discard the incoming (newest) message and count it, delivering the already-queued ones (deliberately unlike JDK `SubmissionPublisher`'s close-on-overflow) (v8) |
+| gap inference | the subscriber-side loss estimate: same-term `topic_seq` jumps plus local buffer overflows, exposed as `droppedCount()` (v8) |
+| death unsubscribes | a topic subscription binds to its live session — process death reclaims registry, buffer and dedup slot (the deliberate inverse of the queue's "death never swallows elements") (v8) |

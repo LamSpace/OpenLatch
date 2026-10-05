@@ -33,9 +33,8 @@
 | `openlatch.server.limit.max-queue-capacity` | `1024` | 队列（v7）定型容量主张上限；PUT 容量主张超限在入口拒绝（零日志），取值 [1, 65536]；配合每元素 `max-value-bytes` 构成单 key 驻留上界 |
 | `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo 应答字节预算（v7）：DRAIN 提取上限按 `预算/max-value-bytes` 折算钳定，钳定值随条目入日志（apply 不读本地配置），取值 [1, 512KiB] |
 | `openlatch.server.queue.ready-tick-ms` | `200` | 延时队列到点唤醒扫描周期（v7，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms |
-| `openlatch.server.limit.max-queue-capacity` | `1024` | 队列（v7）定型容量主张上限；PUT 容量主张超限在入口拒绝（零日志），取值 [1, 65536]；配合每元素 `max-value-bytes` 构成单 key 驻留上界 |
-| `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo 应答字节预算（v7）：DRAIN 提取上限按 `预算/max-value-bytes` 折算钳定，钳定值随条目入日志（apply 不读本地配置），取值 [1, 512KiB] |
-| `openlatch.server.queue.ready-tick-ms` | `200` | 延时队列到点唤醒扫描周期（v7，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms |
+| `openlatch.server.limit.max-subscribers-per-key` | `64` | 单键 topic（v8）订阅数上限；超限的 SUBSCRIBE 入口拒绝（`REJECT_SUBSCRIBERS`，既有订阅零扰动），取值 [1, 1024]；钳广播 fan-out 放大面 |
+| `openlatch.server.limit.max-subscription-buffer` | `256` | 每订阅服务端在途缓冲条数（v8，drop-newest 触发线），取值 [1, 65536]；SDK 本地另有二级缓冲（256 条）同策略 |
 | `openlatch.server.metrics.enabled` | `true` | 指标管理端点开关（Prometheus 抓取 `http://host:port/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0`=临时）；绑定冲突即启动失败——同机多节点须互异 |
 | `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理令牌；未配置 ⇒ 一切管理请求被拒 |
@@ -136,6 +135,13 @@ OpenLatchClient client = OpenLatchClient.builder()
   消费清空（元素被 `take`/`drainTo` 摘净；条目本身仍常驻，接受回滚期空条目驻留
   或按上条清目录全量重加）。回滚期任何 `QUEUE_OP` 消息在旧服务端以未知消息类型
   拒绝，不会污染复制面。
+- **v8 topic 的回滚窗口（天然干净）**：topic 是首个零持久态原语——订阅登记、
+  缓冲、去重槽与 `topic_seq` 全为 Leader 内存态，MUST NOT 入日志与快照（有常驻
+  守卫回归钉死）。回滚至 v7 二进制**无残留状态要清理**：topic 流量本就零条目，
+  旧二进制读不到任何 topic 痕迹，不存在 v6/v7 式的"回滚前排空 key"前置动作。
+  通用混布规则依旧成立：v8 SDK 客户端连已回退的 v7 服务端会在**握手即拒**
+  （升级序服务端先行；回退序客户端先行），既有连接随回退断开、订阅自然停摆
+  （丢档窗语义同换主窗口）。
 
 ### 载荷下的快照与日志尺寸治理（v6）
 
@@ -163,6 +169,22 @@ OpenLatchClient client = OpenLatchClient.builder()
 - 队列存续期间下调 `max-value-bytes`：既有更大元素的 drain 应答可能超出
   `max-drain-bytes` 预算（钳制下调不追溯存量的直接后果，上界为 N × 历史元素
   上限）——先清大元素或按容量估算预留，避免撞上帧上限。
+
+### topic 维度的容量治理（v8）
+
+- topic 对快照与日志**零贡献**（守卫回归钉死），其治理面不在持久侧而在
+  **Leader 写出侧**：fan-out 放大 = 订阅数 × 发布速率 × 消息大小，全部落在
+  Leader 进程内存缓冲与网络写出上；
+- 两道入口限额即容量钳：`max-subscribers-per-key`（默认 64）封顶单键放大面，
+  `max-subscription-buffer`（默认 256 条）封顶每订阅驻留——每订阅缓冲堆上界
+  ≈ `256 × max-value-bytes`，全键上界 = 二者乘积再 × 订阅数；
+- 观测口径：`openlatch_server_topic_dropped_total` 增速（丢弃即"消费跟不上
+  广播速率"的直接信号）、`topic.subscribers.max` 水位、控制台 Leader 侧订阅
+  读数；持续 drop 的处置选项：扩订阅方消费并行度、拆分 topic 键降扇出、
+  或按 WATCHLIST topic 行触发评估批量帧/请求门控（另立 change）；
+- 容量估算需叠加"活跃 topic 键数 × 订阅数 × 缓冲条数 × 消息均值字节"的
+  Leader 堆内存项；topic 不承担持久投递义务——需要抗 Leader 重启的事件流
+  请用 `OBlockingQueue`。
 
 ## 5. 复制停摆自愈与 supervisor（必读运维事实）
 

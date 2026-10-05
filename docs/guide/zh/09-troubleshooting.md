@@ -98,6 +98,30 @@ mvn -pl openlatch-server verify -Pdrill        # 停摆采样（仪器类）
 - **元素"没被消费却一直占内存"**：契约即如此——元素绑定 key 不绑定会话，服务端无
   自动回收；排期清理靠业务侧键命名（轮次/租户前缀）与控制台驻留读数。
 
+## topic（v8）排查速查
+
+- **"换主后收不到消息"的判别三分法**：① 先查 SDK 侧 home/车道重连日志——订阅重挂
+  依赖连接重建（30s 保活周期兜底"同节点换主而连接未断"的情形），断档期消息本就不
+  补投（至多一次契约）；② 再看服务端 Leader 订阅登记（控制台/`ADMIN_KEY_DETAIL` 的
+  topic 区段）是否恢复该订阅者的登记；③ 若登记在、消息仍不达，查
+  `openlatch_server_topic_dropped_total` 增速与订阅侧 `droppedCount()`——丢弃是
+  缓冲满的 drop-newest，不是故障；
+- **`REJECT_SUBSCRIBERS`**：该 key 订阅数达 `max-subscribers-per-key`（默认 64）——
+  优先排查订阅者泄漏（进程活着但忘 `unsubscribe`/句柄换代未清理），限额确属业务
+  容量则上调配置；既有订阅不受该拒绝影响（不挤占、不断开）；
+- **`droppedCount()` 持续增长**：慢消费者信号（服务端或 SDK 本地两级缓冲满）。
+  处置：监听器内不做重活（转业务线程池）、扩消费并行度或拆 topic 键降扇出；
+  注意它是同任期 gap 推断 + 本地溢出计数，换主/重挂后基线重置，跨任期不累计；
+- **`OpenLatchException(INVALID_REQUEST)` 的 topic 含义**：消息体超限（>4KB 默认）/
+  缺省、形状违例（SUBSCRIBE 携带载荷或 `op_seq`）、撞 key（与锁/队列等同名，
+  尽力而为拒绝）、低版本会话（v≤7 发 topic 消息）——异常消息携带状态码名对照；
+- **疑似"消息双投"**：至多一次承诺下唯一双投来源是**跨换主的发布重试**（旧 Leader
+  已扇出、新 Leader 去重槽为空再扇出）。核对两次交付的 `publisherSessionId` 与
+  任期边界；消费侧幂等是契约义务（按业务键去重），不是服务端缺陷；
+- **topic 在 Follower 上的管理读数**：订阅登记为 Leader 本地态——Follower 的
+  SUMMARY `topic_entries` 恒 0、LIST_KEYS 无 topic 行、KEY_DETAIL 明确未命中，
+  属如实呈现而非数据缺失。
+
 ## 7. FAQ
 
 **Q：能当分布式事务用吗？** 不能。锁是协调原语，不提供隔离级别；关键状态请配 fencing

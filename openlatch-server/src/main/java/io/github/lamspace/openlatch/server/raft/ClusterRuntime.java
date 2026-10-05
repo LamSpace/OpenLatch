@@ -73,12 +73,14 @@ public final class ClusterRuntime {
      * @param requestHandler 写请求处理器
      * @param leaderTracker  Leader 提示视图
      * @param stallWatchdog  复制停摆自愈看门狗
+     * @param topics         v8 topic 登记表（Leader 本地易失态）
      */
     private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
                            ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
                            LeaseExpiryDriver expiryDriver, QueueReadyDriver queueReadyDriver,
                            ClusterRequestHandler requestHandler,
-                           LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog) {
+                           LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog,
+                           io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
@@ -88,6 +90,19 @@ public final class ClusterRuntime {
         this.requestHandler = requestHandler;
         this.leaderTracker = leaderTracker;
         this.stallWatchdog = stallWatchdog;
+        this.topics = topics;
+    }
+
+    /** v8 topic 登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
+
+    /**
+     * v8 topic 登记表（管理面订阅维数据源；观察读数 Leader 视角口径）。
+     *
+     * @return 登记表（与运行时同生命周期）
+     */
+    public io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry() {
+        return topics;
     }
 
     /**
@@ -138,19 +153,27 @@ public final class ClusterRuntime {
                 config.queueReadyTickMs());
         gateway.setQueueReadyDriver(queueReadyDriver);
         queueReadyDriver.start();
+        // v8：topic 登记表（Leader 本地易失态，零复制日志——topic 无复制状态）。
+        io.github.lamspace.openlatch.server.topic.TopicRegistry topics =
+                new io.github.lamspace.openlatch.server.topic.TopicRegistry(registry,
+                        config.maxSubscribersPerKey(), config.maxSubscriptionBuffer());
+        gateway.setTopicRegistry(topics);
+        if (metrics != null) {
+            topics.setDropListener(metrics::recordTopicDropped);
+        }
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
-                waitQueue, config, leaderTracker, metrics);
+                waitQueue, config, leaderTracker, metrics, topics);
         if (metrics != null) {
             // 复制态 gauge 与角色指标绑定：抓取线程弱一致读，不触碰应用锁。
             metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
-                    clusterConfig.nodeId(), leaderTracker);
+                    clusterConfig.nodeId(), leaderTracker, topics);
         }
         // 复制停摆自愈看门狗：装配末位——全部判据通道（division/gateway/
         // client 池）此时均已就绪；阈值由 election-timeout 折算钉死。
         ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
-                expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog);
+                expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog, topics);
     }
 
     /**

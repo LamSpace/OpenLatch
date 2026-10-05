@@ -82,12 +82,12 @@ public final class OpenLatchServer {
 
     /**
      * 服务器自身协议版本（握手响应 {@code server_protocol_version} 回此值）。
-     * v7 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
+     * v8 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
      * {@value #PROTOCOL_VERSION} 的客户端版本；应答信封的 {@code protocol_version}
      * 回显客户端请求版本，低版本客户端因此看到与既有阶段同形的响应。
      * 各版本专属语义（新锁类型/新消息）由接入层按会话握手版本门控。
      */
-    public static final int PROTOCOL_VERSION = 7;
+    public static final int PROTOCOL_VERSION = 8;
 
     /** 握手可接受的最小客户端协议版本（v1 客户端在集群模式下持续可用）。 */
     public static final int MIN_CLIENT_PROTOCOL_VERSION = 1;
@@ -153,6 +153,11 @@ public final class OpenLatchServer {
      * 避免双引擎持有者视图）。
      */
     private final CoreEngine core;
+    /**
+     * v8 单机形态 topic 登记表（集群形态为 {@code null}——登记表随
+     * {@code ClusterRuntime} 按节点装配）；数据源经分发器与管理面共用。
+     */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry standaloneTopics;
     /** 集群运行时（{@code enabled=true} 时于 {@link #start} 内装配并启动，此前为 {@code null}）。 */
     private volatile ClusterRuntime cluster;
     /** sessionId → 会话反向索引，通知推送经此路由。 */
@@ -279,9 +284,15 @@ public final class OpenLatchServer {
         this.core = clusterConfig.enabled()
                 ? null
                 : new CoreEngine(config.toCoreConfig(), new SystemClock(), new NotifyEventBridge(sessions));
-        if (this.core != null) {
-            // 单机 gauge 数据源：统计观察面与会话注册表的弱一致回调读数。
-            this.metrics.bindStandaloneGauges(this.core, this.sessions);
+        // v8：单机形态 topic 登记表（等效常驻 Leader；集群形态随 ClusterRuntime 装配）。
+        this.standaloneTopics = clusterConfig.enabled()
+                ? null
+                : new io.github.lamspace.openlatch.server.topic.TopicRegistry(
+                        sessions, config.maxSubscribersPerKey(), config.maxSubscriptionBuffer());
+        if (this.standaloneTopics != null) {
+            this.standaloneTopics.setDropListener(this.metrics::recordTopicDropped);
+            // 单机 gauge 数据源：统计观察面、会话注册表与订阅登记表的弱一致回调读数。
+            this.metrics.bindStandaloneGauges(this.core, this.sessions, this.standaloneTopics);
         }
     }
 
@@ -318,12 +329,14 @@ public final class OpenLatchServer {
         // 管理观察处理器：数据源按装配形态二选一，未配置
         // 令牌时同样注入——由处理器自身执行"一律拒绝"的安全默认。
         AdminRequestHandler adminHandler =
-                new AdminRequestHandler(adminConfig, core, cluster, sessions, this::uptimeMs);
+                new AdminRequestHandler(adminConfig, core, cluster, sessions, this::uptimeMs,
+                        standaloneTopics);
         ServerSessionHandler handler = clusterConfig.enabled()
                 ? new ServerSessionHandler(null, config, sessions, null, cluster, adminHandler, authConfig)
                 : new ServerSessionHandler(core, config, sessions,
                         new RequestDispatcher(core, metrics, config.maxValueBytes(),
-                                config.maxQueueCapacity(), config.maxDrainBytes()),
+                                config.maxQueueCapacity(), config.maxDrainBytes(),
+                                config.maxKeyLength(), standaloneTopics),
                         null, adminHandler, authConfig);
         ServerChannelInitializer initializer = new ServerChannelInitializer(
                 config.idleTimeoutMs(), handler, channels, sslContext);
@@ -354,12 +367,15 @@ public final class OpenLatchServer {
         startedAtMs = System.currentTimeMillis();
         log.info("OpenLatch server started: port={}, protocolVersion={}, maxKeyLength={}, "
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, maxValueBytes={}, "
-                        + "maxQueueCapacity={}, maxDrainBytes={}, "
+                        + "maxQueueCapacity={}, maxDrainBytes={}, maxSubscribersPerKey={}, "
+                        + "maxSubscriptionBuffer={}, "
                         + "defaultLeaseMs={}, clusterEnabled={}, clusterNodeId={}, metricsPort={}, "
                         + "adminEnabled={}, authEnabled={}, tlsEnabled={}, mTls={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
                 config.maxInflightPerConnection(), config.maxValueBytes(),
-                config.maxQueueCapacity(), config.maxDrainBytes(), config.defaultLeaseMs(),
+                config.maxQueueCapacity(), config.maxDrainBytes(),
+                config.maxSubscribersPerKey(), config.maxSubscriptionBuffer(),
+                config.defaultLeaseMs(),
                 clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort(),
                 adminConfig.isConfigured(), authConfig.isEnabled(), tlsConfig.enabled(),
                 tlsConfig.requireClientCert());

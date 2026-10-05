@@ -98,6 +98,21 @@ public final class ServerMetrics {
      * 等待者口径）是两条互不相干的量纲线，MUST NOT 混名混义。
      */
     public static final String ELEMENTS_DEPTH_MAX = "openlatch.server.elements.depth.max";
+    /** v8：topic 操作计数（按操作/应答状态码维度），counter。 */
+    public static final String TOPIC_TOTAL = "openlatch.server.topic.total";
+    /**
+     * v8：服务端侧 drop-newest 累计丢弃条数，counter——慢消费者缓冲满
+     * <b>不产生拒绝码形</b>，本线是丢弃的唯一服务端计数（判例双"满"
+     * 分轨的第三轨：topic 的"满"在交付面而非应答面）。
+     */
+    public static final String TOPIC_DROPPED_TOTAL = "openlatch.server.topic.dropped.total";
+    /**
+     * v8：单 key 订阅数最大值（抓取时刻采样），gauge——订阅口径。
+     * 与 {@link #QUEUE_DEPTH_MAX}（等待者）、{@link #ELEMENTS_DEPTH_MAX}
+     * （元素驻留）是三条互不相干的量纲线（"depth/subscribers"三口径），
+     * MUST NOT 混名混义；订阅者 MUST NOT 计入 {@link #WAITERS}。
+     */
+    public static final String TOPIC_SUBSCRIBERS_MAX = "openlatch.server.topic.subscribers.max";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -320,6 +335,42 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记录一次已受理（形状合法）的 topic 操作应答：计数线
+     * {@code topic_total{op,status}}。订阅操作恒立即回执（无 {@code QUEUED}
+     * 线）；{@code REJECT_SUBSCRIBERS} 为在带裁决单列线；缓冲满的丢弃
+     * 不经本线（无拒绝码形），计入 {@link #recordTopicDropped}。去重槽
+     * 命中的重放照常计 {@code OK}（受理事实不重复度量副作用）。
+     * 调用点在单机 {@code RequestDispatcher.dispatchTopicOp} 与集群
+     * {@code ClusterRequestHandler.handleTopicOp}——两形态同一收口口径。
+     *
+     * @param op     协议操作枚举（词表 subscribe/unsubscribe/publish）
+     * @param status 应答协议状态码
+     */
+    public void recordTopic(io.github.lamspace.openlatch.protocol.TopicOp op,
+                            StatusCode status) {
+        Counter.builder(TOPIC_TOTAL)
+                .tag("op", switch (op) {
+                    case TOPIC_OP_SUBSCRIBE -> "subscribe";
+                    case TOPIC_OP_UNSUBSCRIBE -> "unsubscribe";
+                    case TOPIC_OP_PUBLISH -> "publish";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
+     * 记录服务端侧 drop-newest 丢弃（登记表监听器逐条回调）。
+     *
+     * @param n 本次丢弃条数（{@code >= 1}；0/负数为空操作）
+     */
+    public void recordTopicDropped(long n) {
+        if (n > 0) {
+            Counter.builder(TOPIC_DROPPED_TOTAL).register(registry).increment(n);
+        }
+    }
+
+    /**
      * 租约到期强制释放计数（单机由扫描线程按 {@code expireDue()} 返回值
      * 累加；集群由状态机应用侧按实际释放逐条累加）。
      *
@@ -338,8 +389,11 @@ public final class ServerMetrics {
      *
      * @param core     锁语义核心
      * @param sessions 本节点会话注册表
+     * @param topics   topic 登记表（{@code null}=夹具无 topic 面，不注册
+     *                 {@code subscribers.max} gauge）
      */
-    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions) {
+    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions,
+                                     io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         Gauge.builder(LOCKS_HELD, core, c -> c.stats().heldLocks())
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, core, c -> c.stats().heldSemaphores())
@@ -347,7 +401,22 @@ public final class ServerMetrics {
         Gauge.builder(WAITERS, core, c -> c.stats().totalWaiters()).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, core, c -> c.stats().maxQueueDepth()).register(registry);
         Gauge.builder(ELEMENTS_DEPTH_MAX, core, CoreEngine::maxElementsDepth).register(registry);
+        if (topics != null) {
+            Gauge.builder(TOPIC_SUBSCRIBERS_MAX, topics,
+                    io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
+                    .register(registry);
+        }
         bindSessionsGauge(sessions);
+    }
+
+    /**
+     * 单机形态 gauge（无 topic 面的既有夹具兼容形态）。
+     *
+     * @param core     锁语义核心
+     * @param sessions 本节点会话注册表
+     */
+    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions) {
+        bindStandaloneGauges(core, sessions, null);
     }
 
     /**
@@ -362,10 +431,13 @@ public final class ServerMetrics {
      * @param sessions   本节点会话注册表
      * @param nodeId     本节点 id（{@code is_leader} 判定与标签）
      * @param tracker    Leader 提示单源视图
+     * @param topics     本节点 topic 登记表（Leader 任期内非空；{@code null}=
+     *                   夹具无 topic 面，不注册 {@code subscribers.max} gauge）
      */
     public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
                                   ServerSessionRegistry sessions, int nodeId,
-                                  LeaderTracker tracker) {
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[0])
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[1])
@@ -373,8 +445,30 @@ public final class ServerMetrics {
         Gauge.builder(WAITERS, waitQueue, WaitQueue::totalWaiters).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
         Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
+        if (topics != null) {
+            // 口径同注：订阅数只在登记表所属任期非零（非 Leader 恒空表），
+            // 与等待队深/元素深度并列为第三口径（常量 Javadoc 互引）。
+            Gauge.builder(TOPIC_SUBSCRIBERS_MAX, topics,
+                    io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
+                    .register(registry);
+        }
         bindSessionsGauge(sessions);
         bindClusterIsLeader(nodeId, () -> tracker.snapshot().leaderNodeId() == nodeId);
+    }
+
+    /**
+     * 集群形态 gauge（无 topic 面的既有夹具兼容形态）。
+     *
+     * @param shadow    复制状态影子表
+     * @param waitQueue 本节点等待队列
+     * @param sessions  本节点会话注册表
+     * @param nodeId    本节点 id
+     * @param tracker   Leader 提示单源视图
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, null);
     }
 
     /**

@@ -712,6 +712,117 @@ class ProtocolCodecTest {
         }
     }
 
+    /**
+     * 场景：v8 topic 消息对与广播推送回环——请求形状矩阵（PUBLISH 全字段/SUBSCRIBE/
+     * UNSUBSCRIBE 零序号）、消息体 presence 三形态（缺省/零长度/4KB 二进制）判别与
+     * 字节级保真、应答 subscription_id/topic_seq 择用、REJECT_SUBSCRIBERS 零值形、
+     * TOPIC_MESSAGE 推送信封（request_id=0、protocol 8）全字段等值、管理面
+     * topic 字段（topic_entries/topic_subscribers/订阅者明细）回环。topic 无 raft
+     * 侧载荷（零日志裁决）——本测试同时钉定"raft 包不存在 topic 消息"的反向断言。
+     */
+    @Test
+    void topicOperationRoundTrip() throws InvalidProtocolBufferException {
+        byte[] big = new byte[4096];
+        for (int i = 0; i < big.length; i++) {
+            big[i] = (byte) (i * 77 + 13);
+        }
+
+        // 请求形状：PUBLISH 全字段（消息体 4KB + 写序号）
+        TopicOpRequest publish = TopicOpRequest.newBuilder()
+                .setKey("t").setOp(TopicOp.TOPIC_OP_PUBLISH)
+                .setPayloadBytes(com.google.protobuf.ByteString.copyFrom(big))
+                .setOpSeq(5L).build();
+        Envelope envPublish = Envelope.newBuilder().setProtocolVersion(8)
+                .setType(MessageType.TOPIC_OP).setRequestId(41L)
+                .setTopicOpRequest(publish).build();
+        Envelope parsedPublish = roundTrip(envPublish);
+        assertThat(parsedPublish.hasTopicOpRequest()).isTrue();
+        assertThat(parsedPublish.getTopicOpRequest()).isEqualTo(publish);
+        assertThat(parsedPublish.getTopicOpRequest().getPayloadBytes().toByteArray())
+                .containsExactly(big);
+
+        // 消息体 presence 三形态：缺省（违例形）/零长度（合法空消息）/4KB——序列化互异
+        TopicOpRequest absent = publish.toBuilder().clearPayloadBytes().build();
+        TopicOpRequest emptyMsg = publish.toBuilder()
+                .setPayloadBytes(com.google.protobuf.ByteString.EMPTY).build();
+        assertThat(absent.hasPayloadBytes()).isFalse();
+        assertThat(emptyMsg.hasPayloadBytes()).isTrue();
+        assertThat(emptyMsg.getPayloadBytes().isEmpty()).isTrue();
+        assertThat(absent.toByteArray()).isNotEqualTo(emptyMsg.toByteArray());
+
+        // SUBSCRIBE / UNSUBSCRIBE 形状（无载荷、零序号）
+        TopicOpRequest subscribe = TopicOpRequest.newBuilder()
+                .setKey("t").setOp(TopicOp.TOPIC_OP_SUBSCRIBE).build();
+        TopicOpRequest unsubscribe = subscribe.toBuilder()
+                .setOp(TopicOp.TOPIC_OP_UNSUBSCRIBE).build();
+        assertThat(subscribe.hasPayloadBytes()).isFalse();
+        assertThat(subscribe.getOpSeq()).isZero();
+        assertThat(TopicOpRequest.parseFrom(unsubscribe.toByteArray()).getOp())
+                .isEqualTo(TopicOp.TOPIC_OP_UNSUBSCRIBE);
+
+        // 应答形状：SUBSCRIBE 携 subscription_id / PUBLISH 携 topic_seq / 拒绝零值形
+        TopicOpResponse subOk = TopicOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(TopicOp.TOPIC_OP_SUBSCRIBE)
+                .setSubscriptionId(7L).build();
+        TopicOpResponse pubOk = TopicOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(TopicOp.TOPIC_OP_PUBLISH)
+                .setTopicSeq(42L).build();
+        TopicOpResponse rejected = TopicOpResponse.newBuilder()
+                .setStatus(StatusCode.REJECT_SUBSCRIBERS)
+                .setOp(TopicOp.TOPIC_OP_SUBSCRIBE).build();
+        assertThat(parseTopicResponse(subOk).getSubscriptionId()).isEqualTo(7L);
+        assertThat(parseTopicResponse(pubOk).getTopicSeq()).isEqualTo(42L);
+        TopicOpResponse parsedReject = parseTopicResponse(rejected);
+        assertThat(parsedReject.getStatus()).isEqualTo(StatusCode.REJECT_SUBSCRIBERS);
+        assertThat(parsedReject.getSubscriptionId()).isZero();
+        assertThat(parsedReject.getTopicSeq()).isZero();
+
+        // 广播推送：request_id=0、全字段等值、payload 字节级保真
+        TopicMessage push = TopicMessage.newBuilder()
+                .setKey("t").setSubscriptionId(7L).setTopicSeq(42L)
+                .setPublisherSid(0x100000002L).setPublishTsMs(123456789L)
+                .setPayloadBytes(com.google.protobuf.ByteString.copyFrom(big)).build();
+        Envelope envPush = Envelope.newBuilder().setProtocolVersion(8)
+                .setType(MessageType.TOPIC_MESSAGE).setRequestId(0L)
+                .setTopicMessage(push).build();
+        Envelope parsedPush = roundTrip(envPush);
+        assertThat(parsedPush.hasTopicMessage()).isTrue();
+        assertThat(parsedPush.getTopicMessage()).isEqualTo(push);
+        assertThat(parsedPush.getRequestId()).isZero();
+        assertThat(parsedPush.getTopicMessage().getPayloadBytes().toByteArray())
+                .containsExactly(big);
+
+        // 管理面 topic 字段回环（计数 + 订阅者明细三字段）
+        AdminTopicSubscriberInfo info = AdminTopicSubscriberInfo.newBuilder()
+                .setSessionId(0x100000001L).setSubscriptionId(3L).setSubscribedAtMs(555L).build();
+        AdminSummaryResponse summary = AdminSummaryResponse.newBuilder()
+                .setStatus(StatusCode.OK).setTopicEntries(4).build();
+        assertThat(AdminSummaryResponse.parseFrom(summary.toByteArray()).getTopicEntries()).isEqualTo(4);
+        AdminKeyInfo keyInfo = AdminKeyInfo.newBuilder()
+                .setKey("t").setFamily("topic").setTopicSubscribers(2).build();
+        assertThat(AdminKeyInfo.parseFrom(keyInfo.toByteArray()).getTopicSubscribers()).isEqualTo(2);
+        AdminKeyDetailResponse detail = AdminKeyDetailResponse.newBuilder()
+                .setStatus(StatusCode.OK).setFamily("topic").setTopicSubscribers(1)
+                .addTopicSubscribersInfo(info).build();
+        AdminKeyDetailResponse parsedDetail =
+                AdminKeyDetailResponse.parseFrom(detail.toByteArray());
+        assertThat(parsedDetail).isEqualTo(detail);
+        assertThat(parsedDetail.getTopicSubscribersInfo(0).getSessionId()).isEqualTo(0x100000001L);
+
+        // 零日志反向钉定：raft 生成包内不存在 topic 类型（编号证据与 D1 裁决同构）
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftLogEntry.getDescriptor()
+                .getFields().stream().noneMatch(f -> f.getName().contains("topic"))).isTrue();
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.values()).allSatisfy(t ->
+                assertThat(t.name()).doesNotContain("TOPIC"));
+    }
+
+    /** topic 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 TOPIC_OP 通道）。 */
+    private static TopicOpResponse parseTopicResponse(TopicOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(8)
+                .setType(MessageType.TOPIC_OP).setRequestId(42L)
+                .setTopicOpResponse(resp).build()).getTopicOpResponse();
+    }
+
     /** 队列应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 QUEUE_OP 通道）。 */
     private static QueueOpResponse parseQueueResponse(QueueOpResponse resp) {
         return roundTrip(Envelope.newBuilder().setProtocolVersion(7)

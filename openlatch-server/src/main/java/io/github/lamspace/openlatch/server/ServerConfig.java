@@ -54,6 +54,14 @@ import java.util.Properties;
  * @param queueReadyTickMs         队列就绪扫描周期（v7，默认 200ms；延时形态
  *                                 的唤醒精度，仅 Leader/单机调度消费，
  *                                 MUST NOT 参与任何状态判定）
+ * @param maxSubscribersPerKey     单 key 订阅数上限（v8，默认 64；SUBSCRIBE
+ *                                 的入口裁决上限，钳广播 fan-out 放大面；
+ *                                 达上限新增订阅回 {@code REJECT_SUBSCRIBERS}，
+ *                                 既有订阅零扰动；仅接入层判定）
+ * @param maxSubscriptionBuffer    每订阅在途缓冲条数上限（v8，默认 256；
+ *                                 服务端侧弱背压缓冲深度——满则 drop-newest
+ *                                 丢最新一条并计数，MUST NOT 阻塞 Publisher
+ *                                 或断开订阅；仅接入层/登记表判定）
  */
 public record ServerConfig(
         int port,
@@ -70,7 +78,9 @@ public record ServerConfig(
         int maxValueBytes,
         int maxQueueCapacity,
         long maxDrainBytes,
-        long queueReadyTickMs) {
+        long queueReadyTickMs,
+        int maxSubscribersPerKey,
+        int maxSubscriptionBuffer) {
 
     /** 指定配置文件路径的系统属性键。 */
     public static final String CONFIG_PATH_PROPERTY = "openlatch.config";
@@ -110,6 +120,14 @@ public record ServerConfig(
     public static final long DEFAULT_QUEUE_READY_TICK_MS = 200L;
     /** 队列就绪扫描周期下限（v7，毫秒）。 */
     public static final long MIN_QUEUE_READY_TICK_MS = 10L;
+    /** 单 key 订阅数上限默认值（v8）。 */
+    public static final int DEFAULT_MAX_SUBSCRIBERS_PER_KEY = 64;
+    /** 单 key 订阅数上限的配置顶格（v8，fan-out 放大面治理边界）。 */
+    public static final int MAX_SUBSCRIBERS_PER_KEY_CEILING = 1_024;
+    /** 每订阅在途缓冲条数默认值（v8，drop-newest 缓冲深度）。 */
+    public static final int DEFAULT_MAX_SUBSCRIPTION_BUFFER = 256;
+    /** 每订阅在途缓冲条数的配置顶格（v8，与 {@code maxQueueCapacity} 同界）。 */
+    public static final int MAX_SUBSCRIPTION_BUFFER_CEILING = 65_536;
     /** 有值引用载荷字节上限的可配置上界（512KiB，为 1MiB 帧上限留信封编解码边际）。 */
     public static final int MAX_VALUE_BYTES_CEILING = 512 * 1024;
 
@@ -135,7 +153,8 @@ public record ServerConfig(
         this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
                 leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
                 maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES,
-                DEFAULT_MAX_QUEUE_CAPACITY, DEFAULT_MAX_DRAIN_BYTES, DEFAULT_QUEUE_READY_TICK_MS);
+                DEFAULT_MAX_QUEUE_CAPACITY, DEFAULT_MAX_DRAIN_BYTES, DEFAULT_QUEUE_READY_TICK_MS,
+                DEFAULT_MAX_SUBSCRIBERS_PER_KEY, DEFAULT_MAX_SUBSCRIPTION_BUFFER);
     }
 
     /**
@@ -159,7 +178,9 @@ public record ServerConfig(
                 DEFAULT_MAX_VALUE_BYTES,
                 DEFAULT_MAX_QUEUE_CAPACITY,
                 DEFAULT_MAX_DRAIN_BYTES,
-                DEFAULT_QUEUE_READY_TICK_MS);
+                DEFAULT_QUEUE_READY_TICK_MS,
+                DEFAULT_MAX_SUBSCRIBERS_PER_KEY,
+                DEFAULT_MAX_SUBSCRIPTION_BUFFER);
     }
 
     /**
@@ -198,7 +219,11 @@ public record ServerConfig(
                 intOf(props, "openlatch.server.limit.max-value-bytes", base.maxValueBytes()),
                 intOf(props, "openlatch.server.limit.max-queue-capacity", base.maxQueueCapacity()),
                 longOf(props, "openlatch.server.limit.max-drain-bytes", base.maxDrainBytes()),
-                longOf(props, "openlatch.server.queue.ready-tick-ms", base.queueReadyTickMs()));
+                longOf(props, "openlatch.server.queue.ready-tick-ms", base.queueReadyTickMs()),
+                intOf(props, "openlatch.server.limit.max-subscribers-per-key",
+                        base.maxSubscribersPerKey()),
+                intOf(props, "openlatch.server.limit.max-subscription-buffer",
+                        base.maxSubscriptionBuffer()));
         cfg.validate();
         return cfg;
     }
@@ -341,6 +366,17 @@ public record ServerConfig(
             throw new IllegalArgumentException(
                     "配置项 openlatch.server.queue.ready-tick-ms 非法（应 >= "
                             + MIN_QUEUE_READY_TICK_MS + "）: " + queueReadyTickMs);
+        }
+        if (maxSubscribersPerKey < 1 || maxSubscribersPerKey > MAX_SUBSCRIBERS_PER_KEY_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-subscribers-per-key 非法（应为 1–"
+                            + MAX_SUBSCRIBERS_PER_KEY_CEILING + "）: " + maxSubscribersPerKey);
+        }
+        if (maxSubscriptionBuffer < 1
+                || maxSubscriptionBuffer > MAX_SUBSCRIPTION_BUFFER_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-subscription-buffer 非法（应为 1–"
+                            + MAX_SUBSCRIPTION_BUFFER_CEILING + "）: " + maxSubscriptionBuffer);
         }
     }
 }

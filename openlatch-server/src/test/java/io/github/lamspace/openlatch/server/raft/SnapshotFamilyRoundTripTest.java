@@ -525,4 +525,46 @@ class SnapshotFamilyRoundTripTest {
         assertThat(snap.getLocks(0).toByteArray())
                 .doesNotContain(new byte[] {0x38}); // field 7 varint tag 不出现
     }
+
+    /**
+     * v8 topic 零快照增量守卫（snapshot-recovery 规格）：基座含队列条目的快照
+     * 取字节后，对独立 {@code TopicRegistry} 施全载荷（4 键 × 8 订阅 × 64 发布
+     * × 退订消解），核心再取快照 MUST 逐字节相等——topic 无进入复制态/快照的
+     * API 通道（零日志裁决的快照面对偶，任何误接线都会在此转红）。
+     */
+    @Test
+    void topicLoadContributesZeroSnapshotDelta() {
+        io.github.lamspace.openlatch.protocol.LockType q =
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE;
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(131, 1_000, 1).toByteArray());
+        for (int k = 0; k < 4; k++) {
+            origin.applyEntry(RaftEntrySamples.queueSample(131, 2_000 + k, "base-" + k, q,
+                    io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT,
+                    false, 8, new byte[64], 0, 0, k + 1, 3_000 + k, 100 + k).toByteArray());
+        }
+        byte[] before = origin.snapshotState().toByteArray();
+
+        io.github.lamspace.openlatch.server.topic.TopicRegistry topics =
+                new io.github.lamspace.openlatch.server.topic.TopicRegistry(
+                        new io.github.lamspace.openlatch.server.session.ServerSessionRegistry(),
+                        8, 16);
+        for (int k = 0; k < 4; k++) {
+            String key = "t-" + k;
+            for (int s = 0; s < 8; s++) {
+                assertThat(topics.subscribe(900 + s, key, 5_000L).status())
+                        .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.OK);
+            }
+            assertThat(topics.subscriberCount(key)).isEqualTo(8); // 负载真实建立（非空转）
+            for (int i = 0; i < 64; i++) {
+                topics.publish(900, key, i + 1, new byte[] {(byte) i}, 6_000 + i);
+            }
+            for (int s = 0; s < 8; s++) {
+                topics.unsubscribe(900 + s, key);
+            }
+        }
+        // 全退订后登记消解（防泄漏），核心快照面与负载前逐字节相等。
+        assertThat(topics.topicKeyCount()).isZero();
+        assertThat(origin.snapshotState().toByteArray()).isEqualTo(before);
+    }
 }

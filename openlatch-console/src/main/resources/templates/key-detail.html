@@ -28,6 +28,8 @@
                       th:text="|（parties ${r.value.barrierParties} · 当前世代 ${r.value.barrierGeneration} · 到场 ${r.value.barrierArrived}${r.value.barrierActionPending ? ' · 动作待决' : ''} · 最近了结 ${r.value.barrierLastFinal}）|"></span>
                 <span th:if="${r.value.family == 'queue'}"
                       th:text="|（容量 ${r.value.queueCapacity} · 深度 ${r.value.queueDepth} · 驻留 ${r.value.queueTotalPayloadBytes}B · 队首 ${r.value.queueHeadPayloadSize}B ${r.value.queueHeadPayloadPreview}${r.value.queueHeadExpiryMs > 0 ? ' · 队首到期 ' + r.value.queueHeadExpiryMs : ''}）|"></span>
+                <span th:if="${r.value.family == 'topic'}"
+                      th:text="|（订阅 ${r.value.topicSubscribers} · Leader 本地登记，无持有/等待/租约语义）|"></span>
             </div>
 
             <h3>持有者</h3>
@@ -41,7 +43,7 @@
                 </tr>
                 <tr th:if="${r.value.holdersList.isEmpty()}">
                     <td colspan="4" class="empty"
-                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : (r.value.family == 'queue' ? '无持有者（队列元素绑定 key 不绑定会话，无持有语义）' : '无持有者'))}">无持有者</td>
+                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : (r.value.family == 'queue' ? '无持有者（队列元素绑定 key 不绑定会话，无持有语义）' : (r.value.family == 'topic' ? '无持有者（广播订阅不持有 key，无持有语义）' : '无持有者')))}">无持有者</td>
                 </tr>
             </table>
 
@@ -63,7 +65,21 @@
                     </tr>
                     <tr th:if="${r.value.waitersList.isEmpty()}">
                         <td colspan="7" class="empty"
-                            th:text="${r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : (r.value.family == 'queue' ? '无人等待（队列挂起者经等容量/等元素双轨承载）' : '无人等待')}">无人等待</td>
+                            th:text="${r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : (r.value.family == 'queue' ? '无人等待（队列挂起者经等容量/等元素双轨承载）' : (r.value.family == 'topic' ? '无人等待（广播交付经服务端推送通道，无等待队列）' : '无人等待'))}">无人等待</td>
+                    </tr>
+                </table>
+            </th:block>
+            <th:block th:if="${r.value.family == 'topic'}">
+                <h3>订阅者</h3>
+                <table class="grid">
+                    <tr><th>会话</th><th>订阅 id</th><th>订阅时刻（epoch ms）</th></tr>
+                    <tr th:each="s : ${r.value.topicSubscribersInfoList}">
+                        <td th:text="${s.sessionId}">0</td>
+                        <td th:text="${s.subscriptionId}">0</td>
+                        <td th:text="${s.subscribedAtMs}">0</td>
+                    </tr>
+                    <tr th:if="${r.value.topicSubscribersInfoList.isEmpty()}">
+                        <td colspan="3" class="empty">无订阅者（Follower 视角 topic 键不呈现）</td>
                     </tr>
                 </table>
             </th:block>

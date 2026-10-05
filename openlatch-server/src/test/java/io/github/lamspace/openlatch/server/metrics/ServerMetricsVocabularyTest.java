@@ -44,7 +44,11 @@ class ServerMetricsVocabularyTest {
     void recordAllShapes() {
         metrics = new ServerMetrics();
         CoreEngine core = new CoreEngine(new CoreConfig(), new SystemClock(), (s, r, k) -> { });
-        metrics.bindStandaloneGauges(core, new ServerSessionRegistry());
+        io.github.lamspace.openlatch.server.topic.TopicRegistry topics =
+                new io.github.lamspace.openlatch.server.topic.TopicRegistry(
+                        new ServerSessionRegistry(), 8, 16);
+        topics.setDropListener(metrics::recordTopicDropped);
+        metrics.bindStandaloneGauges(core, new ServerSessionRegistry(), topics);
         metrics.recordAcquire(StatusCode.OK, 2_000_000L);
         metrics.recordAcquire(StatusCode.QUEUED, 500_000L);
         metrics.recordAcquire(StatusCode.DENIED, 300_000L);
@@ -70,6 +74,21 @@ class ServerMetricsVocabularyTest {
                 StatusCode.OK);
         metrics.recordQueue(io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_SIZE,
                 StatusCode.OVERLOADED);
+        // v8：topic 操作计数线（op 词表三值 + 在带裁决 REJECT_SUBSCRIBERS）。
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_SUBSCRIBE,
+                StatusCode.OK);
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_SUBSCRIBE,
+                StatusCode.REJECT_SUBSCRIBERS);
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_UNSUBSCRIBE,
+                StatusCode.OK);
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_PUBLISH,
+                StatusCode.OK);
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_PUBLISH,
+                StatusCode.INVALID_REQUEST);
+        metrics.recordTopic(io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_PUBLISH,
+                StatusCode.NOT_LEADER);
+        // 丢弃计数经登记表监听器回发（drop-newest 不入拒绝面）。
+        metrics.recordTopicDropped(1);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -107,6 +126,26 @@ class ServerMetricsVocabularyTest {
         assertThat(scrape).contains("openlatch_server_queue_total{op=\"size\",status=\"OVERLOADED\"} 1");
         // 不得出现 *_total_total 双后缀。
         assertThat(scrape).doesNotContain("_total_total");
+    }
+
+    /** v8：topic 三命名点线路名（counter 线、丢弃线不入拒绝码形面、订阅 gauge）。 */
+    @Test
+    void topicLineNames() {
+        assertThat(scrape).contains("openlatch_server_topic_total{op=\"subscribe\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_topic_total{op=\"subscribe\",status=\"REJECT_SUBSCRIBERS\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_topic_total{op=\"unsubscribe\",status=\"OK\"} 1");
+        assertThat(scrape).contains("openlatch_server_topic_total{op=\"publish\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_topic_total{op=\"publish\",status=\"INVALID_REQUEST\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_topic_total{op=\"publish\",status=\"NOT_LEADER\"} 1");
+        assertThat(scrape).contains("openlatch_server_topic_dropped_total 1");
+        assertThat(scrape).contains("openlatch_server_topic_subscribers_max 0");
+        // waiters 口径不含订阅者（三口径分离的负向守门）。
+        assertThat(scrape).doesNotContain("topic_total_total");
+        assertThat(scrape).doesNotContain("topic.dropped");
     }
 
     @Test

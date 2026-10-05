@@ -113,6 +113,8 @@ public final class ClusterRequestHandler {
     private final LeaderTracker leaderTracker;
     /** 指标词表门面；{@code null} 表示不埋点（测试夹具装配形态）。 */
     private final ServerMetrics metrics;
+    /** v8 topic 登记表（Leader 本地态）；{@code null}=夹具无 topic 面。 */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
 
     /**
      * 构造处理器（不埋点，既有测试夹具形态）。
@@ -142,12 +144,32 @@ public final class ClusterRequestHandler {
     public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
                                  WaitQueue waitQueue, ServerConfig config,
                                  LeaderTracker leaderTracker, ServerMetrics metrics) {
+        this(gateway, kernel, waitQueue, config, leaderTracker, metrics, null);
+    }
+
+    /**
+     * 构造集群请求处理器（v8 全参形态）。
+     *
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（会话预检与撞 key 影子读）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param topics        topic 登记表（Leader 本地态）；{@code null}=夹具
+     *                      无 topic 面（TOPIC_OP 抵达时回 {@code INTERNAL_ERROR}）
+     */
+    public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker, ServerMetrics metrics,
+                                 io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
         this.config = config;
         this.leaderTracker = leaderTracker;
         this.metrics = metrics;
+        this.topics = topics;
     }
 
     /**
@@ -700,6 +722,95 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * TOPIC_OP 集群路径（v8，<b>零复制日志</b>——topic 无复制状态，登记表为
+     * Leader 本地易失态，判例 {@code WaitQueue} 换主清零）：统一预检
+     * （角色门/载荷/键长/会话在场）后由 Leader 本地直接受理：v8 门、形状
+     * 互斥、{@code maxValueBytes} 钳制、撞 key 影子表只读探测（内部裁决
+     * {@code REJECT_TYPE_MISMATCH}、线路送达 {@code INVALID_REQUEST}）逐层
+     * 前置于登记表调用——全部拒绝态零登记、零扇出、零日志。受理恒同步
+     * 回执（无挂起面）：SUBSCRIBE 幂等登记（达上限 {@code REJECT_SUBSCRIBERS}）、
+     * UNSUBSCRIBE 幂等摘除、PUBLISH 经 (key, 会话) 去重槽受理并即时 fan-out。
+     * Follower 抵达的请求在 {@code validateEnvelope} 角色门即被同型
+     * {@code NOT_LEADER} 拒绝，绝不触达登记表。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code topic_op_request} 分支）
+     * @param ctx     连接上下文
+     */
+    public void handleTopicOp(ServerSession session, Envelope msg, ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 8) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (topics == null) {
+            log.warn("TOPIC_OP handled without topic registry assembly");
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR));
+            return;
+        }
+        io.github.lamspace.openlatch.protocol.TopicOpRequest req = msg.getTopicOpRequest();
+        StatusCode shapeBad = RequestDispatcher.validateTopicShape(req);
+        if (shapeBad != null) {
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, shapeBad));
+            return;
+        }
+        if (req.hasPayloadBytes() && req.getPayloadBytes().size() > config.maxValueBytes()) {
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(
+                    msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        String key = req.getKey();
+        boolean mutating = req.getOp() != io.github.lamspace.openlatch.protocol.TopicOp.TOPIC_OP_UNSUBSCRIBE;
+        if (mutating && kernel.shadow().adminEntry(key) != null) {
+            // 撞 key 尽力而为探测（与并发建条目存在竞态窗——"一 key 一形态"
+            // 应用侧契约）；退订不探测（幂等摘除无建立副作用）。
+            writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(
+                    msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        long now = System.currentTimeMillis();
+        io.github.lamspace.openlatch.protocol.TopicOpResponse.Builder out =
+                io.github.lamspace.openlatch.protocol.TopicOpResponse.newBuilder()
+                        .setOp(req.getOp());
+        switch (req.getOp()) {
+            case TOPIC_OP_SUBSCRIBE -> {
+                var r = topics.subscribe(session.sessionId(), key, now);
+                out.setStatus(r.status()).setSubscriptionId(r.subscriptionId());
+            }
+            case TOPIC_OP_UNSUBSCRIBE -> {
+                topics.unsubscribe(session.sessionId(), key);
+                out.setStatus(StatusCode.OK);
+            }
+            case TOPIC_OP_PUBLISH -> {
+                var r = topics.publish(session.sessionId(), key, req.getOpSeq(),
+                        req.getPayloadBytes().toByteArray(), now);
+                out.setStatus(StatusCode.OK).setTopicSeq(r.topicSeq());
+            }
+            default -> {
+                writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(
+                        msg, StatusCode.INVALID_REQUEST));
+                return;
+            }
+        }
+        if (metrics != null) {
+            metrics.recordTopic(req.getOp(), out.getStatus());
+        }
+        writeSync(ctx, session, startNanos, Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.TOPIC_OP)
+                .setRequestId(msg.getRequestId())
+                .setTopicOpResponse(out)
+                .build());
+    }
+
+    /**
      * BARRIER_AWAIT 集群路径（ACQUIRE 车道 + 复制提交）：到场改变复制状态
      * （到场账簿、合拢与执行者指定、世代号），MUST 经日志——与 Latch
      * "await 零日志"的边界差异系设计使然（屏障到场是状态迁移事件）。
@@ -979,6 +1090,7 @@ public final class ClusterRequestHandler {
             case BARRIER_LEAVE -> msg.hasBarrierLeaveRequest();
             case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest();
             case QUEUE_OP -> msg.hasQueueOpRequest();
+            case TOPIC_OP -> msg.hasTopicOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -994,6 +1106,7 @@ public final class ClusterRequestHandler {
             case BARRIER_LEAVE -> msg.getBarrierLeaveRequest().getKey();
             case BARRIER_ACTION_DONE -> msg.getBarrierActionDoneRequest().getKey();
             case QUEUE_OP -> msg.getQueueOpRequest().getKey();
+            case TOPIC_OP -> msg.getTopicOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -1126,6 +1239,13 @@ public final class ClusterRequestHandler {
             case QUEUE_OP -> b.setQueueOpResponse(QueueOpResponse.newBuilder()
                     .setStatus(StatusCode.NOT_LEADER)
                     .setOp(msg.getQueueOpRequest().getOp()));
+            // v8：TOPIC_OP 同型拒绝——op 回显沿 QUEUE_OP 判例；默认实例的
+            // OK 会被成型为"订阅登记成功（subscription_id=0）/发布受理
+            // （topic_seq=0）"伪成功，码形违例在此杜绝。
+            case TOPIC_OP -> b.setTopicOpResponse(
+                    io.github.lamspace.openlatch.protocol.TopicOpResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER)
+                            .setOp(msg.getTopicOpRequest().getOp()));
             default -> {
                 log.warn("NOT_LEADER reject has no same-shape case for type {} — "
                         + "add the matching payload branch on protocol extension "

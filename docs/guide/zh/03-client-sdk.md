@@ -226,6 +226,53 @@ if (any.isBroken()) { ... }                                     // 句柄本地�
 6. 在途到场遇会话切换不自动重放（到场是有副作用请求），本方抛 `OpenLatchException`，
    旧世代已随会话清理破障；`await` 全程无租约、零续租流量。
 
+## 广播发布/订阅（OTopic，v8）
+
+跨进程广播通道：一个 key 一个通道，每条消息尽力交付给当时在册的全部订阅者。
+消息体为不透明字节（同受 `max-value-bytes` 每条钳制，默认 4KB）。
+
+```java
+OTopic news = client.newTopic("evt:orders");
+
+news.publish(s("订单已支付"));                              // 同步：受理回执（不代表已送达）
+long seq = news.publish("已受理".getBytes(StandardCharsets.UTF_8));
+news.publishAsync(s("旁路投递"));                            // 异步：单次发送，不自动重发
+
+OTopicSubscription watch = news.subscribe(m -> {
+    handle(m.payload(), m.topicSeq(), m.publisherSessionId());  // 本订阅内 seq 严格升序
+});
+long lost = watch.droppedCount();                            // 观察：丢弃估计（见下第 2 条）
+watch.close();                                               // = news.unsubscribe()（幂等）
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §10](01-concepts.md)）：
+
+1. **至多一次**：`publish` 返回仅代表服务端已受理并入 fan-out，不承诺任何订阅者
+   收到；断线、缓冲满、换主窗口都会造成丢失，服务端不重投、不逐条通知。需要
+   投递必达请用 `OBlockingQueue`；
+2. **弱背压 = drop-newest 两级缓冲**：每订阅服务端缓冲（`max-subscription-buffer`，
+   默认 256 条）满时丢最新一条并计数，SDK 本地二级缓冲同策略；慢订阅者不反压
+   发布者、也不被断开（与 JDK `SubmissionPublisher` 的 onOverflow-close 判例刻意
+   不同——断开即会话死亡、连带该会话全部持锁释放）。丢失不逐条通知，仅经
+   `droppedCount()` 观察（同任期 `topic_seq` 缺口推断 + 本地溢出计数，跨任期基线
+   重置不累计）；
+3. **单订阅内、同一 Leader 任期内 seq 严格升序**；跨发布者/跨订阅无全局序；
+   换主后 `topic_seq` 重新起算、断档期消息不补投——订阅由 SDK 自动重挂续收；
+4. **发布重试去重仅同 Leader 内**：同 `op_seq` 自动重发命中服务端去重槽、不双扇出；
+   跨换主重试（含应用层手工重试）可能双投——消费侧幂等是应用义务；
+5. **监听器线程模型**：单订阅内**串行回调**（对齐 JDK `Flow.Subscriber.onNext`
+   不重入承诺），在 SDK dispatcher 线程执行、绝不占用网络 EventLoop；回调异常
+   被吞并记日志、不断续交付；耗时处理请自行转交业务线程池；
+6. **订阅绑定会话**：订阅者进程死亡即退订（与队列"死亡不吞元素"相反——队列
+   承载驻留数据、topic 承载交付事件）。订阅存续有服务端登记表与缓冲成本，
+   长驻方应显式 `unsubscribe()`；
+7. 需 **v8 握手**（服务端与客户端双端升级，升级序先服务端后客户端）：v≤7 会话
+   发 `TOPIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连；消息体必携且不可为
+   null（判例队列元素纪律，与引用形态 null 语义相反，零长度合法空消息）；
+8. **撞 key**：topic 键与锁/队列/引用等家族键同名时受理端只读探测拒绝
+   （`INVALID_REQUEST`，尽力而为、无竞态保证）——"一 key 一形态"对 topic 是
+   应用侧契约而非机制互斥。
+
 ## 异步用法
 
 ```java

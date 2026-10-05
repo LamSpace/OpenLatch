@@ -2,7 +2,7 @@
 
 本表是主动演进方向与次序的决策清单,与 `WATCHLIST.md`(被动观察项)配对。
 裁决、状态、次序的单一事实源在本文件;原语的契约细节永远沉淀在各自的提案与规格里。
-最后更新:2026-10-04。
+最后更新:2026-10-05。
 
 ## 决策记录
 
@@ -30,7 +30,7 @@
 |---|---|---|---|---|
 | `OAtomicReference` | `AtomicReference` | 引标量形态之上的有值引用:引用值 get/set/版本 CAS,≤`maxValueBytes` | 超限 `INVALID_REQUEST`;快照膨胀回归测 | 已落地([提案归档](openspec/changes/archive/2026-10-04-add-oatomic-reference/)) |
 | `OBlockingQueue` | `BlockingQueue` + `DelayQueue` 变体 | 有界队列 `put`/`take`/`offer`/`poll`/`drainTo`;延时形态 = 元素带到期时刻(服务端定时器基建先例:租约到期) | FIFO 公平套件同款;元素生命周期绑定 key 而非会话——持有者死亡不吞元素,需契约声明 | 已落地([提案归档](openspec/changes/archive/2026-10-04-add-oblocking-queue/)) |
-| `OTopic` | `Flow.Publisher`/`SubmissionPublisher` | 广播发布/订阅,协调级消息限额;**弱背压为显式契约**(慢消费者缓冲满的丢弃/断连策略在提案中裁决) | 多订阅者 fan-out E2E;取消订阅回收服务端订阅条目(防泄漏) | 未启动 |
+| `OTopic` | `Flow.Publisher`/`SubmissionPublisher` | 广播发布/订阅,协调级消息限额;**弱背压为显式契约**(慢消费者缓冲满的丢弃/断连策略在提案中裁决) | 多订阅者 fan-out E2E;取消订阅回收服务端订阅条目(防泄漏) | 已落地([提案归档](openspec/changes/archive/2026-10-05-add-otopic/)) |
 
 ## 三档 — 需求信号出现再评估
 
@@ -63,7 +63,7 @@
 
 ## 每个原语的落地纪律(提案立项时逐项列入任务)
 
-1. proto 消息对 + 协议版本门(下一个门为 v6,握手版本判例沿用 v3/v4/v5);
+1. proto 消息对 + 协议版本门(门随立项逐次递增,判例 v3–v7;OTopic 立项为 v8);
 2. core 条目状态机 + Raft 命令路径 + 恢复(`CoreStateRestore` 同款);
 3. ShadowTable/管理控制台/指标三件套登记;
 4. 双语用户指南(docs/guide)与契约 Javadoc——**语义降级与增强处必须显式声明**;

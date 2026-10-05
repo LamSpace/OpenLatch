@@ -44,6 +44,9 @@ import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.TopicOp;
+import io.github.lamspace.openlatch.protocol.TopicOpRequest;
+import io.github.lamspace.openlatch.protocol.TopicOpResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.function.Predicate;
@@ -84,7 +87,8 @@ class RejectCodecTableTest {
                     MessageType.LEASE_RENEW, MessageType.LATCH_COUNT_DOWN,
                     MessageType.LATCH_AWAIT, MessageType.ATOMIC_OP,
                     MessageType.BARRIER_AWAIT, MessageType.BARRIER_LEAVE,
-                    MessageType.BARRIER_ACTION_DONE, MessageType.QUEUE_OP);
+                    MessageType.BARRIER_ACTION_DONE, MessageType.QUEUE_OP,
+                    MessageType.TOPIC_OP);
 
     /** 客户端接入车道全部请求类型（PING/AWAIT_NOTIFY 无拒绝应答语义，除外）。 */
     private static RejectCase[] allCases() {
@@ -139,6 +143,12 @@ class RejectCodecTableTest {
                             .setKey("k").setOp(QueueOp.QUEUE_OP_SIZE)
                             .setLockType(LockType.LOCK_TYPE_QUEUE)),
                     Envelope::hasQueueOpResponse),
+            // v8：TOPIC_OP 同型拒绝——默认实例 OK 会被成型为"订阅登记成功/
+            // 发布受理（seq=0）"伪成功（W10 判例延伸）。
+            new RejectCase(MessageType.TOPIC_OP, 8,
+                    b -> b.setTopicOpRequest(TopicOpRequest.newBuilder()
+                            .setKey("k").setOp(TopicOp.TOPIC_OP_SUBSCRIBE)),
+                    Envelope::hasTopicOpResponse),
         };
     }
 
@@ -225,11 +235,16 @@ class RejectCodecTableTest {
     void clusterNotLeaderEchoesOpForOpCarryingRequests() {
         LeaderTracker.Snapshot unknown = new LeaderTracker.Snapshot(-1, "");
         for (RejectCase c : allCases()) {
-            if (c.type() != MessageType.ATOMIC_OP && c.type() != MessageType.QUEUE_OP) {
+            if (c.type() != MessageType.ATOMIC_OP && c.type() != MessageType.QUEUE_OP
+                    && c.type() != MessageType.TOPIC_OP) {
                 continue;
             }
             Envelope resp = ClusterRequestHandler.notLeaderEnvelope(request(c), unknown);
-            if (c.type() == MessageType.QUEUE_OP) {
+            if (c.type() == MessageType.TOPIC_OP) {
+                assertThat(resp.getTopicOpResponse().getOp())
+                        .as("TOPIC_OP 拒绝须回显 op（指标 recordTopic 消费同表达式）")
+                        .isEqualTo(TopicOp.TOPIC_OP_SUBSCRIBE);
+            } else if (c.type() == MessageType.QUEUE_OP) {
                 assertThat(resp.getQueueOpResponse().getOp())
                         .as("QUEUE_OP 拒绝须回显 op（指标 recordQueue 消费同表达式）")
                         .isEqualTo(QueueOp.QUEUE_OP_SIZE);
@@ -306,6 +321,7 @@ class RejectCodecTableTest {
             case BARRIER_LEAVE -> resp.getBarrierLeaveResponse().getStatus();
             case BARRIER_ACTION_DONE -> resp.getBarrierActionDoneResponse().getStatus();
             case QUEUE_OP -> resp.getQueueOpResponse().getStatus();
+            case TOPIC_OP -> resp.getTopicOpResponse().getStatus();
             default -> throw new IllegalArgumentException("no codec: " + type);
         };
     }

@@ -22,9 +22,10 @@
 | v5 | 循环屏障（`OBarrier`）：`BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` 消息对、世代账簿复制、离场即破障 |
 | v6 | 有值引用（`OAtomicReference`）：ATOMIC 消息对 `optional bytes` 载荷字段（无新 `MessageType`）、`maxValueBytes` 入口钳制、载荷快照/预览 |
 | v7 | 有界队列（`OBlockingQueue`）与延时队列（`ODelayQueue`）：`QUEUE_OP` 消息对、`LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` 形态、每会话去重槽、双"满"分轨、容量/drain 入口钳制、延时应用点折算、队列快照字段 |
+| v8 | 广播发布/订阅（`OTopic`）：`TOPIC_OP` 消息对与 `TOPIC_MESSAGE` 推送、`REJECT_SUBSCRIBERS` 在带裁决、弱背压 drop-newest 两级缓冲、每会话去重槽（受理点）、**零复制日志/零快照贡献**（首个零持久态原语）、`max-subscribers-per-key`/`max-subscription-buffer` 入口钳制 |
 
 混布规则：**服务端版本 ≥ 客户端版本**。旧客户端（v1/v2）连新服务端完全可用；
-新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 ≥5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；v6 有值引用要求服务端 ≥6（v≤5 会话发引用形态 `ATOMIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，标量原子不受波及）；v7 队列要求服务端 ≥7（v≤6 会话发 `QUEUE_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；服务端升级后旧客户端（v≤6）行为逐项不变。
+新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 ≥5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；v6 有值引用要求服务端 ≥6（v≤5 会话发引用形态 `ATOMIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，标量原子不受波及）；v7 队列要求服务端 ≥7（v≤6 会话发 `QUEUE_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；v8 topic 要求服务端 ≥8（v≤7 会话发 `TOPIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；服务端升级后旧客户端（v≤7）行为逐项不变。
 
 ## 升级与回滚顺序
 
@@ -39,4 +40,4 @@
 ## 数据兼容
 
 Raft 日志与快照格式在 1.x 系列内向后兼容（新二进制可读旧目录）；
-**反向不成立**——一旦产出新快照/截断，旧二进制不可再挂载该 `data-dir`（见 [05 回滚](05-cluster-deployment.md)）；v4 快照含原子条目、v5 快照含循环屏障条目（世代/账簿）、v6 快照含引用载荷字段（`atomic_ref_*`）后，回滚到旧二进制同样被此规则覆盖（回滚前先确认业务未写入对应 key，或接受屏障世代重置/引用载荷驻留）。
+**反向不成立**——一旦产出新快照/截断，旧二进制不可再挂载该 `data-dir`（见 [05 回滚](05-cluster-deployment.md)）；v4 快照含原子条目、v5 快照含循环屏障条目（世代/账簿）、v6 快照含引用载荷字段（`atomic_ref_*`）后，回滚到旧二进制同样被此规则覆盖（回滚前先确认业务未写入对应 key，或接受屏障世代重置/引用载荷驻留）。**v8 topic 不受此规则约束**：topic 不产出任何日志条目与快照字段（零持久态，有快照零增量与日志零条目双向守卫回归钉死），回滚窗口与 topic 流量无关（见 [05 v8 回滚窗口](05-cluster-deployment.md)）。

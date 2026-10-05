@@ -77,6 +77,8 @@ class ServerConfigTest {
                 openlatch.server.limit.max-queue-capacity = 512
                 openlatch.server.limit.max-drain-bytes = 65536
                 openlatch.server.queue.ready-tick-ms = 100
+                openlatch.server.limit.max-subscribers-per-key = 32
+                openlatch.server.limit.max-subscription-buffer = 128
                 """);
 
         ServerConfig cfg = ServerConfig.load(file.toString());
@@ -96,6 +98,33 @@ class ServerConfigTest {
         assertThat(cfg.maxQueueCapacity()).isEqualTo(512);
         assertThat(cfg.maxDrainBytes()).isEqualTo(65_536L);
         assertThat(cfg.queueReadyTickMs()).isEqualTo(100L);
+        assertThat(cfg.maxSubscribersPerKey()).isEqualTo(32);
+        assertThat(cfg.maxSubscriptionBuffer()).isEqualTo(128);
+        // v8 默认值钉定（64 订阅 / 256 条缓冲）。
+        ServerConfig def = ServerConfig.defaults();
+        assertThat(def.maxSubscribersPerKey())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIBERS_PER_KEY).isEqualTo(64);
+        assertThat(def.maxSubscriptionBuffer())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIPTION_BUFFER).isEqualTo(256);
+    }
+
+    @Test
+    void v8_topic_limits_out_of_range_fail_fast() throws IOException {
+        // 逐界：订阅数 0/顶格上、缓冲条数 0/顶格上。
+        for (String line : new String[] {
+                "openlatch.server.limit.max-subscribers-per-key = 0",
+                "openlatch.server.limit.max-subscribers-per-key = 1025",
+                "openlatch.server.limit.max-subscription-buffer = 0",
+                "openlatch.server.limit.max-subscription-buffer = 65537",
+        }) {
+            Path file = tempDir.resolve("bad-topic-limit.properties");
+            Files.writeString(file, line + "\n");
+            String key = line.substring(0, line.indexOf(' '));
+            assertThatThrownBy(() -> ServerConfig.load(file.toString()))
+                    .as("越界值应拒绝: %s", line)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(key);
+        }
     }
 
     @Test

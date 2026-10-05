@@ -110,6 +110,35 @@ auto-convergence after healing; sampler red only if all rounds ABORTED.
   the key, nothing reclaims them server-side. Scheduled cleanup rides on business key
   naming (round/tenant prefixes) plus the console's residency readouts.
 
+## Topic (v8) triage quick sheet
+
+- **"Messages stopped after a leader change" — split the diagnosis in three**:
+  (1) check the SDK reconnect logs — re-registration rides connection re-establishment
+  (a 30s keep-alive sweep covers the "same-node re-election without a dropped
+  connection" case), and the gap window is never replayed (at-most-once contract);
+  (2) confirm the subscription reappeared in the Leader's registry (console /
+  `ADMIN_KEY_DETAIL` topic section); (3) if registered yet still silent, compare
+  `openlatch_server_topic_dropped_total` growth with the subscriber's
+  `droppedCount()` — drops from a full buffer are contract behavior, not faults;
+- **`REJECT_SUBSCRIBERS`**: the key hit `max-subscribers-per-key` (default 64) —
+  first hunt leaked subscriptions (live processes that never `unsubscribe()`);
+  existing subscribers are untouched by the rejection (no eviction, no disconnect);
+- **`droppedCount()` climbing**: slow-consumer signal (either buffer tier). Fix by
+  moving heavy work out of the handler, scaling consumer parallelism, or splitting
+  the topic key. Remember it is a same-term gap estimate — it rebases on
+  re-subscription and never accumulates across terms;
+- **`OpenLatchException(INVALID_REQUEST)` on a topic op** means one of: over-large
+  or missing message body, shape violation (payload/op_seq mismatched with the op),
+  a colliding key occupied by another family (best-effort probe), or a v≤7 session —
+  the status text pinpoints which;
+- **Suspected double delivery**: under at-most-once the only source is a publish
+  **retry crossing a leader change** (old Leader fanned out, new Leader's dedup
+  slot is empty). Compare the two deliveries' `publisherSessionId` and term
+  boundary; consumer idempotence is a contract obligation, not a server defect;
+- **Empty topic readouts on followers**: the registry is Leader-local — follower
+  SUMMARY shows `topic_entries=0`, keys lists omit topic rows and details answer
+  an honest NOT_HELD. This is faithful presentation, not data loss.
+
 ## 7. FAQ
 
 **Q: Can I use it for distributed transactions?** No — locks are coordination primitives

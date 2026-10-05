@@ -34,6 +34,8 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.limit.max-queue-capacity` | `1024` | ceiling for declared queue capacity claims (v7); an over-ceiling PUT claim is ingress-rejected with zero log entries, range [1, 65536]; combined with per-element `max-value-bytes` it bounds a key's residency |
 | `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo reply byte budget (v7): the DRAIN extraction limit is clamped by budget/`max-value-bytes` and the clamped N rides the log entry (apply never reads local config), range [1, 512KiB] |
 | `openlatch.server.queue.ready-tick-ms` | `200` | delayed-queue ready-scan period (v7, Leader/standalone scheduler; affects wake-up latency precision only, never state adjudication), minimum 10ms |
+| `openlatch.server.limit.max-subscribers-per-key` | `64` | per-key topic subscriber ceiling (v8); an over-limit SUBSCRIBE is ingress-rejected (`REJECT_SUBSCRIBERS`, existing subscribers untouched), range [1, 1024]; bounds broadcast fan-out amplification |
+| `openlatch.server.limit.max-subscription-buffer` | `256` | server-side in-flight buffer depth per subscription (v8, drop-newest trigger line), range [1, 65536]; the SDK keeps a matching local tier (256) |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -143,6 +145,16 @@ availability is carried by the server-side self-healing watchdog, not by restart
   entry's residency or clear & re-add per the earlier bullet). On the older
   binary any `QUEUE_OP` message is rejected as an unknown message type and
   never pollutes the replication face.
+- **v8 topic rollback window (clean by construction)**: topics are the first
+  zero-persistence primitive — the subscription registry, buffers, dedup slots
+  and `topic_seq` are Leader memory and MUST NOT reach the log or snapshots
+  (pinned by standing guard regressions). Rolling back to v7 leaves nothing to
+  drain: topic traffic contributed zero entries, so old binaries see no topic
+  traces at all — no "clear the keys first" chore unlike v6/v7 payloads. Note
+  the general mixed-version rule still applies: v8 SDK clients are rejected at
+  handshake against a rolled-back v7 server (server first on the way up,
+  client first on the way down), and in-flight subscriptions naturally stop
+  when connections drop (same loss semantics as a leader-change window).
 
 ### Queue-dimension snapshot and log governance (v7)
 
@@ -161,6 +173,26 @@ availability is carried by the server-side self-healing watchdog, not by restart
   push an actual drain reply above the `max-drain-bytes` budget (the direct
   cost of "never retro-affect"); drain such keys first or size budgets ahead —
   the frame ceiling remains the hard backstop.
+
+### Topic-dimension capacity governance (v8)
+
+- Topics contribute **nothing** to snapshots and the log (guard-pinned); their
+  governance surface is the **Leader write path**: fan-out amplification =
+  subscribers × publish rate × message size, all of it landing on Leader heap
+  buffers and socket writes;
+- Two ingress limits are the capacity clamp: `max-subscribers-per-key`
+  (default 64) caps per-key amplification; `max-subscription-buffer`
+  (default 256) caps per-subscription residency — the heap bound per
+  subscription ≈ `256 × max-value-bytes`, per key = that × subscriber count;
+- Readouts: `openlatch_server_topic_dropped_total` growth rate (dropping IS
+  "consumers can't keep up"), `topic.subscribers.max` watermark, the console's
+  Leader-side subscriber view. On sustained drops: scale consumer parallelism,
+  split topic keys, or trigger the WATCHLIST topic-row evaluation (batched
+  frames / request-gated backpressure as a separate change);
+- Size `data-dir`/heap estimates with an added term "active topic keys ×
+  subscribers × buffer depth × mean message bytes" on the Leader; topics
+  carry no durable-delivery duty — use `OBlockingQueue` for event streams that
+  must survive leader restarts.
 
 ### Payload snapshot & log size governance (v6)
 

@@ -35,6 +35,7 @@ import io.github.lamspace.openlatch.protocol.LatchCountDownRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.TopicMessage;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.concurrent.EventExecutorGroup;
@@ -55,6 +56,9 @@ import java.util.concurrent.TimeUnit;
  * <p><b>职责</b>：以长连接访问锁服务，对外提供异步获取/释放内核与
  * JUC 风格同步锁包装；对内维护请求多路复用、等待跟踪、看门狗续租与断连重连。
  * 锁语义裁决（是否授予、是否可重入）全部由服务端完成，客户端仅做本地簿记。
+ * v8 起承载广播订阅路由表（{@link OTopic}：(会话, subscription_id) →
+ * 订阅句柄）与重挂保活周期——推送交付在网络线程按表分发、经订阅句柄自有
+ * dispatcher 线程串行回调，不占用 EventLoop。
  *
  * <p><b>连接车道</b>：稳态单连接（home 即 Leader，或单机
  * 服务）。集群形态下 home 握手提示或 {@code NOT_LEADER} 重定向驱动改道：
@@ -111,6 +115,13 @@ public final class OpenLatchClient implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicLong(0);
     /** key → 在途写互斥监视器（同 key 写串行保证去重单槽充分性；条目随 key 常驻，量级同 key 基数）。 */
     private final ConcurrentHashMap<String, Object> atomicWriteMonitors = new ConcurrentHashMap<>();
+    /** v8 订阅路由表：受理会话 id → subscription_id → 活跃订阅（推送分发用）。 */
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<Long, RemoteTopic.Subscription>>
+            topicRoutes = new ConcurrentHashMap<>();
+    /** v8 有活跃订阅的句柄集（重挂事件与保活周期遍历对象）。 */
+    private final java.util.Set<RemoteTopic> liveTopics = ConcurrentHashMap.newKeySet();
+    /** v8 订阅保活周期（毫秒）——兜底"同节点换主登记清零而连接未断"的静默断供。 */
+    private static final long TOPIC_KEEPALIVE_MS = 30_000L;
     /**
      * 获取车道（Leader 车道）：{@code null} 即稳态单连接——home 即
      * Leader（或单机）。Leader 改连时按需建/换指向；新获取与等待走此车道，
@@ -203,9 +214,19 @@ public final class OpenLatchClient implements AutoCloseable {
                 awaitTracker.onNotify(n);
             }
         });
+        this.connectionManager.setTopicMessageSink(m -> {
+            // v8：广播交付按 (home 会话, subscription_id) 路由；换会话窗内
+            // 的失配推送直接丢弃（至多一次契约）。
+            SessionContext s = connectionManager.session();
+            if (s != null) {
+                onTopicDelivered(s.sessionId(), m);
+            }
+        });
         this.connectionManager.setActiveListener(this::onHomeActive);
         this.connectionManager.setHelloListener(this::onHomeHello);
         this.multiplexer.setOrphanSink(awaitTracker::onOrphanResponse);
+        // v8：订阅重挂保活周期（共享定时器自续排；无活跃订阅时为空扫）。
+        scheduleTopicKeepAlive();
         // 构建即发起首次连接（异步）：连接失败自动退避重连并轮询种子。
         this.connectionManager.connectAsync();
     }
@@ -252,6 +273,7 @@ public final class OpenLatchClient implements AutoCloseable {
                     awaits.onNotify(n);
                 }
             });
+            this.cm.setTopicMessageSink(m -> onTopicDelivered(sessionId, m));
             this.cm.setActiveListener(this::onActive);
             this.cm.setHelloListener(this::onHello);
             this.mux.setOrphanSink(awaits::onOrphanResponse);
@@ -273,6 +295,8 @@ public final class OpenLatchClient implements AutoCloseable {
                     }
                 }
             }
+            // v8：车道会话更替即触发订阅重挂（幂等覆盖，失败留待保活周期）。
+            rebindAllTopics();
         }
 
         /**
@@ -329,6 +353,8 @@ public final class OpenLatchClient implements AutoCloseable {
                 }
             }
         }
+        // v8：home 会话更替同样触发订阅重挂（无车道时订阅落 home 的情形）。
+        rebindAllTopics();
     }
 
     /**
@@ -1528,6 +1554,29 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程广播发布/订阅句柄（{@link OTopic}，协议 v8）。一个 key 即
+     * 一个广播通道：{@code publish} 至多一次地扇出给当时在册的全部订阅者，
+     * 弱背压（drop-newest 两级缓冲）与订阅的会话绑定生命周期（死亡即退订）
+     * 等语义降级/增强清单以 {@link OTopic} 接口级 Javadoc 为唯一权威载体。
+     *
+     * <p>topic 键与锁/Semaphore/Latch/屏障/原子/队列键同名时受理端只读
+     * 探测拒绝（{@code INVALID_REQUEST}，尽力而为）——"一 key 一形态"由
+     * 应用侧维持（判例各复制家族的机制互斥在此降级为契约，防混读声明）。
+     * 发布写车道与原子/队列共享同 key 在途互斥与自动重发纪律。
+     *
+     * @param key topic 键（非空）
+     * @return 广播句柄（线程安全；订阅经 {@link OTopic#subscribe} 建立）
+     * @throws IllegalArgumentException key 为空
+     */
+    public OTopic newTopic(String key) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        return new RemoteTopic(this, key);
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
@@ -1574,6 +1623,103 @@ public final class OpenLatchClient implements AutoCloseable {
      * @param mux     该会话所属车道的多路复用器
      */
     record LatchRoute(SessionContext session, RequestMultiplexer mux) {
+    }
+
+    // ==================== v8 广播订阅路由（OTopic） ====================
+
+    /**
+     * 登记推送路由（SUBSCRIBE 受理成功后由 {@link RemoteTopic} 调用）。
+     *
+     * @param sessionId 受理会话 id
+     * @param subId     服务端路由键
+     * @param sub       活跃订阅
+     */
+    void attachTopicSubscription(long sessionId, long subId, RemoteTopic.Subscription sub) {
+        topicRoutes.computeIfAbsent(sessionId, k -> new ConcurrentHashMap<>()).put(subId, sub);
+    }
+
+    /**
+     * 摘除推送路由（值甄别：仅摘自己登记的项，防误摘同键后到者）。
+     *
+     * @param sessionId 登记会话 id
+     * @param subId     路由键
+     * @param expected  期望命中的订阅（表值 != expected 时不动）
+     */
+    void detachTopicSubscription(long sessionId, long subId, RemoteTopic.Subscription expected) {
+        ConcurrentHashMap<Long, RemoteTopic.Subscription> bySub = topicRoutes.get(sessionId);
+        if (bySub != null) {
+            bySub.remove(subId, expected);
+            if (bySub.isEmpty()) {
+                topicRoutes.remove(sessionId, bySub);
+            }
+        }
+    }
+
+    /**
+     * {@code TOPIC_MESSAGE} 入站分发（EventLoop 线程，非阻塞）：按
+     * (交付连接会话, subscription_id) 命中订阅后转句柄队列；失配丢弃
+     * （换会话窗/已被替换——至多一次契约面）。
+     *
+     * @param sessionId 交付连接当时的会话 id
+     * @param message   推送载荷
+     */
+    private void onTopicDelivered(long sessionId, TopicMessage message) {
+        ConcurrentHashMap<Long, RemoteTopic.Subscription> bySub = topicRoutes.get(sessionId);
+        if (bySub == null) {
+            return;
+        }
+        RemoteTopic.Subscription sub = bySub.get(message.getSubscriptionId());
+        if (sub != null) {
+            sub.onPush(message);
+        }
+    }
+
+    /**
+     * 将句柄纳入重挂/保活遍历（订阅建立时调用）。
+     *
+     * @param topic 句柄
+     */
+    void trackLiveTopic(RemoteTopic topic) {
+        liveTopics.add(topic);
+    }
+
+    /**
+     * 句柄退出重挂遍历（退订时调用）。
+     *
+     * @param topic 句柄
+     */
+    void untrackLiveTopic(RemoteTopic topic) {
+        liveTopics.remove(topic);
+    }
+
+    /**
+     * 全部活跃订阅经当前路由幂等重登记（连接激活事件与保活周期共用；
+     * 单订阅门闩防并发重挂）。
+     */
+    private void rebindAllTopics() {
+        if (liveTopics.isEmpty()) {
+            return;
+        }
+        for (RemoteTopic topic : liveTopics) {
+            topic.rebindAsync();
+        }
+    }
+
+    /**
+     * 保活周期自续排（共享 {@link HashedWheelTimer}）：关停后不再续排。
+     * 周期职责有二——重挂"同节点换主（连接未断）导致的登记清零"，以及
+     * 事件遗漏兜底（激活事件已即时重挂，本周期为幂等无操作）。
+     */
+    private void scheduleTopicKeepAlive() {
+        timer.newTimeout(t -> {
+            if (!closed) {
+                try {
+                    rebindAllTopics();
+                } finally {
+                    scheduleTopicKeepAlive();
+                }
+            }
+        }, TOPIC_KEEPALIVE_MS, TimeUnit.MILLISECONDS);
     }
 
     /**

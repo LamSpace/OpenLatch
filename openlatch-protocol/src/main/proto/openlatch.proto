@@ -26,6 +26,8 @@ enum MessageType {
   BARRIER_LEAVE       = 16; // v5：循环屏障离场/破障（在队离场、超时、中断、显式 break 共用）
   BARRIER_ACTION_DONE = 17; // v5：循环屏障动作了结（执行者回报 barrierAction 完成）
   QUEUE_OP         = 18;   // v7：队列操作（独立消息对，不走 ACQUIRE；读写皆全量经提交）
+  TOPIC_OP         = 19;   // v8：topic 操作（独立消息对，不走 ACQUIRE；零复制日志——受理与 fan-out 全在 Leader 本地）
+  TOPIC_MESSAGE    = 20;   // v8：服务器 → 订阅连接 广播交付推送（request_id=0、无 ref，按 subscription_id 关联）
 }
 
 // 锁类型。
@@ -61,6 +63,8 @@ enum StatusCode {
   NOT_LEADER      = 10;  // v2 启用（Phase 1 预留）：本节点非当值 Leader 拒绝写请求，随附 leader 提示
   INTERNAL_ERROR  = 11;
   BARRIER_BROKEN  = 12;  // v5：在带裁决——等待项所属世代已破障（非请求错误，连接与会话不受影响）
+  REJECT_SUBSCRIBERS = 13; // v8：在带裁决——key 订阅数达 max-subscribers-per-key 上限拒绝新增 SUBSCRIBE
+                           //（该 key 既有订阅零扰动；非请求错误，连接与会话不受影响，判例 BARRIER_BROKEN 形态）
 }
 
 // v4：原子变量操作类型（ATOMIC_OP_REQUEST.op）。GET 为读数零迁移；
@@ -112,6 +116,9 @@ message Envelope {
     BarrierActionDoneResponse barrier_action_done_response = 39;  // v5
     QueueOpRequest            queue_op_request             = 40;  // v7
     QueueOpResponse           queue_op_response            = 41;  // v7
+    TopicOpRequest            topic_op_request             = 42;  // v8
+    TopicOpResponse           topic_op_response            = 43;  // v8
+    TopicMessage              topic_message                = 44;  // v8：广播交付推送（服务器→订阅者）
   }
 }
 
@@ -254,6 +261,7 @@ message AdminSummaryResponse {
   int32      atomic_entries   = 10; // v4：ATOMIC 条目数（无持有语义，单列，判例 latch_entries）
   int32      barrier_entries  = 11; // v5：BARRIER 条目数（无持有语义，单列，判例 latch_entries/atomic_entries）
   int32      queue_entries    = 12; // v7：QUEUE 条目数（两形态合并计数；无持有语义，单列，判例 latch_entries/atomic_entries/barrier_entries）
+  int32      topic_entries    = 13; // v8：TOPIC 订阅登记键数（Leader 本地登记表读数，无持有语义单列；非 Leader 恒 0）
 }
 
 message AdminListKeysRequest {
@@ -284,6 +292,9 @@ message AdminKeyInfo {
   int32  queue_depth              = 14; // 当前元素数（驻留口径，延时形态含未到期项；非 QUEUE 恒 0）
   int32  queue_head_payload_size  = 15; // 队首元素字节数（空队恒 0）
   string queue_head_payload_preview = 16; // 队首元素截断转义预览（空队恒空串；全量元素不外发）
+  // v8：topic 订阅登记行的观察字段（Leader 视角合并呈现，family=topic；
+  // 非 topic 行恒 0。已交付消息内容 MUST NOT 出现在任何管理应答）。
+  int32  topic_subscribers        = 17; // 订阅数（非 topic 行恒 0）
 }
 
 message AdminListKeysResponse {
@@ -317,6 +328,14 @@ message AdminKeyWaiterInfo {
   int32  permits     = 5;  // 请求许可数（锁/屏障恒 1）
   bool   notified    = 6;
   int32  queue_track = 7;  // v7：队列挂起轨道判别（0=非队列等待者、1=等容量 put-waiter、2=等元素 take-waiter）
+}
+
+// v8：topic 订阅者明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空；
+// 订阅非持有非等待，无位次语义）。
+message AdminTopicSubscriberInfo {
+  int64  session_id      = 1;  // 订阅会话（逻辑会话 id）
+  uint64 subscription_id = 2;  // 登记表路由键（与 TOPIC_MESSAGE.subscription_id 同源）
+  int64  subscribed_at_ms = 3; // 订阅建立时刻（epoch 毫秒，受理节点时钟）
 }
 
 message AdminKeyDetailResponse {
@@ -358,6 +377,11 @@ message AdminKeyDetailResponse {
   int64  queue_total_payload_bytes  = 26;  // 元素载荷字节之和（驻留治理观察；非 QUEUE 恒 0）
   int32  queue_head_payload_size    = 27;  // 队首元素字节数（空队恒 0）
   string queue_head_payload_preview = 28;  // 队首元素截断转义预览（空队恒空串）
+  // v8：TOPIC 专属订阅维（非 topic 键恒 0/空列表；topic 键仅 Leader 视角命中，
+  // 非 Leader 回明确未命中——登记表为 Leader 本地态，MUST NOT 空壳成功；
+  // 已交付消息内容零外发，计数与会程/序号/时刻三维为全部观察面）。
+  int32  topic_subscribers = 29;  // 订阅数（非 topic 恒 0）
+  repeated AdminTopicSubscriberInfo topic_subscribers_info = 30; // 订阅者明细（非 topic 恒空）
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -517,4 +541,55 @@ message QueueOpResponse {
   repeated bytes   drained_bytes   = 5;   // DRAIN 按出队序的交付列表（空列表为合法结果）
   sint64           size            = 6;   // SIZE 读数（仅 SIZE op 有效，其余恒 0）
   sint64           capacity        = 7;   // 条目定型容量回显（未定型/拒绝路径为 0）
+}
+
+// v8：topic 操作类型（TOPIC_OP_REQUEST.op）。订阅操作恒立即回执，交付经
+// TOPIC_MESSAGE 推送——无阻塞/挂起面（与队列 blocking 位相反，订阅是存续态非
+// 一次性请求）。三操作零复制日志条目（D1 裁决：topic 无复制状态，登记表为
+// Leader 本地易失态，判例 WaitQueue 换主清零、客户端重挂）。
+enum TopicOp {
+  TOPIC_OP_SUBSCRIBE   = 0;  // 建立/重登订阅（(session,key) 唯一登记，幂等覆盖：同会话同键重复 SUBSCRIBE 返回同一登记语义）
+  TOPIC_OP_UNSUBSCRIBE = 1;  // 退订（幂等：未存在的订阅亦回 OK，无错误态）
+  TOPIC_OP_PUBLISH     = 2;  // 广播发布（OK=已受理并入 fan-out，不承诺任何订阅者已收到——至多一次契约）
+}
+
+// v8：topic 操作请求（TOPIC_OP）。形状互斥矩阵入口裁决：payload_bytes 仅 PUBLISH
+// 携带且 MUST 存在（消息体不可为 null——缺省即形状违例，零长度=合法空消息，判例
+// v7 元素纪律、与有值引用形态 "null 为一等公民" 刻意不同）；非 PUBLISH 携带为违例。
+// op_seq 仅 PUBLISH 携带且 MUST 非零（会话内单调，供受理节点每会话去重槽——同 term
+// 重发不双扇出）；SUBSCRIBE/UNSUBSCRIBE 填 0，携非零为违例。payload_bytes 逐条
+// ≤maxValueBytes 由接入层钳制（判定唯一在接入层，判例 v6 D5）。撞 key 防护由受理
+// 节点只读探测 LockTable 裁决（内部 REJECT_TYPE_MISMATCH，线路送达 INVALID_REQUEST，
+// 判例引擎形状拒绝映射；尽力而为，无竞态保证）。
+message TopicOpRequest {
+  string         key           = 1;
+  TopicOp        op            = 2;
+  optional bytes payload_bytes = 3;   // PUBLISH 消息体（不透明字节；缺省=违例，零长度=合法空消息）
+  uint64         op_seq        = 4;   // 会话内单调写序号（仅 PUBLISH 有效，其余填 0）
+}
+
+// v8：topic 操作应答。拒绝态字段为零值形。subscription_id 仅 SUBSCRIBE 的 OK 有效
+// （Leader 登记表本地单调，TOPIC_MESSAGE 的路由键；换主重订阅后重新分配，SDK 句柄
+// 内部重映射）；topic_seq 仅 PUBLISH 的 OK 有效（Leader term 内按 key 单调的受理
+// 序号——单订阅交付升序、换主重新起算、跨 term 无承诺；命中去重槽的重发返回同一份）。
+message TopicOpResponse {
+  StatusCode status           = 1;   // OK / REJECT_SUBSCRIBERS / INVALID_REQUEST / NOT_LEADER / SESSION_EXPIRED / INTERNAL_ERROR
+  TopicOp    op               = 2;
+  uint64     subscription_id  = 3;   // 仅 SUBSCRIBE 的 OK 有效（0=无）
+  uint64     topic_seq        = 4;   // 仅 PUBLISH 的 OK 有效（0=无）
+}
+
+// v8：广播交付推送（服务器 → 订阅连接）。Envelope.request_id MUST 为 0 且 MUST NOT
+// 关联 request_id_ref——广播交付不绑定原请求（与 AWAIT_NOTIFY 的 ref 型推送相对），
+// 关联键为 subscription_id。topic_seq 为受理 Leader term 内发布序号（同订阅升序；
+// gap=该订阅丢弃推断依据，换 term 后基线重置）；publisher_sid 为发布方逻辑会话 id
+// （0=不可知）；publish_ts_ms 为受理节点时钟的受理时刻。payload_bytes 恒存在
+// （presence 纪律的交付侧对偶，字节级保真）。
+message TopicMessage {
+  string key             = 1;
+  uint64 subscription_id = 2;
+  uint64 topic_seq       = 3;
+  uint64 publisher_sid   = 4;
+  int64  publish_ts_ms   = 5;
+  bytes  payload_bytes   = 6;   // 恒存在的消息体（不透明字节）
 }

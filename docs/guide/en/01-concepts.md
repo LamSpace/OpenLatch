@@ -201,6 +201,51 @@ default). Elements live in the replicated log, owned by no session:
 - **No `iterator`/`contains`/`remove(Object)` surface**; batch consumption rides
   `drainTo` (subject to the `max-drain-bytes` reply budget).
 
+## 10. Broadcast publish/subscribe
+
+`OTopic` (protocol v8) is the coordination-plane counterpart of JDK
+`Flow.Publisher`/`SubmissionPublisher`: one key is one broadcast channel and
+every published message is delivered, best-effort, to all registered
+subscribers. It closes the tier-2 payload family and is the **only primitive
+that never touches the replication log** — topics have no replicated state;
+the subscription registry is Leader memory that lives and dies with a term.
+
+- **At-most-once (an explicit weakening)** — a `publish` return means the
+  server **accepted the message and enqueued it for fan-out**, never that any
+  subscriber received it. Buffer overflow, disconnects and the leader-change
+  window all lose messages; the server never retransmits or reports individual
+  losses. Where delivery must survive, use `OBlockingQueue`, not a topic.
+- **Weak backpressure = drop-newest with two buffer tiers** — each
+  subscription's server-side in-flight buffer (`max-subscription-buffer`,
+  default 256) drops **the newest message** and counts it when full, with the
+  already-queued messages still delivered; the SDK adds a local tier with the
+  same policy. A slow subscriber never backpressures publishers and is never
+  disconnected (deliberately unlike JDK `SubmissionPublisher`'s
+  overflow-close: closing a connection here would kill the session and release
+  every lock it holds). Losses surface only via `droppedCount()` (same-term
+  `topic_seq` gaps plus local overflow counts).
+- **Ordering is per-subscription within one Leader term** — a given
+  subscriber sees strictly ascending `topic_seq`; no global order across
+  publishers or subscriptions; `topic_seq` restarts after a leader change and
+  is not comparable across terms (missed messages are never replayed — the
+  SDK automatically re-subscribes and delivery resumes).
+- **Retry dedup is same-Leader only** — a same-`op_seq` resend hits the
+  per-session dedup slot and never double-fans-out; a retry crossing a leader
+  change (including manual application-level retries) **may double-deliver**:
+  consumer idempotence is the application's obligation.
+- **Subscriptions bind to the session (the deliberate inverse of "death
+  never swallows elements")** — when a subscriber's process dies it is
+  unsubscribed (registry entry, buffer and dedup slot reclaimed on all three
+  paths). Queues carry resident data that must survive; topics carry delivery
+  events that need not. Long-lived subscribers should `unsubscribe()`
+  explicitly; registrations and buffers have a standing server-side cost.
+- **Payload and version discipline follow the tier-2 rules** — opaque
+  non-null message bodies (zero length is a legal empty message, queue-element
+  precedent) clamped per message by `max-value-bytes`; TOPIC messages require
+  a v8 handshake; a topic key colliding with another family's key is
+  ingress-rejected on a best-effort read-only probe — "one key, one form" is
+  an **application-side contract** for topics, not mechanical exclusion.
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -215,6 +260,7 @@ default). Elements live in the replicated log, owned by no session:
 | Atomic reference | — | opaque payload ≤ `maxValueBytes` (default 4KB, clamped authoritatively at ingress, zero effect on overflow); null and empty-string are distinct; version stamp/dedup isomorphic with scalars; entry and payload never reclaimed (v6) |
 | Cyclic barrier | — | N-party rendezvous, reusable generations; **leaving breaks the current generation** (death/timeout/interrupt/break — stronger than the JDK); no sticky broken state, no `reset()`; the last arriver runs the action (v5) |
 | Bounded queue | — | elements bound to the key, not the session (**producer death never swallows them** — stronger than the JDK); declared capacity, two "fulls" split (element-full = false/park, waiter-full = OVERLOADED); dedup slots: no double-insert, identical replay; elements never null; delay form folds expiry at the apply point, per-tie FIFO (v7) |
+| Broadcast topic | — | at-most-once; weak backpressure = drop-newest across two buffer tiers (never backpressures, never disconnects); per-subscription ascending seq within one term, rebased at leader change; dedup only same-Leader (cross-term retries may double-deliver — consumer idempotence required); **death unsubscribes** (the queue's inverse); "one key, one form" is an application contract (v8) |
 
 ## Next
 

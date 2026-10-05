@@ -65,6 +65,8 @@ class ConsoleStandaloneTest {
     private static OSemaphore semHolder;
     /** 屏障句柄。 */
     private static OCountDownLatch gate;
+    /** v8 订阅句柄（贯穿用例，防提前退订）。 */
+    private static io.github.lamspace.openlatch.client.OTopicSubscription topicSub;
 
     /** 控制台实际监听端口（随机）。 */
     @Value("${local.server.port}")
@@ -87,6 +89,7 @@ class ConsoleStandaloneTest {
     /**
      * 预置负载：order:1 持有+排队、pool:db 2/3 许可+3 许可排队、gate:boot
      * 计数 2 含一个 awaiter；等待三把 key 在锁列表页可见后再进用例。
+     * v8 追加 alerts:topic 订阅与一条哨兵载荷发布（页面零外发断言）。
      *
      * @throws Exception 连接/预置失败
      */
@@ -149,6 +152,15 @@ class ConsoleStandaloneTest {
             }
         });
         awaitVisible("/keys", "tasks:queue");
+        // v8 topic：订阅 alerts:topic 并发布一条带哨兵载荷的消息——
+        // 订阅维须可见，载荷在一切管理页面零出现。
+        io.github.lamspace.openlatch.client.OTopic alerts =
+                seedClient.newTopic("alerts:topic");
+        topicSub = alerts.subscribe(message -> {
+            // 观察哨：交付到本地即可，页面断言不依赖它。
+        });
+        alerts.publish("console-payload-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        awaitVisible("/keys", "alerts:topic");
     }
 
     /** 关停服务器与客户端（daemon 阻塞线程随连接关闭自然脱队）。 */
@@ -209,13 +221,15 @@ class ConsoleStandaloneTest {
     void keysPageListsAllFamiliesWithPagingInfo() {
         String body = get("/keys");
         assertThat(body).contains("order:1").contains("pool:db").contains("gate:boot")
-                .contains("stage:sync").contains("tasks:queue")
+                .contains("stage:sync").contains("tasks:queue").contains("alerts:topic")
                 .contains("lock").contains("semaphore").contains("latch").contains("barrier")
-                .contains("queue");
-        // 五行 key（链接计数），总条数读数为 5（pager 的 <span>5</span>）。
+                .contains("queue").contains("topic");
+        // 六行 key（链接计数），总条数读数为 6（pager 的 <span>6</span>）。
         assertThat(org.springframework.util.StringUtils.countOccurrencesOf(
-                body, "/key?node=")).isEqualTo(5);
-        assertThat(body).contains("<span>5</span>");
+                body, "/key?node=")).isEqualTo(6);
+        assertThat(body).contains("<span>6</span>");
+        // topic 行读数（订阅数；Leader 本地登记注记）。
+        assertThat(body).contains("1 订阅（Leader 本地登记）");
         // 屏障行读数（parties · 世代 · 到场）。
         assertThat(body).contains("2 方 · 世代 1 · 到场 1");
         // 队列行读数（容量 · 深度 · 队首预览——全量元素不外发）。
@@ -247,6 +261,16 @@ class ConsoleStandaloneTest {
         assertThat(queue).contains("容量 2").contains("深度 2").contains("驻留 2B")
                 .contains("等容量");
         assertThat(queue).contains("无持有者（队列元素绑定 key 不绑定会话，无持有语义）");
+        // v8 topic 明细：订阅读数 + 订阅者区段 + 无持有/无等待语义占位；
+        // 哨兵载荷在所有页面零出现（观察面零放大）。
+        String topic = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=alerts:topic");
+        assertThat(topic).contains("订阅 1").contains("<h3>订阅者</h3>")
+                .contains("无持有者（广播订阅不持有 key，无持有语义）")
+                .contains("无人等待（广播交付经服务端推送通道，无等待队列）")
+                .doesNotContain("console-payload-secret");
+        assertThat(get("/keys")).doesNotContain("console-payload-secret");
+        assertThat(get("/")).doesNotContain("console-payload-secret");
     }
 
     @Test

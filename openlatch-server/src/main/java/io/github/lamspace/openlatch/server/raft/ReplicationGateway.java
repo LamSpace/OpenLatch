@@ -122,6 +122,20 @@ public final class ReplicationGateway implements ApplyObserver {
         this.queueReadyDriver = driver;
     }
 
+    /** v8 topic 登记表（会话摘除与换主清零钩子；可为未挂载）。 */
+    private volatile io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry;
+
+    /**
+     * 回挂 topic 登记表（v8，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
+     * 应用点摘除该会话的订阅登记/缓冲/去重槽，并在当选事件清零登记表
+     * （判例 {@code WaitQueue} 换主清零）。
+     *
+     * @param registry 登记表，可为 {@code null}（摘挂）
+     */
+    public void setTopicRegistry(io.github.lamspace.openlatch.server.topic.TopicRegistry registry) {
+        this.topicRegistry = registry;
+    }
+
     /** v7 队列就绪驱动（当选首扫钩子；可为未挂载）。 */
     private volatile QueueReadyDriver queueReadyDriver;
 
@@ -238,6 +252,12 @@ public final class ReplicationGateway implements ApplyObserver {
         }
         if (!wasLeader && isLeader) {
             waitQueue.clear();
+            io.github.lamspace.openlatch.server.topic.TopicRegistry tr = topicRegistry;
+            if (tr != null) {
+                // v8：订阅登记随换主清零——客户端 home 迁移后自动重订阅
+                // （判例挂起者清零重挂；登记表无复制来源，新任期从零开始）。
+                tr.clear();
+            }
             LeaseExpiryDriver driver = expiryDriver;
             if (driver != null) {
                 driver.onLeadershipGained();
@@ -435,6 +455,12 @@ public final class ReplicationGateway implements ApplyObserver {
                         .parseFrom(entry.getCommandPayload().toByteArray());
                 for (WaitQueue.Waiter w : waitQueue.purgeSession(sp.getSessionId(), now)) {
                     pushAwaitNotify(w, w.key());
+                }
+                io.github.lamspace.openlatch.server.topic.TopicRegistry tr = topicRegistry;
+                if (tr != null) {
+                    // v8：死亡即退订——摘除该会话全部订阅登记、缓冲与去重槽
+                    //（防泄漏三路回收之一；失联探针补发的 SESSION_CLOSE 同径）。
+                    tr.removeSession(sp.getSessionId());
                 }
                 // 离场即破障经会话关闭传播：被破世代的存活等待者收放行通知。
                 for (String bkey : result.getBarrierReleasedKeysList()) {

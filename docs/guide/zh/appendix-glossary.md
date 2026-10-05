@@ -42,3 +42,9 @@
 | 双轨等待 | dual-track waiting | 队列挂起的两种身份：等容量（put-waiter）与等元素（take-waiter），按轨独立计位次与唤醒（v7） |
 | 应用点回弹 | apply-point bounce | 预检放行提交后应用点不可满足：阻塞请求经改写回 QUEUED 原位续挂，对调用者透明（v7） |
 | 队首门 | head gate | 非队首的挂起者重发不得越过在队前辈直接生效（单机条目与 Leader 预检两路同判），保证唤醒授予序=挂起到达序（v7） |
+| 广播 term | broadcast term | 一任 Leader 任期的广播域：`topic_seq` 仅在 term 内单调有序，换主后重新起算、跨 term 不可比（v8） |
+| topic_seq | topic sequence number | 广播消息在 term 内的受理序号（Leader 内存分配、不入日志）；单订阅视角严格升序，其缺口即订阅者丢弃推断依据（v8） |
+| 弱背压 | weak backpressure | 广播的显式背压契约：每订阅两级缓冲（服务端 + SDK 本地）满则 drop-newest——不反压发布者、不断开订阅，丢弃仅计数不通知（v8） |
+| drop-newest | drop-newest | 缓冲溢出裁决：丢最新一条并计数，既有缓冲照常交付（区别于 JDK `SubmissionPublisher` 的 overflow-close 判例）（v8） |
+| gap 推断 | gap inference | 订阅侧丢弃计数：同 term 内 `topic_seq` 跳号数 + 本地缓冲溢出数，`droppedCount()` 的构成（v8） |
+| 死亡即退订 | death-as-unsubscribe | topic 订阅与存活会话绑定：订阅者进程死亡即回收登记、缓冲与去重槽（与队列"死亡不吞元素"刻意相反）（v8） |

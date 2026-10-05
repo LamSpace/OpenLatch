@@ -60,6 +60,12 @@ public final class ScriptedServer implements AutoCloseable {
     private volatile Function<Envelope, Envelope> handler;
     /** 入站请求记录（跨连接汇聚，断言到达点用）。 */
     private final List<Envelope> received = new CopyOnWriteArrayList<>();
+    /**
+     * 最近活跃的服务端侧连接（v8 推送桩：{@link #push} 经此写主动帧，
+     * 模拟 {@code TOPIC_MESSAGE}/{@code AWAIT_NOTIFY} 等非应答推送）。
+     * 多连接桩场景以最后入站者为准——测试均为单客户端。
+     */
+    private volatile Channel activeChild;
 
     /**
      * 启动桩服务器于空闲端口。
@@ -90,6 +96,7 @@ public final class ScriptedServer implements AutoCloseable {
                                             return;
                                         }
                                         received.add(env);
+                                        activeChild = ctx.channel();
                                         Envelope resp = handler.apply(env);
                                         if (resp != null) {
                                             ctx.writeAndFlush(resp);
@@ -141,6 +148,19 @@ public final class ScriptedServer implements AutoCloseable {
     /** 清空入站记录（分段断言用）。 */
     public void clearReceived() {
         received.clear();
+    }
+
+    /**
+     * 向最近活跃连接主动写一帧（服务端推送模拟：{@code TOPIC_MESSAGE}
+     * 交付、{@code AWAIT_NOTIFY} 通知等）。无已建立连接即静默丢弃。
+     *
+     * @param envelope 推送信封
+     */
+    public void push(Envelope envelope) {
+        Channel child = activeChild;
+        if (child != null) {
+            child.writeAndFlush(envelope);
+        }
     }
 
     @Override
