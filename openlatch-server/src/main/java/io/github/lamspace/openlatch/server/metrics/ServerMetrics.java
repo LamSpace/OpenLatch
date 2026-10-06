@@ -90,6 +90,68 @@ public final class ServerMetrics {
     public static final String ATOMIC_TOTAL = "openlatch.server.atomic.total";
     /** v5：循环屏障操作计数（按操作/应答状态码维度），counter。 */
     public static final String BARRIER_TOTAL = "openlatch.server.barrier.total";
+    /** v7：队列操作计数（按操作/应答状态码维度），counter。 */
+    public static final String QUEUE_TOTAL = "openlatch.server.queue.total";
+    /**
+     * v7：单 key 队列元素深度最大值（抓取时刻采样），gauge——驻留口径
+     * （延时形态含未到期项）。与 {@link #QUEUE_DEPTH_MAX}（等待队列深度、
+     * 等待者口径）是两条互不相干的量纲线，MUST NOT 混名混义。
+     */
+    public static final String ELEMENTS_DEPTH_MAX = "openlatch.server.elements.depth.max";
+    /** v8：topic 操作计数（按操作/应答状态码维度），counter。 */
+    public static final String TOPIC_TOTAL = "openlatch.server.topic.total";
+    /**
+     * v8：服务端侧 drop-newest 累计丢弃条数，counter——慢消费者缓冲满
+     * <b>不产生拒绝码形</b>，本线是丢弃的唯一服务端计数（判例双"满"
+     * 分轨的第三轨：topic 的"满"在交付面而非应答面）。
+     */
+    public static final String TOPIC_DROPPED_TOTAL = "openlatch.server.topic.dropped.total";
+    /**
+     * v8：单 key 订阅数最大值（抓取时刻采样），gauge——订阅口径。
+     * 与 {@link #QUEUE_DEPTH_MAX}（等待者）、{@link #ELEMENTS_DEPTH_MAX}
+     * （元素驻留）是三条互不相干的量纲线（"depth/subscribers"三口径），
+     * MUST NOT 混名混义；订阅者 MUST NOT 计入 {@link #WAITERS}。
+     */
+    public static final String TOPIC_SUBSCRIBERS_MAX = "openlatch.server.topic.subscribers.max";
+    /**
+     * v9：条件 signal 家族操作计数（按操作/应答状态码维度），counter——
+     * await 不在本线（其生命周期落 {@link #ACQUIRE_TOTAL} 既有线，折叠边界的
+     * 计数面证据，防"条件自成一线"口径漂移）；{@code NOT_HELD} 权限拒绝线
+     * 单列可观测；status 可达面不含 {@code QUEUED}/{@code DENIED}/
+     * {@code OVERLOADED}（signal 家族恒即时回执，await 的等待满拒绝产生于
+     * 折叠侧、归 acquire 线）。
+     */
+    public static final String CONDITION_TOTAL = "openlatch.server.condition.total";
+    /**
+     * v9：锁 key 条件等待集人数最大值（抓取时刻采样），gauge——条件等待口径，
+     * 与 {@link #QUEUE_DEPTH_MAX}（等待队深）、{@link #ELEMENTS_DEPTH_MAX}
+     * （元素驻留）、{@link #TOPIC_SUBSCRIBERS_MAX}（订阅）并列为四条互不相干
+     * 的量纲线（"depth/elements/subscribers/conditions"四口径，注释互引），
+     * MUST NOT 混名混义；条件等待者 MUST 计入 {@link #WAITERS}
+     * （对照该线"订阅者不计入"的既有分轨——等待与订阅之别）。
+     */
+    public static final String CONDITION_WAITERS_MAX = "openlatch.server.condition.waiters.max";
+    /**
+     * v10：相位器操作计数线 {@code op ∈ (register/arrive/arrive_and_await/
+     * arrive_and_deregister/await_advance/cancel/query)}。两超限共码
+     * {@code OVERLOADED} 以 op 分轨（register 线=配额护栏、await_advance/
+     * arrive_and_await 线=合并等待深度护栏，判例 v7 队列双"满"分轨的 op 侧
+     * 对偶）；{@code DENIED}/{@code BARRIER_BROKEN}/{@code REJECT_SUBSCRIBERS}/
+     * {@code NOT_HELD} 对 phaser 恒不可达（无立即式拒绝、无破相、无持有概念）。
+     * 判例 {@link #CONDITION_TOTAL} 常量注。
+     */
+    public static final String PHASER_TOTAL = "openlatch.server.phaser.total";
+    /**
+     * v10："phaser 键注册 party 总数"量纲线（抓取时刻单键峰值）——
+     * <b>应到集合口径而非等待口径</b>：与 {@code queue.depth.max}（等待队深）/
+     * {@code elements.depth.max}（元素）/{@code topic.subscribers.max}（订阅）/
+     * {@code condition.waiters.max}（条件等待）并列为第五口径（"depth/elements/
+     * subscribers/conditions/parties"五口径，注释互引、MUST NOT 混名混义）；
+     * phaser 挂起等待项不为本线计数（其入 {@code waiters} 合计口径——
+     * "registered 是不是等待数"的防混读句）。
+     */
+    public static final String PHASER_PARTIES_REGISTERED_MAX =
+            "openlatch.server.phaser.parties.registered.max";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -101,6 +163,8 @@ public final class ServerMetrics {
     public static final String ATOMIC_KIND_INTEGER = "integer";
     /** 原子形态标签值：boolean。 */
     public static final String ATOMIC_KIND_BOOLEAN = "boolean";
+    /** 原子形态标签值：reference（v6 有值引用）。 */
+    public static final String ATOMIC_KIND_REFERENCE = "reference";
 
     /** 耗时 result 标签值：授予。 */
     public static final String RESULT_GRANTED = "granted";
@@ -246,6 +310,7 @@ public final class ServerMetrics {
                     case LOCK_TYPE_ATOMIC_LONG -> ATOMIC_KIND_LONG;
                     case LOCK_TYPE_ATOMIC_INTEGER -> ATOMIC_KIND_INTEGER;
                     case LOCK_TYPE_ATOMIC_BOOLEAN -> ATOMIC_KIND_BOOLEAN;
+                    case LOCK_TYPE_ATOMIC_REFERENCE -> ATOMIC_KIND_REFERENCE;
                     default -> "other";
                 })
                 .tag("op", switch (op) {
@@ -282,6 +347,95 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记录一次已受理（形状合法且经入口钳制）的队列操作应答：计数线
+     * {@code queue_total{op,status}}。双"满"语义分轨可观测——元素不可满足
+     * 的立即式以 {@code status=DENIED}、等待深度超限以 {@code status=
+     * OVERLOADED}（判例锁深度护栏映射）；挂起 {@code QUEUED}、回弹后续挂
+     * 亦 {@code QUEUED}（改写后应答）。形状非法的请求不计数（杜绝维度
+     * 伪造）。调用点在单机 {@code RequestDispatcher.dispatchQueueOp} 与
+     * 集群 {@code ClusterRequestHandler.handleQueueOp}——两形态同一收口口径。
+     *
+     * @param op     协议操作枚举（词表 put/take/drain/peek/size）
+     * @param status 应答协议状态码
+     */
+    public void recordQueue(io.github.lamspace.openlatch.protocol.QueueOp op,
+                            StatusCode status) {
+        Counter.builder(QUEUE_TOTAL)
+                .tag("op", switch (op) {
+                    case QUEUE_OP_PUT -> "put";
+                    case QUEUE_OP_TAKE -> "take";
+                    case QUEUE_OP_DRAIN -> "drain";
+                    case QUEUE_OP_PEEK -> "peek";
+                    case QUEUE_OP_SIZE -> "size";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
+     * 记录一次已受理（形状合法）的 topic 操作应答：计数线
+     * {@code topic_total{op,status}}。订阅操作恒立即回执（无 {@code QUEUED}
+     * 线）；{@code REJECT_SUBSCRIBERS} 为在带裁决单列线；缓冲满的丢弃
+     * 不经本线（无拒绝码形），计入 {@link #recordTopicDropped}。去重槽
+     * 命中的重放照常计 {@code OK}（受理事实不重复度量副作用）。
+     * 调用点在单机 {@code RequestDispatcher.dispatchTopicOp} 与集群
+     * {@code ClusterRequestHandler.handleTopicOp}——两形态同一收口口径。
+     *
+     * @param op     协议操作枚举（词表 subscribe/unsubscribe/publish）
+     * @param status 应答协议状态码
+     */
+    public void recordTopic(io.github.lamspace.openlatch.protocol.TopicOp op,
+                            StatusCode status) {
+        Counter.builder(TOPIC_TOTAL)
+                .tag("op", switch (op) {
+                    case TOPIC_OP_SUBSCRIBE -> "subscribe";
+                    case TOPIC_OP_UNSUBSCRIBE -> "unsubscribe";
+                    case TOPIC_OP_PUBLISH -> "publish";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
+     * 记录一次已受理（形状合法）的条件 signal 家族操作应答：计数线
+     * {@code condition_total{op,status}}。三操作恒立即回执（无 {@code QUEUED}
+     * 线）；{@code NOT_HELD} 权限拒绝单列可观测；LEAVE 幂等重放回执照常计
+     * {@code OK}。await 不经本线（折叠形态计数落 {@code acquire_total}，
+     * 判例 {@link #CONDITION_TOTAL} 常量注）。调用点在单机
+     * {@code RequestDispatcher.dispatchConditionOp} 与集群
+     * {@code ClusterRequestHandler.handleConditionOp}——两形态同一收口口径；
+     * 单机侧计数含搬运效果（搬运后授予归 acquire 线）。
+     *
+     * @param op     协议操作枚举（词表 signal/signal_all/leave）
+     * @param status 应答协议状态码
+     */
+    public void recordCondition(io.github.lamspace.openlatch.protocol.ConditionOp op,
+                                StatusCode status) {
+        Counter.builder(CONDITION_TOTAL)
+                .tag("op", switch (op) {
+                    case CONDITION_OP_SIGNAL -> "signal";
+                    case CONDITION_OP_SIGNAL_ALL -> "signal_all";
+                    case CONDITION_OP_LEAVE -> "leave";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
+     * 记录服务端侧 drop-newest 丢弃（登记表监听器逐条回调）。
+     *
+     * @param n 本次丢弃条数（{@code >= 1}；0/负数为空操作）
+     */
+    public void recordTopicDropped(long n) {
+        if (n > 0) {
+            Counter.builder(TOPIC_DROPPED_TOTAL).register(registry).increment(n);
+        }
+    }
+
+    /**
      * 租约到期强制释放计数（单机由扫描线程按 {@code expireDue()} 返回值
      * 累加；集群由状态机应用侧按实际释放逐条累加）。
      *
@@ -294,21 +448,83 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记一次 phaser 操作（v10）。线路操作枚举映射为标签词表小写蛇形
+     * （{@code PHASER_OP_ARRIVE_AND_AWAIT → arrive_and_await}）；
+     * 判例 {@link #recordCondition}。
+     *
+     * @param op     协议操作枚举
+     * @param status 应答状态码
+     */
+    public void recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp op,
+            StatusCode status) {
+        Counter.builder(PHASER_TOTAL)
+                .tags("op", phaserOpLabel(op), "status", status.name())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * phaser 操作词标签（去前缀小写）。
+     *
+     * @param op 协议操作枚举
+     * @return 标签词
+     */
+    private static String phaserOpLabel(io.github.lamspace.openlatch.protocol.PhaserOp op) {
+        return switch (op) {
+            case PHASER_OP_REGISTER -> "register";
+            case PHASER_OP_ARRIVE -> "arrive";
+            case PHASER_OP_ARRIVE_AND_AWAIT -> "arrive_and_await";
+            case PHASER_OP_ARRIVE_AND_DEREGISTER -> "arrive_and_deregister";
+            case PHASER_OP_AWAIT_ADVANCE -> "await_advance";
+            case PHASER_OP_CANCEL -> "cancel";
+            case PHASER_OP_QUERY -> "query";
+            default -> "unknown";
+        };
+    }
+
+    /**
      * 绑定单机形态 gauge（弱一致回调读数，抓取时实时计算）：
      * {@code locks.held{type}} 两线、{@code waiters}、{@code queue.depth.max}、
      * {@code sessions}。仅单机装配调用（集群形态见 {@link #bindClusterGauges}）。
      *
      * @param core     锁语义核心
      * @param sessions 本节点会话注册表
+     * @param topics   topic 登记表（{@code null}=夹具无 topic 面，不注册
+     *                 {@code subscribers.max} gauge）
      */
-    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions) {
+    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions,
+                                     io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         Gauge.builder(LOCKS_HELD, core, c -> c.stats().heldLocks())
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, core, c -> c.stats().heldSemaphores())
                 .tag("type", TYPE_SEMAPHORE).register(registry);
         Gauge.builder(WAITERS, core, c -> c.stats().totalWaiters()).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, core, c -> c.stats().maxQueueDepth()).register(registry);
+        Gauge.builder(ELEMENTS_DEPTH_MAX, core, CoreEngine::maxElementsDepth).register(registry);
+        if (topics != null) {
+            Gauge.builder(TOPIC_SUBSCRIBERS_MAX, topics,
+                    io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
+                    .register(registry);
+        }
+        // v9：条件等待口径（单机=core 条目等待集读数；四口径互引见常量注。
+        // totalWaiters 口径已含条件等待者——本线为单键峰值口径）。
+        Gauge.builder(CONDITION_WAITERS_MAX, core, CoreEngine::maxConditionWaiters)
+                .register(registry);
+        // v10：注册 party 峰值（单机=core 条目账簿读数；waiters 合计已由
+        // stats().totalWaiters 含 phaser 挂起项——五口径互引见常量注）。
+        Gauge.builder(PHASER_PARTIES_REGISTERED_MAX, core, CoreEngine::maxPhaserRegistered)
+                .register(registry);
         bindSessionsGauge(sessions);
+    }
+
+    /**
+     * 单机形态 gauge（无 topic 面的既有夹具兼容形态）。
+     *
+     * @param core     锁语义核心
+     * @param sessions 本节点会话注册表
+     */
+    public void bindStandaloneGauges(CoreEngine core, ServerSessionRegistry sessions) {
+        bindStandaloneGauges(core, sessions, null);
     }
 
     /**
@@ -323,18 +539,105 @@ public final class ServerMetrics {
      * @param sessions   本节点会话注册表
      * @param nodeId     本节点 id（{@code is_leader} 判定与标签）
      * @param tracker    Leader 提示单源视图
+     * @param topics     本节点 topic 登记表（Leader 任期内非空；{@code null}=
+     *                   夹具无 topic 面，不注册 {@code subscribers.max} gauge）
+     * @param conditions 本节点条件等待登记表（Leader 任期内非空；{@code null}=
+     *                   夹具无条件面，不注册 {@code condition.waiters.max} gauge，
+     *                   且 {@code waiters} 合计不含条件等待者）
      */
     public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
                                   ServerSessionRegistry sessions, int nodeId,
-                                  LeaderTracker tracker) {
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, topics, conditions, null);
+    }
+
+    /**
+     * 集群形态 gauge（v10 全参形态：追加 phaser 等待簿记）。
+     *
+     * @param shadow     复制状态影子表（本副本）
+     * @param waitQueue  本节点等待队列（Leader 任期内非空）
+     * @param sessions   本节点会话注册表
+     * @param nodeId     本节点 id
+     * @param tracker    Leader 提示单源视图
+     * @param topics     topic 登记表，可为 {@code null}
+     * @param conditions 条件等待登记表，可为 {@code null}
+     * @param phasers    phaser 等待簿记，可为 {@code null}（无 phaser 面时
+     *                   {@code waiters} 合计不含 phaser 等待项、不注册
+     *                   parties 峰值线）
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions,
+                                  io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers) {
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[0])
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[1])
                 .tag("type", TYPE_SEMAPHORE).register(registry);
-        Gauge.builder(WAITERS, waitQueue, WaitQueue::totalWaiters).register(registry);
+        // v9 口径：waiters 合计加条件等待者（Leader 本地登记表读数；对照
+        // 单机 stats().totalWaiters 天然含集，两形态同"等待总数含条件"语义）。
+        Gauge.builder(WAITERS, waitQueue, q -> q.totalWaiters()
+                + (conditions == null ? 0 : conditions.totalCount())
+                + (phasers == null ? 0 : phasers.totalCount())).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
+        Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
+        if (topics != null) {
+            // 口径同注：订阅数只在登记表所属任期非零（非 Leader 恒空表），
+            // 与等待队深/元素深度并列为第三口径（常量 Javadoc 互引）。
+            Gauge.builder(TOPIC_SUBSCRIBERS_MAX, topics,
+                    io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
+                    .register(registry);
+        }
+        if (conditions != null) {
+            // v9：条件等待口径（Leader 本地登记表单键峰值；非 Leader 恒空表
+            // 如实零读，判例 topic_subscribers.max 任期口径句）。
+            Gauge.builder(CONDITION_WAITERS_MAX, conditions,
+                    io.github.lamspace.openlatch.server.condition.ConditionRegistry::maxCountCurrent)
+                    .register(registry);
+        }
+        if (phasers != null) {
+            // v10：注册 party 峰值读影子表账簿（复制态，任期口径同 condition：
+            // 非 Leader 镜像未推进时如实读数；等待簿记仅供上方合计加数）。
+            Gauge.builder(PHASER_PARTIES_REGISTERED_MAX, shadow,
+                    ShadowTable::phaserRegisteredMax).register(registry);
+        }
         bindSessionsGauge(sessions);
         bindClusterIsLeader(nodeId, () -> tracker.snapshot().leaderNodeId() == nodeId);
+    }
+
+    /**
+     * 集群形态 gauge（v8 六参兼容形态：无条件面装配，等价 conditions=null）。
+     *
+     * @param shadow    复制状态影子表
+     * @param waitQueue 本节点等待队列
+     * @param sessions  本节点会话注册表
+     * @param nodeId    本节点 id
+     * @param tracker   Leader 提示单源视图
+     * @param topics    topic 登记表
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, topics, null);
+    }
+
+    /**
+     * 集群形态 gauge（无 topic 面的既有夹具兼容形态）。
+     *
+     * @param shadow    复制状态影子表
+     * @param waitQueue 本节点等待队列
+     * @param sessions  本节点会话注册表
+     * @param nodeId    本节点 id
+     * @param tracker   Leader 提示单源视图
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, null);
     }
 
     /**

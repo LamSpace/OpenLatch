@@ -25,6 +25,14 @@ enum MessageType {
   BARRIER_AWAIT       = 15; // v5：循环屏障到场等待（QUEUED/AWAIT_NOTIFY 复用，独立通道）
   BARRIER_LEAVE       = 16; // v5：循环屏障离场/破障（在队离场、超时、中断、显式 break 共用）
   BARRIER_ACTION_DONE = 17; // v5：循环屏障动作了结（执行者回报 barrierAction 完成）
+  QUEUE_OP         = 18;   // v7：队列操作（独立消息对，不走 ACQUIRE；读写皆全量经提交）
+  TOPIC_OP         = 19;   // v8：topic 操作（独立消息对，不走 ACQUIRE；零复制日志——受理与 fan-out 全在 Leader 本地）
+  TOPIC_MESSAGE    = 20;   // v8：服务器 → 订阅连接 广播交付推送（request_id=0、无 ref，按 subscription_id 关联）
+  CONDITION_OP     = 21;   // v9：条件变量操作（独立消息对；signal 家族零日志——Leader 本地等待集→等待队列搬运与摘除。
+                           // AWAIT 不在本词表——await 为 ACQUIRE 携带 condition 字段的折叠形态，见 AcquireRequest）
+  PHASER_OP        = 22;   // v10：相位器操作（单消息对；变异全入日志——注册/到场/离场逐条经提交，
+                           // 等待/取消/查询 Leader 本地零提交。AWAIT_ADVANCE 与 ARRIVE_AND_AWAIT 的
+                           // 等待半程骑 AWAIT_NOTIFY 推送，v10 零新推送类型；唤醒重发恒 OK 终态）
 }
 
 // 锁类型。
@@ -40,6 +48,12 @@ enum LockType {
   LOCK_TYPE_ATOMIC_INTEGER = 8;  // v4：原子 int 形态判别（int32 域 wrap）
   LOCK_TYPE_ATOMIC_BOOLEAN = 9;  // v4：原子 boolean 形态判别（值域 {0,1}）
   LOCK_TYPE_BARRIER        = 10; // v5：循环屏障定型判别（屏障操作经 BARRIER_* 消息）
+  LOCK_TYPE_ATOMIC_REFERENCE = 11; // v6：原子有值引用形态判别（仅 ATOMIC_OP 消息携带；载荷为不透明字节，≤maxValueBytes 由接入层钳制）
+  LOCK_TYPE_QUEUE        = 12; // v7：有界队列形态判别（仅 QUEUE_OP 消息携带；出队按到达序；ACQUIRE 携带属违例）
+  LOCK_TYPE_DELAY_QUEUE  = 13; // v7：延时队列形态判别（仅 QUEUE_OP 消息携带；出队按最早到期序、同到期保持到达序；ACQUIRE 携带属违例）
+  LOCK_TYPE_PHASER       = 14; // v10：相位器家族判别（动态注册/到场/离场的会合原语；形态由 PHASER_OP 消息类型隐含、
+                                // 本值不入请求字段——判例 LOCK_TYPE_BARRIER；ACQUIRE/其余车道携带属违例。
+                                // 编号证据线：本值与 RaftEntryType.PHASER_OP_ENTRY=14 构成 v10 的 14 号上界）
 }
 
 // 状态码。
@@ -57,6 +71,8 @@ enum StatusCode {
   NOT_LEADER      = 10;  // v2 启用（Phase 1 预留）：本节点非当值 Leader 拒绝写请求，随附 leader 提示
   INTERNAL_ERROR  = 11;
   BARRIER_BROKEN  = 12;  // v5：在带裁决——等待项所属世代已破障（非请求错误，连接与会话不受影响）
+  REJECT_SUBSCRIBERS = 13; // v8：在带裁决——key 订阅数达 max-subscribers-per-key 上限拒绝新增 SUBSCRIBE
+                           //（该 key 既有订阅零扰动；非请求错误，连接与会话不受影响，判例 BARRIER_BROKEN 形态）
 }
 
 // v4：原子变量操作类型（ATOMIC_OP_REQUEST.op）。GET 为读数零迁移；
@@ -106,6 +122,15 @@ message Envelope {
     BarrierLeaveResponse      barrier_leave_response      = 37;  // v5
     BarrierActionDoneRequest  barrier_action_done_request  = 38;  // v5
     BarrierActionDoneResponse barrier_action_done_response = 39;  // v5
+    QueueOpRequest            queue_op_request             = 40;  // v7
+    QueueOpResponse           queue_op_response            = 41;  // v7
+    TopicOpRequest            topic_op_request             = 42;  // v8
+    TopicOpResponse           topic_op_response            = 43;  // v8
+    TopicMessage              topic_message                = 44;  // v8：广播交付推送（服务器→订阅者）
+    ConditionOpRequest        condition_op_request         = 45;  // v9
+    ConditionOpResponse       condition_op_response        = 46;  // v9
+    PhaserOpRequest           phaser_op_request            = 47;  // v10
+    PhaserOpResponse          phaser_op_response           = 48;  // v10
   }
 }
 
@@ -133,6 +158,15 @@ message AcquireRequest {
   int64    wait_ms       = 5;   // -1 = 排队；0 = 立即式；>0 由客户端本地计时，语义等价于 -1
   int32    permits       = 6;   // v3：请求许可数，仅 SEMAPHORE 有效；0 按 1 处理，非 SEMAPHORE 携带 >1 拒绝
   int32    permits_total = 7;   // v3：许可总量断言，仅 SEMAPHORE 有效；建条目必填 >0，既有条目非零须匹配，0=不主张
+  // v9：条件等待折叠——presence 即本 ACQUIRE 携带 await 语义：经复制的应用点在
+  // 同一关键区内执行"若 (session_id,thread_id) 恰为持有归属则重入计数一步清零
+  // 并清租约（否则释放半程零操作——跨换主重挂非持有者属常态，权限降级面见规格），
+  // 随后以 (会话, request_id) 幂等登记入该 key `condition` 名下等待集；唤醒经
+  // AWAIT_NOTIFY（ref=本请求 request_id），原信封同 request_id 重发兑现队首授予。
+  // 形状纪律：非空且 UTF-8 字节 ≤maxKeyLength；wait_ms=0（立即式）携带本字段违例；
+  // lock_type 限 REENTRANT/SIMPLE/FAIR，READ/WRITE 与其余家族携带违例；
+  // permits/permits_total 对本折叠无意义（0）。缺省 presence 时既有获取语义逐项不变。
+  optional string condition = 8;
 }
 
 message AcquireResponse {
@@ -179,7 +213,7 @@ message LeaseRenewResponse {
 
 message AwaitNotify {
   string key            = 1;
-  int64  request_id_ref = 2;  // 指向原 ACQUIRE/LATCH_AWAIT/BARRIER_AWAIT 的 request_id
+  int64  request_id_ref = 2;  // 指向原 ACQUIRE/LATCH_AWAIT/BARRIER_AWAIT/QUEUE_OP 的 request_id
 }
 
 // v3：屏障倒计数（Phase 3 详设 §2.1/design D1 精化）。count 为本次扣减量；
@@ -247,6 +281,10 @@ message AdminSummaryResponse {
   string     version          = 9;  // 服务端版本
   int32      atomic_entries   = 10; // v4：ATOMIC 条目数（无持有语义，单列，判例 latch_entries）
   int32      barrier_entries  = 11; // v5：BARRIER 条目数（无持有语义，单列，判例 latch_entries/atomic_entries）
+  int32      queue_entries    = 12; // v7：QUEUE 条目数（两形态合并计数；无持有语义，单列，判例 latch_entries/atomic_entries/barrier_entries）
+  int32      topic_entries    = 13; // v8：TOPIC 订阅登记键数（Leader 本地登记表读数，无持有语义单列；非 Leader 恒 0）
+  int32      phaser_entries   = 14; // v10：PHASER 条目数（复制态家族读数、各节点经镜像收敛一致——与 topic_entries 的
+                                    // Leader 本地表口径分轨；无持有语义单列，判例 latch/atomic/barrier/queue_entries）
 }
 
 message AdminListKeysRequest {
@@ -263,11 +301,32 @@ message AdminKeyInfo {
   int32  holders             = 3;  // 持有者数（Latch/ATOMIC/BARRIER 恒 0）
   int64  remaining_lease_ms  = 4;  // 剩余租约（受理节点时钟；未持有为 0）
   int32  waiter_count        = 5;  // 等待者数（非 Leader 视角恒 0）
-  string atomic_kind         = 6;  // v4：long/integer/boolean（非 ATOMIC 恒空）
-  sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0）
+  string atomic_kind         = 6;  // v4：long/integer/boolean/reference（非 ATOMIC 恒空）
+  sint64 atomic_value        = 7;  // v4：ATOMIC 当前值（非 ATOMIC 恒 0；reference 恒 0，读数见 payload 字段）
   int64  barrier_parties     = 8;  // v5：定型许可数（非 BARRIER 恒 0）
   int64  barrier_generation  = 9;  // v5：当前世代号，自 1 起单调递增（非 BARRIER 恒 0）
   int32  barrier_arrived     = 10; // v5：当前世代已到场数（非 BARRIER 恒 0）
+  // v6：有值引用条目的载荷观察对（非 reference 家族恒 0/空；预览为服务端
+  // 构造的恒定长度截断转义文本，全量载荷不外发）。
+  int32  atomic_payload_size    = 11; // 当前值字节数（null 值恒 0）
+  string atomic_payload_preview = 12; // 截断转义预览（null 值恒空串）
+  // v7：队列条目的观察字段（非 QUEUE 家族恒 0/空串；family 词表增 queue）。
+  sint64 queue_capacity           = 13; // 定型容量（非 QUEUE 恒 0）
+  int32  queue_depth              = 14; // 当前元素数（驻留口径，延时形态含未到期项；非 QUEUE 恒 0）
+  int32  queue_head_payload_size  = 15; // 队首元素字节数（空队恒 0）
+  string queue_head_payload_preview = 16; // 队首元素截断转义预览（空队恒空串；全量元素不外发）
+  // v8：topic 订阅登记行的观察字段（Leader 视角合并呈现，family=topic；
+  // 非 topic 行恒 0。已交付消息内容 MUST NOT 出现在任何管理应答）。
+  int32  topic_subscribers        = 17; // 订阅数（非 topic 行恒 0）
+  // v9：锁键条件等待数（Leader 本地条件等待集人数，与 waiter_count 的等待队列
+  // 口径互斥不重复——已搬运入队者计入 waiter_count；Follower 恒 0 如实）。
+  int32  condition_waiters        = 18; // 条件等待数（非 LOCK 行恒 0）
+  // v10：PHASER 行的账簿三计数（复制态，各节点读数一致；非 phaser 行恒 0）。
+  // 该行的 waiter_count（5 号位）承载等待集人数——Leader 本地口径、Follower 如实 0，
+  // 与三计数的复制态口径双轨同行（"账簿可读而等待数为零"非矛盾，见 family=phaser 行注记）。
+  sint64 phaser_phase              = 19; // 当前相位号（自 0 起单调递增；非 PHASER 恒 0）
+  int32  phaser_registered         = 20; // registeredParties 注册总数（非 PHASER 恒 0）
+  int32  phaser_arrived            = 21; // 当前相位到场计数（非 PHASER 恒 0）
 }
 
 message AdminListKeysResponse {
@@ -300,6 +359,26 @@ message AdminKeyWaiterInfo {
   int64  waited_ms   = 4;
   int32  permits     = 5;  // 请求许可数（锁/屏障恒 1）
   bool   notified    = 6;
+  int32  queue_track = 7;  // v7：队列挂起轨道判别（0=非队列等待者、1=等容量 put-waiter、2=等元素 take-waiter）
+}
+
+// v8：topic 订阅者明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空；
+// 订阅非持有非等待，无位次语义）。
+message AdminTopicSubscriberInfo {
+  int64  session_id      = 1;  // 订阅会话（逻辑会话 id）
+  uint64 subscription_id = 2;  // 登记表路由键（与 TOPIC_MESSAGE.subscription_id 同源）
+  int64  subscribed_at_ms = 3; // 订阅建立时刻（epoch 毫秒，受理节点时钟）
+}
+
+// v9：条件等待明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空——等待集为
+// Leader 本地易失态，Follower 如实零读；在集身份=(会话,请求)，thread_id 为
+// 折叠 ACQUIRE 的归属线程读数。已搬运入队者不在本列表——见 waiters 区段）。
+message AdminConditionWaiterInfo {
+  string condition        = 1;  // 条件名（命名寻址文本，无内容面）
+  int64  session_id       = 2;  // 等待会话（逻辑会话 id）
+  int64  request_id       = 3;  // 原携带 condition 的 ACQUIRE 的 request_id（唤醒通知关联键）
+  int64  thread_id        = 4;  // 归属线程（折叠 ACQUIRE 的 thread_id 读数）
+  int64  registered_at_ms = 5;  // 登记时刻（受理节点应用时刻读数；换主重挂后重新计时）
 }
 
 message AdminKeyDetailResponse {
@@ -314,7 +393,8 @@ message AdminKeyDetailResponse {
   int64  latch_total          = 9;   // LATCH 专属，其余 0
   int64  latch_remaining      = 10;  // LATCH 专属，其余 0（-1 恒不出现：未命中走 status）
   bool   wait_queue_leader_only = 11; // true=本节点非 Leader，等待队列区无数据
-  // v4：ATOMIC 专属四字段（其余家族恒空/0；kind 取 long/integer/boolean 词表）。
+  // v4：ATOMIC 专属四字段（其余家族恒空/0；kind 取 long/integer/boolean/reference 词表；
+  // reference 形态 atomic_value 恒 0、atomic_initial 恒 0，载荷读数见 v6 payload 字段对）。
   string atomic_kind     = 12;
   int64  atomic_initial  = 13;
   sint64 atomic_value    = 14;
@@ -325,6 +405,58 @@ message AdminKeyDetailResponse {
   int32  barrier_arrived        = 18;
   bool   barrier_action_pending = 19;  // true=当前世代处于动作待决态（执行者尚未回报）
   string barrier_last_final     = 20;  // 最近完结世代的了结形态：tripped/broken/none
+  // v6：有值引用条目的载荷观察对（非 reference 家族恒 0/空）。预览由服务端构造：
+  // 至多 64 字节前缀，可打印 UTF-8 原样、其余 \xHH 转义，长度恒定不随配置或
+  // 载荷膨胀；null 值 preview 为缺省空串、size 0，空字节串 preview 为 "\"\""
+  // （空引号标记），两态可区分。全量载荷 MUST NOT 出现在应答中。
+  int32  atomic_payload_size    = 21;  // 当前值字节数（null 值恒 0）
+  string atomic_payload_preview = 22;  // 截断转义预览（null 值恒空串）
+  // v7：队列条目的观察字段（非 QUEUE 家族恒 0/空串）。预览沿用原子引用同一
+  // 截断转义纪律：长度恒定不随配置或元素大小膨胀，全量元素列表 MUST NOT 出现。
+  sint64 queue_capacity             = 23;  // 定型容量（非 QUEUE 恒 0）
+  int32  queue_depth                = 24;  // 当前元素数（驻留口径；非 QUEUE 恒 0）
+  int64  queue_head_expiry_ms       = 25;  // 队首元素绝对到期时刻（DELAY_QUEUE 形态、受理节点
+                                           // 时钟读数；非 DELAY 形态或空队恒 0）
+  int64  queue_total_payload_bytes  = 26;  // 元素载荷字节之和（驻留治理观察；非 QUEUE 恒 0）
+  int32  queue_head_payload_size    = 27;  // 队首元素字节数（空队恒 0）
+  string queue_head_payload_preview = 28;  // 队首元素截断转义预览（空队恒空串）
+  // v8：TOPIC 专属订阅维（非 topic 键恒 0/空列表；topic 键仅 Leader 视角命中，
+  // 非 Leader 回明确未命中——登记表为 Leader 本地态，MUST NOT 空壳成功；
+  // 已交付消息内容零外发，计数与会程/序号/时刻三维为全部观察面）。
+  int32  topic_subscribers = 29;  // 订阅数（非 topic 恒 0）
+  repeated AdminTopicSubscriberInfo topic_subscribers_info = 30; // 订阅者明细（非 topic 恒空）
+  // v9：LOCK 专属条件等待维（非锁键恒 0/空列表；集合为 Leader 本地态——Follower
+  // 计数与明细如实零/空，与 wait_queue_leader_only 同口径标注；明细按集合到达序，
+  // 与 waiters 区段并列互斥计数、不重复；条件名即寻址文本，无内容外发面）。
+  int32  condition_waiters = 31;  // 条件等待数（非 LOCK 恒 0）
+  repeated AdminConditionWaiterInfo condition_waiters_info = 32; // 条件等待明细（非 LOCK 恒空）
+  // v10：PHASER 专属账簿与等待/配额维（非 phaser 键恒 0/空列表）。三计数与配额明细为
+  // 复制态——Follower 照常呈现（键详情命中，与 topic 键的 Follower 未命中分轨）；
+  // 等待明细为 Leader 本地集合——Follower 如实零/空并挂 wait_queue_leader_only 同口径
+  // 标注（"账簿完整而集合待重挂"的双速呈现为契约面）。等待明细按登记到达序、与
+  // waiters 区段并列不并号（phaser 等待非队首批授）；已通知未重发的了结窗项不在
+  // 明细（非等待态）。纯计数与身份，无内容外发面。
+  sint64 phaser_phase = 33;       // 当前相位号（非 PHASER 恒 0）
+  int32  phaser_registered = 34;  // registeredParties（非 PHASER 恒 0）
+  int32  phaser_arrived = 35;     // 当前相位到场计数（非 PHASER 恒 0）
+  repeated AdminPhaserWaiterInfo phaser_waiters_info = 36;   // 等待明细（非 PHASER 恒空）
+  repeated AdminPhaserPartyInfo  phaser_parties_info = 37;   // 每会话注册配额（账簿插入序=注册先后；非 PHASER 恒空）
+}
+
+// v10：phaser 等待明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空——等待集为
+// Leader 本地易失态，Follower 如实零读；在集身份=(会话,请求)，无归属线程概念）。
+message AdminPhaserWaiterInfo {
+  int64  session_id       = 1;  // 等待会话（逻辑会话 id）
+  int64  request_id       = 2;  // 等待方 PHASER_OP 的 request_id（唤醒通知关联键）
+  sint64 expected_phase   = 3;  // 已见相位号（唤醒谓词：当前相位 > 本值）
+  int64  registered_at_ms = 4;  // 登记时刻（受理节点应用时刻读数；换主重挂后重新计时）
+}
+
+// v10：phaser 每会话注册配额项（复制态账簿；parties 为该会话在 registeredParties
+// 中的应到份额，会话死亡时随 SESSION_CLOSE 隐式摘除）。
+message AdminPhaserPartyInfo {
+  int64  session_id = 1;  // 逻辑会话 id
+  int32  parties    = 2;  // 未离场的注册配额数（>0）
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -345,12 +477,14 @@ message AdminListSessionsResponse {
   repeated AdminSessionInfo sessions = 2;
 }
 
-// v4：原子变量操作请求（ATOMIC_OP）。lock_type 取三原子形态之一作形态判别；
-// op 之外的操作数按 op 消费：operand 为 SET/GET_AND_SET 新值、ADD 增量、
-// CAS/CAS_STAMPED 更新值；expected 为 CAS/CAS_STAMPED 期望值；
-// expected_version 仅在 ADD（条件加）与 CAS_STAMPED 上有非零意义，> 0 为版本
-// 断言、0 为不主张；initial_value 非零 = 建条目初值主张（判例：Semaphore/Latch
-// 总量非零主张），0 为不主张；op_seq 为会话内单调写序号（GET 填 0 不参与去重）。
+// v4：原子变量操作请求（ATOMIC_OP）。lock_type 取四原子形态之一作形态判别
+// （v6 起含 LOCK_TYPE_ATOMIC_REFERENCE）；op 之外的操作数按 op 消费：operand 为
+// SET/GET_AND_SET 新值、ADD 增量、CAS/CAS_STAMPED 更新值；expected 为
+// CAS/CAS_STAMPED 期望值；expected_version 仅在 ADD（条件加）与 CAS_STAMPED 上
+// 有非零意义，> 0 为版本断言、0 为不主张；initial_value 非零 = 建条目初值主张
+// （判例：Semaphore/Latch 总量非零主张），0 为不主张；op_seq 为会话内单调写序号
+// （GET 填 0 不参与去重）。有值引用形态以 v6 的 optional bytes 三字段承载载荷
+// 与主张（标量槽位恒 0，无 ADD 面）——见字段注。
 message AtomicOpRequest {
   string   key              = 1;
   AtomicOp op               = 2;
@@ -360,6 +494,15 @@ message AtomicOpRequest {
   sint64   expected_version = 6;
   sint64   initial_value    = 7;
   uint64   op_seq           = 8;
+  // v6：有值引用形态（lock_type = LOCK_TYPE_ATOMIC_REFERENCE）的载荷三字段，
+  // 显式 presence 口径——缺省=null，零长度=空字节串（两态可区分）：
+  // operand_bytes 为 SET/GET_AND_SET/CAS/CAS_STAMPED 落值（缺省=落 null）；
+  // expected_bytes 为 CAS/CAS_STAMPED 期望值（缺省=期望 null）；
+  // initial_bytes 为初值主张（缺省=不主张）。标量形态 MUST NOT 携带这三字段
+  // （presence 即形状违例）；引用形态的标量槽位 MUST 为 0。
+  optional bytes operand_bytes  = 9;
+  optional bytes expected_bytes = 10;
+  optional bytes initial_bytes  = 11;
 }
 
 // v4：原子变量操作应答。拒绝态四元组为零值形；GET 的 applied 恒 false，
@@ -372,6 +515,10 @@ message AtomicOpResponse {
   sint64     old_value = 4;
   sint64     value     = 5;
   sint64     version   = 6;
+  // v6：有值引用形态的载荷回执（显式 presence：缺省=null、零长度=""）；
+  // 标量形态与拒绝态恒缺省。
+  optional bytes old_value_bytes = 7;
+  optional bytes value_bytes     = 8;
 }
 
 // v5：循环屏障到场（BARRIER_AWAIT）。parties 为定型断言（>= 0，0 为不主张——
@@ -420,4 +567,195 @@ message BarrierActionDoneRequest {
 
 message BarrierActionDoneResponse {
   StatusCode status = 1;  // OK=世代已合拢放行 / BARRIER_BROKEN=世代已破（幂等）/ 错误码
+}
+
+// v7：队列操作类型（QUEUE_OP_REQUEST.op）。写 = PUT/TAKE/DRAIN，读 = PEEK/SIZE；
+// 读写皆全量经提交（判例 v4 GET），读类条目应用为零迁移、op_seq 填 0 不参与去重。
+enum QueueOp {
+  QUEUE_OP_PUT   = 0;  // 入队（承载 put/offer 双语义，见 blocking）
+  QUEUE_OP_TAKE  = 1;  // 出队消费（承载 take/poll 双语义，见 blocking）
+  QUEUE_OP_DRAIN = 2;  // 批量摘取（恒立即式，空队回空列表非错误）
+  QUEUE_OP_PEEK  = 3;  // 队首读数（与 TAKE 同出队谓词；延时形态未到期回缺省）
+  QUEUE_OP_SIZE  = 4;  // 驻留元素数（延时形态含未到期项）
+}
+
+// v7：队列操作请求（QUEUE_OP）。lock_type 取 LOCK_TYPE_QUEUE(12)/LOCK_TYPE_DELAY_QUEUE(13)
+// 之一作形态判别（其余值携 QUEUE_OP 属形状违例；ACQUIRE 携带 12/13 同规则拒绝）。
+// 容量定型断言判例 permits_total/parties：非零主张建条目或比对、0 为不主张；
+// 对不存在 key 的 PUT 主张必须非零（协调面无无界队列）。形态定型后不可变更，
+// 跨形态请求（QUEUE↔DELAY_QUEUE）按类型互拒。形状互斥矩阵在入口裁决：
+// element_bytes 仅 PUT 携带且 MUST 存在（元素不可为 null——缺省即违例；
+// 与有值引用形态 "null 为一等公民" 的 presence 语义刻意不同）；delay_ms 仅
+// LOCK_TYPE_DELAY_QUEUE 形态的 PUT 携带（≥0 相对延迟，绝对到期时刻由应用点
+// 以条目携带时刻折算，请求侧 MUST NOT 预折算）；max_elements 仅 DRAIN 携带
+// （>0 上限，0=取服务端钳制上限，实际钳定值随条目入日志）；blocking 仅
+// PUT/TAKE 携带（true=不可满足时挂起回 QUEUED，false=立即回 DENIED）；
+// PEEK/SIZE 的 op_seq MUST 为 0。
+message QueueOpRequest {
+  string         key           = 1;
+  QueueOp        op            = 2;
+  LockType       lock_type     = 3;
+  bool           blocking      = 4;   // 仅 PUT/TAKE 有意义（其余 op 携 true 为违例）
+  sint64         capacity      = 5;   // 容量定型断言（>=0，0=不主张）
+  optional bytes element_bytes = 6;   // PUT 的元素（不透明字节，≤maxValueBytes 由接入层钳制；
+                                      // 缺省=违例，零长度=合法空串元素）
+  sint64         delay_ms      = 7;   // 延时注入（仅 DELAY_QUEUE 形态 PUT；其余携带非零为违例）
+  int32          max_elements  = 8;   // DRAIN 提取上限（>0；0=服务端钳制上限；非 DRAIN 携非零为违例）
+  uint64         op_seq        = 9;   // 会话内单调写序号（GET/读类填 0 不参与去重）
+}
+
+// v7：队列操作应答。拒绝态字段为零值形；双"满"语义分轨——元素队列不可满足的
+// 立即式回 DENIED，等待挂起深度超限回 QUEUE_FULL（均为既有状态码，语义不同）。
+// QUEUED 时 queue_position 有效（1 起），后续经 AWAIT_NOTIFY 同 request_id 重发兑现。
+message QueueOpResponse {
+  StatusCode       status          = 1;   // OK / QUEUED / DENIED / QUEUE_FULL / 错误码
+  QueueOp          op              = 2;
+  int32            queue_position  = 3;   // QUEUED 时有效
+  optional bytes   element_bytes   = 4;   // TAKE 交付/PEEK 读数（显式 presence：缺省=无元素/空队/未到期，
+                                          // 零长度=空串元素——两态可区分）
+  repeated bytes   drained_bytes   = 5;   // DRAIN 按出队序的交付列表（空列表为合法结果）
+  sint64           size            = 6;   // SIZE 读数（仅 SIZE op 有效，其余恒 0）
+  sint64           capacity        = 7;   // 条目定型容量回显（未定型/拒绝路径为 0）
+}
+
+// v8：topic 操作类型（TOPIC_OP_REQUEST.op）。订阅操作恒立即回执，交付经
+// TOPIC_MESSAGE 推送——无阻塞/挂起面（与队列 blocking 位相反，订阅是存续态非
+// 一次性请求）。三操作零复制日志条目（D1 裁决：topic 无复制状态，登记表为
+// Leader 本地易失态，判例 WaitQueue 换主清零、客户端重挂）。
+enum TopicOp {
+  TOPIC_OP_SUBSCRIBE   = 0;  // 建立/重登订阅（(session,key) 唯一登记，幂等覆盖：同会话同键重复 SUBSCRIBE 返回同一登记语义）
+  TOPIC_OP_UNSUBSCRIBE = 1;  // 退订（幂等：未存在的订阅亦回 OK，无错误态）
+  TOPIC_OP_PUBLISH     = 2;  // 广播发布（OK=已受理并入 fan-out，不承诺任何订阅者已收到——至多一次契约）
+}
+
+// v8：topic 操作请求（TOPIC_OP）。形状互斥矩阵入口裁决：payload_bytes 仅 PUBLISH
+// 携带且 MUST 存在（消息体不可为 null——缺省即形状违例，零长度=合法空消息，判例
+// v7 元素纪律、与有值引用形态 "null 为一等公民" 刻意不同）；非 PUBLISH 携带为违例。
+// op_seq 仅 PUBLISH 携带且 MUST 非零（会话内单调，供受理节点每会话去重槽——同 term
+// 重发不双扇出）；SUBSCRIBE/UNSUBSCRIBE 填 0，携非零为违例。payload_bytes 逐条
+// ≤maxValueBytes 由接入层钳制（判定唯一在接入层，判例 v6 D5）。撞 key 防护由受理
+// 节点只读探测 LockTable 裁决（内部 REJECT_TYPE_MISMATCH，线路送达 INVALID_REQUEST，
+// 判例引擎形状拒绝映射；尽力而为，无竞态保证）。
+message TopicOpRequest {
+  string         key           = 1;
+  TopicOp        op            = 2;
+  optional bytes payload_bytes = 3;   // PUBLISH 消息体（不透明字节；缺省=违例，零长度=合法空消息）
+  uint64         op_seq        = 4;   // 会话内单调写序号（仅 PUBLISH 有效，其余填 0）
+}
+
+// v8：topic 操作应答。拒绝态字段为零值形。subscription_id 仅 SUBSCRIBE 的 OK 有效
+// （Leader 登记表本地单调，TOPIC_MESSAGE 的路由键；换主重订阅后重新分配，SDK 句柄
+// 内部重映射）；topic_seq 仅 PUBLISH 的 OK 有效（Leader term 内按 key 单调的受理
+// 序号——单订阅交付升序、换主重新起算、跨 term 无承诺；命中去重槽的重发返回同一份）。
+message TopicOpResponse {
+  StatusCode status           = 1;   // OK / REJECT_SUBSCRIBERS / INVALID_REQUEST / NOT_LEADER / SESSION_EXPIRED / INTERNAL_ERROR
+  TopicOp    op               = 2;
+  uint64     subscription_id  = 3;   // 仅 SUBSCRIBE 的 OK 有效（0=无）
+  uint64     topic_seq        = 4;   // 仅 PUBLISH 的 OK 有效（0=无）
+}
+
+// v8：广播交付推送（服务器 → 订阅连接）。Envelope.request_id MUST 为 0 且 MUST NOT
+// 关联 request_id_ref——广播交付不绑定原请求（与 AWAIT_NOTIFY 的 ref 型推送相对），
+// 关联键为 subscription_id。topic_seq 为受理 Leader term 内发布序号（同订阅升序；
+// gap=该订阅丢弃推断依据，换 term 后基线重置）；publisher_sid 为发布方逻辑会话 id
+// （0=不可知）；publish_ts_ms 为受理节点时钟的受理时刻。payload_bytes 恒存在
+// （presence 纪律的交付侧对偶，字节级保真）。
+message TopicMessage {
+  string key             = 1;
+  uint64 subscription_id = 2;
+  uint64 topic_seq       = 3;
+  uint64 publisher_sid   = 4;
+  int64  publish_ts_ms   = 5;
+  bytes  payload_bytes   = 6;   // 恒存在的消息体（不透明字节）
+}
+
+// v9：条件变量操作类型（CONDITION_OP_REQUEST.op）。signal 家族三操作词表——
+// AWAIT 不在其中（await 折叠于 ACQUIRE，判例 LatchAwait/QueueOp 的挂起半程在
+// 本库恒经等待队列纪律，signal 的唤醒半程即队首通知）；SIGNAL/SIGNAL_ALL/LEAVE
+// 为纯 Leader 本地等待集→等待队列的位次搬运与摘除，零日志、不重放
+// （"signal 是事件不是状态"——v8 topic 零日志豁免判例的类目化）。
+enum ConditionOp {
+  CONDITION_OP_SIGNAL     = 0;  // 唤醒一人：该条件到达序集队首搬入等待队列尾；空集/无此名回 OK 无操作（JDK 对齐）
+  CONDITION_OP_SIGNAL_ALL = 1;  // 唤醒全员：按到达序全部搬运；授予经等待队列队首纪律串行兑现
+  CONDITION_OP_LEAVE      = 2;  // 撤登（客户端本地超时/中断路径）：按 (会话, await_request_id) 摘除；幂等回 OK
+}
+
+// v9：条件变量操作请求（CONDITION_OP）。key 沿用既有长度纪律；condition 恒必携
+// 非空且 ≤maxKeyLength（命名寻址——同名同等待集、跨进程句柄等价，对 JDK 句柄
+// 身份的本质适配）。形状互斥矩阵入口裁决：SIGNAL/SIGNAL_ALL 必携 thread_id
+// （权限检查的归属线程——服务端权威，非持有归属 NOT_HELD）、await_request_id
+// MUST 为 0；LEAVE 必携非零 await_request_id（指向原携带 condition 的 ACQUIRE
+// 的 request_id）、thread_id MUST 为 0；矩阵外组合一律同型 INVALID_REQUEST、
+// 等待集与队列零扰动。
+message ConditionOpRequest {
+  string      key              = 1;
+  ConditionOp op               = 2;
+  string      condition        = 3;  // 目标等待集名（命名寻址）
+  int64       thread_id        = 4;  // 仅 SIGNAL/SIGNAL_ALL：权限归属线程（其余携带或本字段为 0 的违例按矩阵判）
+  int64       await_request_id = 5;  // 仅 LEAVE：原折叠 ACQUIRE 的 request_id（非 LEAVE 携非零为违例）
+}
+
+// v9：条件变量操作应答。拒绝态字段为零值形。status 可达面
+// OK/NOT_HELD/NOT_LEADER/INVALID_REQUEST/SESSION_EXPIRED/INTERNAL_ERROR——
+// QUEUED/DENIED/OVERLOADED 恒不可达（signal 家族恒即时回执；await 的等待满拒绝
+// 产生于折叠 ACQUIRE 侧、计数归 acquire 线）。SIGNAL/SIGNAL_ALL 的 OK 仅表搬运
+// 已生效，不承诺唤醒效果（被搬运者的了结经等待-通知-重发闭环另行完成）。
+message ConditionOpResponse {
+  StatusCode  status = 1;
+  ConditionOp op     = 2;
+}
+
+// v10：相位器操作类型（PHASER_OP_REQUEST.op）。七操作词表——bulkRegister 折叠为
+// REGISTER 携带 parties>1（判例 v7 put/offer 折叠的计数对偶），到场与等待折叠为
+// ARRIVE_AND_AWAIT 单操作词（同请求携到场+等待两半程：到场经日志、等待 Leader
+// 本地登记，判例 v9 双拓扑的无释放变体）。REGISTER/到场/离场三类变异操作逐条经
+// 提交（PHASER_OP_ENTRY——"到场是状态迁移"沿 v5 Barrier 判例，落地纪律第 2 条
+// 对本原语不豁免）；AWAIT_ADVANCE/CANCEL/QUERY 零日志（等待是订阅不是状态、
+// 观察不是迁移——"等待不入日志"判例族的 v10 类目）。
+enum PhaserOp {
+  PHASER_OP_REGISTER              = 0;  // 注册 parties 个匿名参与者（计入调用会话配额；无条目时建条目并定型 PHASER 家族）
+  PHASER_OP_ARRIVE                = 1;  // 到场（不等待；应答回显到场相位号，JDK arrive() 语义）
+  PHASER_OP_ARRIVE_AND_AWAIT      = 2;  // 到场并等待当相位合拢（到场恰触发合拢时直接 OK，否则 QUEUED→AWAIT_NOTIFY→重发了结）
+  PHASER_OP_ARRIVE_AND_DEREGISTER = 3;  // 到场并离场（同关键区扣调用会话配额 1——零配额 INVALID_REQUEST，JDK 匿名 party 未定义行为显式化）
+  PHASER_OP_AWAIT_ADVANCE         = 4;  // 纯等待（按已见相位号旁观，无需注册配额；已推进即刻 OK，否则 QUEUED 挂起）
+  PHASER_OP_CANCEL                = 5;  // 撤销等待登记（按 (会话, await_request_id) 摘除；幂等 OK，判例 v9 LEAVE）
+  PHASER_OP_QUERY                 = 6;  // 读数（Leader 本地零日志——phase/registered/arrived 三计数，unarrived 客户端差值导出；MUST NOT 推进任何状态）
+}
+
+// v10：相位器操作请求（PHASER_OP）。key 沿用既有长度纪律（非空、≤maxKeyLength）。
+// 形状互斥矩阵入口裁决（判例 v8 payload/op_seq、v9 thread_id/await_request_id）：
+// parties 仅 REGISTER 携带且 MUST ∈ [1, max-parties-per-phaser]（其余 op 携非零为
+// 违例）；expected_phase 仅 AWAIT_ADVANCE 携带（optional——未主张与 0 主张两态可
+// 判别：awaitAdvance(0) 为 JDK 合法入相，故 presence 与值域分离；已见相位号 ≥0，
+// 负值违例）、其余 op MUST 缺省；await_request_id 仅 CANCEL 携带且 MUST 非零
+// （指向被撤销等待项的原 PHASER_OP 信封 request_id）、其余 op MUST 为 0。矩阵外
+// 组合一律同型 INVALID_REQUEST、账簿与等待集零扰动。家族定型：REGISTER 是条目
+// 唯一建条目入口（v3 permits_total 先例的注册形态），非 REGISTER 命中不存在条目
+// INVALID_REQUEST（MUST NOT 隐式建条目）；ACQUIRE/其余车道命中 phaser key 或携带
+// LOCK_TYPE_PHASER 走既有 REJECT_TYPE_MISMATCH 线路映射 INVALID_REQUEST。
+message PhaserOpRequest {
+  string             key               = 1;
+  PhaserOp           op                = 2;
+  int32              parties           = 3;   // 仅 REGISTER：注册计数（≥1；其余 op 携非零为违例）
+  optional sint64    expected_phase    = 4;   // 仅 AWAIT_ADVANCE：已见相位号（等待谓词=当前相位>本值；其余携带为违例）
+  int64              await_request_id  = 5;   // 仅 CANCEL：被撤销等待项的原 request_id（其余携非零为违例）
+}
+
+// v10：相位器操作应答。拒绝态字段为零值形。status 可达面
+// OK/QUEUED/OVERLOADED/NOT_LEADER/INVALID_REQUEST/SESSION_EXPIRED/INTERNAL_ERROR——
+// DENIED/BARRIER_BROKEN/REJECT_SUBSCRIBERS/NOT_HELD 对 phaser 恒不可达（无立即式
+// 拒绝与破相概念；parties 上限与合并等待深度上限两超限共码 OVERLOADED、以 op 标签
+// 分轨——register 线=配额护栏、await_advance/arrive_and_await 线=深度护栏）。
+// phase 为相位回显：REGISTER 与到场类=到场相位号（该操作发生时条目所处相位，
+// JDK arrive() 返回值语义——恰触发合拢的回显仍为到场时相位）；AWAIT_ADVANCE 的
+// QUEUED 回执=受理时刻当前相位（观察值），OK 了结=了结时刻当前相位（新相位 >
+// 入参 expected_phase，JDK awaitAdvance 返回对偶）；了结重发恒 OK 终态（唤醒谓词
+// 在通知时刻已成立，无"仍排队"回炉分支——对照锁/Latch/Barrier 重发语义）。
+// registered/arrived 为回执时刻账簿快照（观察值，QUERY 恒有效、其余 op 择用）。
+message PhaserOpResponse {
+  StatusCode status    = 1;
+  PhaserOp   op        = 2;
+  sint64     phase     = 3;   // 相位回显（语义见 op×status 矩阵，见消息注）
+  int32      registered = 4;  // 回执时刻 registeredParties（QUERY 与回执观察；拒绝路径为 0）
+  int32      arrived    = 5;  // 回执时刻当前相位到场计数（同上）
 }

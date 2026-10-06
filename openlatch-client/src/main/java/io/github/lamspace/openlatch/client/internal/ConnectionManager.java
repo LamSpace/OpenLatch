@@ -20,6 +20,7 @@ import io.github.lamspace.openlatch.protocol.AwaitNotify;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloRequest;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
+import io.github.lamspace.openlatch.protocol.TopicMessage;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.netty.bootstrap.Bootstrap;
@@ -105,8 +106,8 @@ public final class ConnectionManager {
         CLOSED
     }
 
-    /** v5 协议版本，握手请求固定携带（服务端兼容 v1–v5，应答回显本版本）。 */
-    private static final int PROTOCOL_VERSION = 5;
+    /** v10 协议版本，握手请求固定携带（服务端兼容 v1–v10，应答回显本版本）。 */
+    private static final int PROTOCOL_VERSION = 10;
     /** 入站帧最大长度（1 MiB），与服务端帧长限制一致。 */
     private static final int MAX_FRAME_LENGTH = 1024 * 1024;
     /** 日志器。 */
@@ -158,6 +159,10 @@ public final class ConnectionManager {
     /** {@code AWAIT_NOTIFY} 下沉点；未装配时静默丢弃。 */
     private volatile Consumer<AwaitNotify> awaitNotifySink = notify -> {
         // 等待跟踪组件装配前的窗口期不应有通知到达
+    };
+    /** {@code TOPIC_MESSAGE} 下沉点（v8 广播交付）；未装配时静默丢弃。 */
+    private volatile Consumer<TopicMessage> topicMessageSink = message -> {
+        // 订阅路由装配前的窗口期不应有交付到达（至多一次契约：丢弃即丢失）
     };
     /** 进入 ACTIVE 时的回调（含首次连接与每次重连成功），由客户端装配。 */
     private volatile Runnable activeListener = () -> {
@@ -306,6 +311,17 @@ public final class ConnectionManager {
     }
 
     /**
+     * 设置 {@code TOPIC_MESSAGE} 下沉点（v8，订阅路由组件）。在所属连接
+     * EventLoop 上调用，处理器 MUST NOT 阻塞（派发经订阅句柄自有 dispatcher
+     * 线程承接）。
+     *
+     * @param sink 交付处理器
+     */
+    public void setTopicMessageSink(Consumer<TopicMessage> sink) {
+        this.topicMessageSink = sink;
+    }
+
+    /**
      * 设置进入 ACTIVE 状态的回调：首次握手成功与每次重连成功都会触发，
      * 由客户端据此区分首连（无持锁，空操作）与重连（旧锁裁决）。
      *
@@ -316,7 +332,9 @@ public final class ConnectionManager {
     }
 
     /**
-     * 入站信封分发：{@code AWAIT_NOTIFY} 交给通知下沉点，其余视为响应
+     * 入站信封分发：{@code AWAIT_NOTIFY} 交给通知下沉点、
+     * {@code TOPIC_MESSAGE}（v8）交给交付下沉点（推送均
+     * {@code request_id=0}，按类型路由不入响应关联），其余视为响应
      * 交给多路复用器按 {@code request_id} 关联。
      *
      * @param envelope 入站信封
@@ -324,6 +342,10 @@ public final class ConnectionManager {
     public void dispatch(Envelope envelope) {
         if (envelope.getType() == MessageType.AWAIT_NOTIFY) {
             awaitNotifySink.accept(envelope.getAwaitNotify());
+            return;
+        }
+        if (envelope.getType() == MessageType.TOPIC_MESSAGE) {
+            topicMessageSink.accept(envelope.getTopicMessage());
             return;
         }
         multiplexer.onResponse(envelope);

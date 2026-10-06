@@ -4,6 +4,7 @@
 
 为应用提供访问 OpenLatch 锁服务的客户端 SDK：异步内核 + JUC 风格同步包装、全程超时无死等、等待-通知-重发闭环、看门狗续租与锁丢失通知、断连重连与锁丢失裁决、优雅关停。
 ## Requirements
+
 ### Requirement: 客户端构建与连接建立
 
 客户端 MUST 通过 builder 构建，必填服务地址：或单一地址（Phase 1 入口，语义为只含一个种子的种子列表），或种子列表（≥1 个 `host:port`）；二者同配时以种子列表为准，皆缺 MUST 构建失败。其余参数（请求超时默认 5s、等待总超时默认 30s、连接超时默认 3s、重连退避初始 200ms/上限 10s、EventLoop 线程数默认 1）未设置时 MUST 使用默认值。首次使用或显式连接时，客户端 MUST 从种子列表建立连接并完成握手，获得服务端分配的会话；握手完成前发出的业务请求 MUST 不被服务端接受（客户端不得跳过握手直接发业务请求）。
@@ -87,7 +88,7 @@
 
 ### Requirement: 等待-通知-重发闭环
 
-排队等待的获取请求在收到服务端的队首通知后，MUST 以原请求标识重发获取请求（服务端幂等，不会二次排队）；重发被授予则完成等待，仍排队则继续挂起等待下一次通知。等待项在等待总时限到达时 MUST 以超时失败；此后到达的通知 MUST 被忽略（不重发）。已超时/已失败的等待若在途重发随后被授予，客户端 MUST 归还该锁（发送释放），不得静默泄漏。重发请求本身超时（无响应）时，MUST 仅结束该次重发、保持挂起等待下一次通知，直到等待总时限到达才整体失败。同一等待收到两次通知而产生的重复授予，MUST 以首个授予为准，重复授予归还。
+排队等待的获取请求在收到服务端的队首通知后，MUST 以原请求标识重发获取请求（服务端幂等，不会二次排队）；重发被授予则完成等待，仍排队则继续挂起等待下一次通知。等待项在等待总时限到达时 MUST 以超时失败；此后到达的通知 MUST 被忽略（不重发）。已超时/已失败的等待若在途重发随后被授予，客户端 MUST 归还该锁（发送释放），不得静默泄漏。重发请求本身超时（无响应）时，MUST 仅结束该次重发、保持挂起等待下一次通知，直到等待总时限到达才整体失败。同一等待收到两次通知而产生的重复授予，MUST 以首个授予为准，重复授予归还。携带 `condition` 字段的折叠形态获取请求（条件等待，见 OCondition API 条款）MUST 以完全相同的身份参与本闭环：收到唤醒通知后的重发信封 MUST 清除 `condition` 字段而保持 request_id 不变（唤醒即终结 await 阶段、转入普通排队获取语义——服务端两拓扑均按既有获取纪律授予），未获通知而自愈的重发保持原信封（含 `condition`）幂等重登记，重复通知与在途授予的终止竞争纪律逐项适用；其**总时限到期的收束例外于普通获取的"超时失败"路径**——MUST 先经 LEAVE 摘除登记再转入常规阻塞获取重新入锁后方返回/抛出（JDK"返回时持锁"保真），MUST NOT 在未持有锁的状态下结束一次 await。
 
 #### Scenario: 通知后重发授予
 
@@ -113,6 +114,11 @@
 
 - **WHEN** 同一等待先后收到两次通知，两次重发均被授予
 - **THEN** 首个授予交付调用方，第二个授予被归还
+
+#### Scenario: 条件等待复用闭环且超时收束不同
+
+- **WHEN** 折叠 await 收到队首通知；另一场景中同型等待的本地超时先于通知到期
+- **THEN** 通知场景：重发信封携带原 request_id 且 **`condition` 字段已清除**，被授予后以持有 1 级重入的状态返回调用方；超时场景：先 LEAVE 摘除（fire-and-forget），再经常规获取重新入锁后才返回 `false`——两条路径均以"持有锁"收束，无一泄漏等待位
 
 ### Requirement: 看门狗续租与锁丢失通知
 
@@ -377,3 +383,199 @@
 - **WHEN** 在途 `BARRIER_AWAIT` 遭遇连接闪断致会话切换
 - **THEN** SDK 不以新会话自动重放该到场，本方 await 抛 `OpenLatchException`；旧会话在旧世代的在队项由服务端清理连带破障
 
+### Requirement: OAtomicReference API
+
+客户端 SHALL 提供 `OpenLatchClient.newAtomicReference(String key)` 工厂与携带初值主张的对应重载（`byte[]` 形态与 UTF-8 `String` 便利形态各一；主张值为 null 等价于不主张——条目初值即为 null，零长度数组为"空串初值主张"），返回公开接口 `OAtomicReference` 实例。`byte[]` 为主形态、`String` 便利形态按 UTF-8 编解码且两形态语义逐项等价。接口面：`byte[] get()`（可返回 null）、`String getAsString()`、`Stamped getStamped()`（内嵌读数记录：`byte[] value()` 可为 null、`long version()`，附 `String valueAsString()` 便利）、`long getVersion()`、`void set(byte[] value)`/`set(String value)`（null=清空）、`byte[] getAndSet(byte[] value)`（+String 形态）、`boolean compareAndSet(byte[] expected, byte[] update)`（字节内容相等判定，null 为合法期望态；ABA 风险由契约声明）、`boolean compareAndSetStamped(byte[] expectedValue, long expectedVersion, byte[] update)`（ABA-free 形态；另各配 String 便利重载）。接口 MUST NOT 提供 `ADD`/`accumulateAndGet` 类算术面（相对 JDK `AtomicReference` 无降级的缺省——JDK 本无此面）。载荷为不透明字节串：SDK 与服务端 MUST NOT 对载荷做解释或对象反序列化。同步方法 SHALL 声明 `throws InterruptedException`，失败以非受检 `OpenLatchException`/`OpenLatchTimeoutException` 表达；服务端以 `INVALID_REQUEST` 拒绝超限载荷时 SDK MUST 抛 `OpenLatchException` 并透传拒绝语义，MUST NOT 静默截断或本地重试。可重试失败（`NOT_LEADER`、断连快速失败、超时）时写操作 MUST 以**同一 `op_seq`** 自动重发至请求总超时界限（沿用 `OAtomicLong` 族裁决的现成车道，去重槽保证重发不重复生效）；界限内不可判定抛 `OpenLatchTimeoutException` 并声明效果不确定。会话或进程死亡 MUST NOT 回滚本会话写入的值。全部操作 MUST NOT 依赖看门狗/租约/`LockLost` 通知，MUST NOT 进入等待-通知-重发闭环。有值引用形态 MUST 以 v6 握手使用（SDK 握手版本声明升至 6）；对握版本 <6 的服务端，引用形态请求收到 `INVALID_REQUEST` 时 SDK MUST 以显式异常表达协议不支持，MUST NOT 以同序号重发。契约 Javadoc MUST 显式声明降级/增强清单：每操作一次网络往返、超时不确定窗口、ABA 仅 stamped 消除、null 与空串可区分、载荷上限由服务端权威钳制（默认 4KB、随部署配置）、条目常驻不回收（载荷持久驻留）。
+
+#### Scenario: 三形态载荷往返保真
+
+- **WHEN** 对同一 key 依次 `set(字节串)`、`set(String)`、`set(null)` 并各以 `get`/`getStamped` 读取，随后 `compareAndSet(null, "x")` 与 `compareAndSet(new byte[0], "y")`
+- **THEN** 各读数与写入字节逐一一致（String 形态按 UTF-8 往返）；`set(null)` 后读数为 null；期望 null 的 CAS 命中、期望空串的 CAS 不命中（两态可区分）
+
+#### Scenario: 超限载荷显式失败零生效
+
+- **WHEN** 客户端 `set` 携带超过服务端 `maxValueBytes` 的载荷
+- **THEN** 抛 `OpenLatchException`（拒绝语义、非超时），条目值与版本戳不变，且无同序号重发发生
+
+#### Scenario: 换主窗口写操作自动重发不双写
+
+- **WHEN** `getAndSet(4KB 字节串)` 首发落入 Leader 切换窗口收到 `NOT_LEADER`，SDK 经重发现向新 Leader 以同 `op_seq` 重发
+- **THEN** 方法正常返回旧值，服务端该 key 版本戳恰 +1，无重复落值
+
+#### Scenario: 低版本服务端显式拒绝不重试
+
+- **WHEN** v6 SDK 对握版本上限 <6 的服务端调用引用形态 `get`
+- **THEN** SDK 以显式异常表达协议不支持（源于 `INVALID_REQUEST` 消息级拒绝），MUST NOT 自动重发或静默降级
+
+#### Scenario: 会话死亡值存续
+
+- **WHEN** 会话 A 写入有值引用后关闭，会话 B 读取同 key
+- **THEN** B 读到 A 写入后的值与推进后的版本戳，无任何回滚
+
+### Requirement: OBlockingQueue API
+
+客户端 SHALL 提供 `OpenLatchClient.newBlockingQueue(String key, long capacity)` 与 `newDelayQueue(String key, long capacity)` 工厂（capacity ≤0 MUST 本地快速拒绝 `IllegalArgumentException`——协调面无无界队列；容量作为定型主张随每次写携带，首次 PUT 完成条目定型），返回公开接口 `OBlockingQueue`（延时工厂返回其子接口 `ODelayQueue`）。`byte[]` 为主元素形态、`String` 便利形态按 UTF-8 编解码且两形态语义逐项等价。`OBlockingQueue` 接口面：`void put(byte[] e)`/`put(String e)`（阻塞至有容量，可中断）、`boolean offer(byte[] e)`（立即式，满回 false）、`boolean offer(byte[] e, long timeout, TimeUnit unit)`（挂起式带客户端本地超时，判例 `wait_ms > 0` 客户端计时）、`byte[] take()`/`String takeAsString()`（阻塞至有可消费元素，可中断）、`byte[] poll()`（立即式，无回 null）、`byte[] poll(long timeout, TimeUnit unit)`（本地超时）、`int drainTo(Collection<? super byte[]> out)` / `int drainTo(Collection<? super byte[]> out, int maxElements)`（返回实际摘取数）、`byte[] peek()`（队首读数，空/未到期回 null）、`int size()`（驻留元素数，延时形态含未到期项）、`int remainingCapacity()`（`capacity − size`，一次 RTT）、`long capacity()`（定型回显）。`ODelayQueue` 追加 `boolean offerDelayed(byte[] e, long delay, TimeUnit unit)` / `offerDelayed(String e, …)`（延时注入——**不照抄 JDK `DelayQueue.offer(e, timeout, unit)` 签名**：该形态在 JDK 表"延迟后才可见"，与本地超时语义同形异义，显式改名以消除混读；契约 Javadoc MUST 声明该差异）。全部同步阻塞方法 SHALL 声明 `throws InterruptedException`，失败以非受检 `OpenLatchException`/`OpenLatchTimeoutException` 表达；服务端以 `INVALID_REQUEST` 拒绝（超限/形状/低版本/容量断言冲突）时 SDK MUST 抛显式异常并透传拒绝语义，MUST NOT 静默截断、本地改写参数或以同序号重发。阻塞 put/take 走等待-通知-重发闭环：`QUEUED` → 挂起 → `AWAIT_NOTIFY` → 同 `requestId` 重发 → `DENIED`（应用点竞态回弹）继续挂起 → `OK` 终态；重发超时纪律沿用既有等待车道裁决。写操作 MUST 以**同一 `op_seq`** 在可重试失败（`NOT_LEADER`、断连快速失败、超时）时自动重发至请求总超时界限（继承 `RemoteAtomicBase` 同 key 在途写互斥纪律，服务端每会话去重槽保证 PUT 不双插、TAKE 重放交付同一份字节）；界限内不可判定抛 `OpenLatchTimeoutException` 并声明效果不确定窗。队列操作 MUST NOT 依赖看门狗/租约/`LockLost` 通知。队列 MUST 以 v7 握手使用（SDK 握手版本声明升至 7）；对握版本上限 <7 的服务端，`QUEUE_OP` 收到 `INVALID_REQUEST` 时 SDK MUST 以显式异常表达协议不支持，MUST NOT 重发。元素为不透明字节：SDK 与服务端 MUST NOT 解释或反序列化。契约 Javadoc MUST 显式声明降级/增强/差异清单：每操作一次网络往返（`drainTo` 一次摘多）、超时不确定窗口（幂等由槽兜底但可重试窗内结果延迟）、元素绑定 key 不绑定会话——**投递者进程死亡不吞元素**（强于/异于 JDK 同进程堆消散语义）、`DELAY_QUEUE` 同到期时刻 FIFO（增强，JDK 不承诺）、未到期元素对 `PEEK/TAKE` 不可见但计入 `SIZE`、无 `iterator/contains/remove(Object)/spliterator` 面、元素不可为 null（与 `OAtomicReference` 的 null 语义刻意不同）、容量服务端上限权威钳制、条目常驻不回收（驻留成本与清理为消费/运维职责）、延时到点唤醒精度为服务端 tick 级。
+
+应答形态裁决（MUST）：队列车道收到应答信封后 MUST 校验其携带 `queue_op_response` 载荷——`Envelope.type` 回显 `QUEUE_OP` 但载荷 oneof 缺该成员（异型/空载荷码形违例，如未含 `QUEUE_OP` 分支的拒绝组装路径产物）MUST 按瞬态失败裁决（与 `NOT_LEADER`/断连同车道：退避、重取路由、重发），MUST NOT 读取 protobuf 默认实例并据此裁决（默认实例 `status` 为枚举零值 `OK`，会被误判为"成功空应答"致 `take` 交付零长度元素、`size` 读回 0）。`TAKE` 终态收到 `OK` 而应答缺 `element_bytes` presence 属协议违例（交付契约要求 OK-TAKE 必携元素，显式 presence 使"零长度空串元素"与"缺省"可辨），MUST 以显式 `OpenLatchException` 抛出、MUST NOT 交付 `byte[0]`；`PEEK`/`SIZE` 的 OK-缺省载荷为合法空读数形态，不受本条约束。
+
+#### Scenario: 生产消费 FIFO 闭环
+
+- **WHEN** 会话 A 对容量 8 的队列依次 `put("a")、put("b")、put("c")`，会话 B 依次 `take()` 三次，随后 `offer("d")` 与 `poll()`
+- **THEN** take 依序返回 "a"、"b"、"c"（UTF-8 往返字节级一致）；offer 回 true、poll 返回 "d"；`poll()` 于空队回 null、`offer` 于满队回 false
+
+#### Scenario: 阻塞 put 腾位唤醒闭环
+
+- **WHEN** 满容量队列上一个 `put` 挂起（服务端 QUEUED），另一会话消费一个元素，随后挂起者收到推送
+- **THEN** 挂起的 `put` 经"通知→同 requestId 重发→OK"正常返回，总深度不超过容量，元素不双插（同 op_seq 槽保证）
+
+#### Scenario: 中断与本地超时
+
+- **WHEN** 挂起的 `take` 被线程中断；另一 `poll(50ms)` 于持续空队到期返回
+- **THEN** 前者抛 `InterruptedException` 且服务端等待项经离场路径摘除（不吞元素）；后者回 null（超时为客户端本地计时，等待项由其超时臂自行了结）
+
+#### Scenario: 换主窗口写重发不双插不偷吃
+
+- **WHEN** `put(x)` 首发落入 Leader 切换窗口收到 `NOT_LEADER`，SDK 经重发向新 Leader 以同 `op_seq` 重发；另一场景 `take()` 交付后应答丢失重发
+- **THEN** 队列中 x 恰出现一次；take 场景 SDK 收到与服务端首交付**字节相同**的元素，且未多摘一个
+
+#### Scenario: 投递者进程死亡元素存续
+
+- **WHEN** 会话 A `put` 若干元素后进程被杀，会话 B `size`/`take`
+- **THEN** B 见 A 投递的全部元素并按序消费——无因 A 死亡产生的元素丢失（契约声明的可执行化）
+
+#### Scenario: 延时元素按到期可见
+
+- **WHEN** `offerDelayed("late", 300, MILLISECONDS)` 后立即 `peek`，等待到期后再 `take`
+- **THEN** 到期前 `peek` 回 null 而 `size` 计 1；到期后 `take` 返回 "late"
+
+#### Scenario: 超限与低版本显式失败零生效
+
+- **WHEN** `put` 携带超过服务端 `maxValueBytes` 的元素；或 v7 SDK 对握版本上限 6 的服务端调用 `put`
+- **THEN** 均抛 `OpenLatchException`（拒绝语义、非超时），队列零变化，且无同序号重发发生
+
+#### Scenario: 换主窗非 Leader 拒绝不得伪成功（安全性质）
+
+- **WHEN** 元素已提交后 Leader 被杀，客户端队列请求的路由落在非当值 Leader 节点
+- **THEN** 该节点以同型 `queue_op_response` 的 `NOT_LEADER` 拒绝、SDK 按瞬态退避重取路由重发；全程 MUST NOT 出现"`take` 交付空串/错误元素"或"`size` 读 0"的伪成功形态——改道收敛时依序交付真实元素（透明），路由未能在请求预算内重建的驻留窗以显式异常收场（超时/会话换代口径，客户端改道机制的完整收敛兑现归"Leader 发现与故障转移"能力承载）
+
+#### Scenario: 缺码形应答不得读作成功
+
+- **WHEN** 队列车道收到 `Envelope.type = QUEUE_OP`、`request_id` 匹配、但载荷为异型（如仅 `acquire_response`）或空载荷的应答（脚本化服务面注入）
+- **THEN** 车道按瞬态失败重取路由重发（不交付元素、不上报读数），至请求时限耗尽以 `OpenLatchTimeoutException`/会话族异常失败；`TAKE` 的真 `OK` 且缺 `element_bytes` 注入形态以显式协议违例异常失败、MUST NOT 交付 `byte[0]`
+
+### Requirement: OTopic API
+
+`OpenLatchClient` SHALL 提供 `newTopic(String key)` 工厂返回 `OTopic`，公开契约为：`publish(byte[])`/`publish(String)`（UTF-8 便利族）同步返回受理结果、`publishAsync` 异步对偶、`subscribe(OTopicMessageHandler)` 返回 `OTopicSubscription` 句柄、`unsubscribe()` 幂等退订该键本会话全部订阅。`OTopicSubscription` 暴露 `droppedCount()`（本地观察值）、`isActive()`、`close()`（幂等，等价 UNSUBSCRIBE）。消息体为不透明字节（服务端不解释、无反序列化）；PUBLISH 必携非 null 消息体（零长度合法），与队列元素纪律同判例、与引用形态 null 语义刻意不同。
+
+交付语义与相对 JDK `Flow.Publisher`/`SubmissionPublisher` 的差异 MUST 以接口级 Javadoc 全量声明：
+
+- **至多一次**：`publish` 返回 `OK` 仅表示服务端已受理并入 fan-out，不承诺任何订阅者收到；订阅者可能因缓冲满/断线/换主窗而丢消息，服务端不重投、不通知单条丢失。
+- **弱背压 drop-newest 两级**：服务端每订阅缓冲满丢最新（既有缓冲照常交付），SDK 本地缓冲同策略；Publisher 不被慢消费者阻塞，慢消费者不被断开（显式不采纳 JDK `onOverflow → close` 判例——断连即会话死亡、连带全部持锁释放）。
+- **顺序承诺仅限单订阅内**：同一订阅收到的 `topic_seq` 在**同 Leader term 内**严格升序；`droppedCount()` = 本地缓冲溢出计数 + 同 term 内 seq gap 推断，换 term（重连重订阅后）基线重置不跨 term 累计；跨 Publisher、跨订阅无全局序承诺。
+- **去重仅同 Leader**：PUBLISH 沿用同 key 在途互斥 + 同 `op_seq` 重发（判例 `RemoteAtomicBase` 写车道），受理节点去重槽保证同 term 不双扇出；跨换主重试可能双投——消费侧幂等为应用义务，契约显式声明。
+- **订阅绑定会话**：订阅者会话死亡即退订（服务端三路回收），与队列"死亡不吞元素"刻意相反；换主后订阅关系由 SDK 自动重订阅维持（应用句柄与语义不变，`subscription_id` 内部重映射），重挂前的窗口内消息不可追回。
+- **监听器线程模型**：`OTopicMessageHandler` 单订阅内串行回调，执行于 SDK dispatcher 线程（MUST NOT 占用 Netty EventLoop）；回调异常被吞并记录，不中断后续交付。
+- **服务端权威钳制**：`maxValueBytes`/`max-subscribers-per-key`/`max-subscription-buffer` 由服务端入口裁决，超限/上限拒绝以对应状态码同型送达（`INVALID_REQUEST`/`REJECT_SUBSCRIBERS`）；订阅存在有常驻登记表与缓冲成本。
+- **版本门**：需 v8 握手（客户端三处常量升 8）；对 v7 服务端连接按既有区间外握手拒绝纪律失败——升级序先服务端后客户端（判例 v3–v7）。
+
+`newTopic` 对同 key 可多实例；同会话同键服务端唯一登记，SDK 层后到 SUBSCRIBE 覆盖在前句柄的交付路由时 MUST 在句柄 `isActive()` 与回调行为上如实呈现覆盖语义（不静默双路由）。
+
+#### Scenario: 发布-订阅闭环
+
+- **WHEN** 两客户端分别 SUBSCRIBE 后，第三方对同 key PUBLISH 多条消息
+- **THEN** 两订阅者各自收到全部消息的字节级副本（payload 无损、`topic_seq` 升序、`publisher_sid` 与 `publish_ts_ms` 可读），回执 `OK` 携带 `topic_seq`
+
+#### Scenario: 退订停止交付
+
+- **WHEN** 订阅者 `close()` 其后该 key 再 PUBLISH
+- **THEN** 该订阅者不再收到任何推送；对已退订键重复 `close()`/`unsubscribe()` 不报错（幂等）
+
+#### Scenario: 换主自动重订阅续收
+
+- **WHEN** Leader 被 kill，订阅客户端重连至新 Leader 后第三方继续 PUBLISH
+- **THEN** 应用句柄无感（未重调 subscribe）持续收到新 term 消息；换主窗内发布的消息不再出现（无重投），`droppedCount()` 不因 term 切换跨窗累计 gap
+
+#### Scenario: 慢监听器本地丢弃不反压
+
+- **WHEN** 监听器长时间阻塞致 SDK 本地缓冲溢出，同时该连接上其他原语（锁/队列）正常操作
+- **THEN** 仅 topic 交付链丢弃并计数（`droppedCount()` 增长），其他原语请求不受影响，连接不断开，Publisher 侧无感知
+
+#### Scenario: 发布重发同序号不双投
+
+- **WHEN** PUBLISH 应答在途丢失，SDK 以同 `op_seq` 自动重发（未换主）
+- **THEN** 订阅者各收到一份该消息（去重槽命中重放回执，无第二份）
+
+### Requirement: OCondition API
+
+`OLock` SHALL 提供 `newCondition(String name)` 返回 `OCondition`，公开契约为：`await() throws InterruptedException`、`await(long timeout, TimeUnit unit) throws InterruptedException → boolean`、`signal()`、`signalAll()`。条件身份为 (lock key, name) **命名寻址**：同名重复 `newCondition`、同 name 多进程句柄均绑定服务端同一等待集（相对 JDK 句柄身份的本质适配——跨进程可寻址是能力面，差异显式声明）。`OReadWriteLock` 所得读/写 `OLock` 上调用 `newCondition` MUST 抛 `UnsupportedOperationException`（v1 支持面仅 REENTRANT/FAIR/SIMPLE，指南与 Javadoc 随行声明）。句柄无状态、无需关闭（等待位由服务端三路回收，不存在 SDK 侧泄漏面）。
+
+相对 JDK `Condition` 的差异与保真 MUST 以接口级 Javadoc 全量声明：
+
+- **虚假唤醒允许且不承诺杜绝**（保真面：JDK 同契约）——来源清单：队首超时清扫后的推进促醒、换主重挂窗中已丢失的 signal 对应谓词变化、LEAVE/SIGNAL 竞态；**guard loop 谓词复查是调用方义务**，指南给出标准惯用法。
+- **signal 权限双层**：本地先行——当前线程未持有本锁即抛 `IllegalMonitorStateException`；服务端权威——线路拒绝码 `NOT_HELD` 同样映射为 `IllegalMonitorStateException` 抛出（JDK 异常类型保真，与既有 `unlock()` 误用同型）。持有者对空集/无名条件 signal = 无操作正常返回（JDK 对齐）；键不存在/无人持有属权限不匹配，同样映射 `IllegalMonitorStateException`。
+- **await 权限服务端降级**：本地仍检查持有着（误用即抛）；服务端不查 await 登记权限（跨换主重挂必需）——降级面与 ghost 有界性（合并深度护栏、三路回收）显式声明。
+- **返回时持锁保真**：`await()`/`await(timeout)` 无论被唤醒、超时还是中断，返回（或抛出）前 MUST 已重新获取锁，重入计数从 **1** 起（与 await 前 N 级无关——JDK 同款算术，外层 unlock 次数相应减 N-1，惯用法示例钉死）；`await(timeout)` 返回值仅表示"是否以被 signal 路径收束"，超时后唤醒恰到达时返回值按收束先者如实呈现（best-effort 语义声明）。`awaitNanos`/`awaitUntil`/`awaitUninterruptibly` 与异步对偶不提供。
+- **租约交互**：await 受理即全量释放——该 key 看门狗随持有簿记消失自动停摆，唤醒重获取签发**新租约凭证**并自动重启续租，应用无感；持有者进程死亡/租约到期时 sweep 释放锁并唤醒**入队者**，但**不代为唤醒条件等待者**（无人 signal 则永睡，与 JDK 对齐；推荐 `await(timeout)` 形态自救）。等待者自身无租约（Latch awaiter 判例）。
+- **换主分层语义**：等待是承诺（折叠条目重放使释放确定生效、等待项随 ACQUIRE 车道迁移自动重挂——对应用透明）；**signal 是事件**（不重放、不补偿，换主窗内发出的 signal 对旧集合的搬运随换主灭失，等待项至多重挂后等待下一次 signal 或超时）；W11 观察面不覆盖 await（其走 ACQUIRE 车道），signal 家族直发车道为 W11 新成员。
+- **成本模型**：folded await 至少 1 次 RTT（提交）+ 唤醒后 1 次重发 RTT + 被授予 RTT；signal/signalAll/LEAVE 各 1 RTT 即时回执；等待无长连接专属资源（服务端仅登记条目）。
+- **版本门**：需 v9 握手（客户端三处常量升 9）；对 v8 及以下服务端连接按既有区间外握手拒绝纪律失败——升级序先服务端后客户端（判例 v3–v8）。
+
+#### Scenario: 生产-消费守卫闭环
+
+- **WHEN** 消费者持锁循环 `while (!ready) cond.await()`，生产者持锁置位后 `cond.signal()` 再 `unlock()`
+- **THEN** 消费者在 signal 后（或虚假/清扫促醒的谓词复查后）以持有 1 级重入从 await 返回，谓词为真退出守卫；全链对应用仅暴露 JDK 惯用法
+
+#### Scenario: 非持有 signal 双层同型异常
+
+- **WHEN** 未持锁线程本地调用 `signal()`；以及本地检查通过但服务端裁决时持有已丢（如锁丢失窗）的 `signal()` 送达 `NOT_HELD`
+- **THEN** 两路径均抛 `IllegalMonitorStateException`，无静默吞弃；连接与会话不受影响
+
+#### Scenario: 超时 await 返回时持锁
+
+- **WHEN** `await(500, MILLIS)` 到期而无人 signal
+- **THEN** SDK 发 LEAVE 后转常规获取；返回 `false` 时调用线程已持有锁（重入 1 级），可安全复查谓词并决策
+
+#### Scenario: 换主自动重挂续醒
+
+- **WHEN** await 挂起期间 Leader 更替，其后持有者在新 Leader 上 signal
+- **THEN** 等待项随车道迁移自动重挂（应用无感、同 request_id 幂等登记），新 signal 到达时照常唤醒重获取；换主窗内旧 signal 不补偿（有界窗，超时自救面）
+
+#### Scenario: 命名寻址跨句柄等价
+
+- **WHEN** 两个进程/两处代码分别对同 key 调用 `newCondition("x")`，其一 await、其二持锁 signal("x")
+- **THEN** 唤醒跨进程生效（同 name 同集合）；调用 `newCondition("y")` 的等待项不受该 signal 扰动（集合隔离）
+
+#### Scenario: 读写锁条件不支持显式化
+
+- **WHEN** 对 `OReadWriteLock.writeLock()` 返回的 `OLock` 调用 `newCondition`
+- **THEN** 立即抛 `UnsupportedOperationException`（本地裁决，不产生任何请求）
+
+### Requirement: OPhaser API
+
+客户端 SDK SHALL 提供 `OPhaser` 公开契约与 `OClient.newPhaser(String key)` / `newPhaser(String key, int initialParties)` 工厂：句柄构造零网络；`initialParties > 0` 时首次业务操作前同步提交一次 `REGISTER(count = initialParties)` 归属本会话（JDK `new Phaser(n)` 的注册语义对偶——构造后 n 方已注册未到场；注册失败按抛出形态传播，同句柄不重复提交）。API 面：`int register()` / `void bulkRegister(int parties)`（返回/回显到场相位——注册者进入当前相位应到集合）、`int arrive()`、`int arriveAndDeregister()`、`int arriveAndAwaitAdvance()`、`int awaitAdvance(int phase)`（无限挂起形态）、`int awaitAdvanceInterruptibly(int phase, long timeout, TimeUnit unit)`、`long getPhase()` / `int getRegisteredParties()` / `int getArrivedParties()` / `int getUnarrivedParties()`（JDK 返回值形态对齐：相位 long、计数 int）。**不提供** `onAdvance` 覆写钩子、`isTerminated()`/`forceTerminated()` 与父子分层构造——三砍为显式 Non-Goal，与 JDK `Phaser` 的这组差异 MUST 在接口级 Javadoc 降级清单逐条声明并给出应用侧替代惯用法（钩子→以 `arriveAndAwaitAdvance()` 返回的到场相位号判别后本地执行；终止→键级生命周期治理；分层→独立 key）。
+
+车道与闭环：`PHASER_OP` 为直发请求-应答车道（判例 QUEUE/TOPIC/CONDITION——无 ACQUIRE 在途互斥，phaser 无持有概念；同请求超时重发以同 request_id 幂等重演，到场类去重槽、等待登记幂等与了结记录承载重放安全）。变异操作（register/arrive/arriveAndDeregister/arriveAndAwaitAdvance 的到场半程）经提交路径，客户端对 `NOT_LEADER` 执行既有退避改道；等待操作（awaitAdvance/arriveAndAwaitAdvance 的等待半程）收 `QUEUED` 后进入挂起环——按 request_id 过滤 `AWAIT_NOTIFY`（判例队列读车道与 v3 推送桥）、原 request_id 重发取数了结（`OK{相位}`）；`awaitAdvanceInterruptibly` 超时到期 MUST 发 `CANCEL` fire-and-forget 后抛 `TimeoutException`（JDK 对偶签名；`awaitAdvance(int)` 无限形态由等待总超时兜底——超时纪律条款延伸，MUST NOT 提供事实上永挂而无界收口的路径）；被中断（interrupt）同超时路径收束并抛 `InterruptedException`。换主/会话重建后 SDK MUST 以双通道自动重挂全部活跃等待项（车道激活事件 + 周期保活，判例 v8 topic 重挂；谓词在复制态——重挂即刻了结或续挂、**无损耗**，该增强与 v9 条件"换主窗 signal 丢失"的对照差异 MUST 在 Javadoc 与指南声明防混读）。
+
+契约三清单（接口级 Javadoc 全量承载）：**保真面**——动态注册/离场、到场与等待解耦、按已见相位等待、相位号单调、arrive 族返回到场相位、`awaitAdvance` 返回当前相位、`getUnarrivedParties` 口径、旁观者 awaitAdvance 无需配额；**降级面**——每次调用至少一次 RTT（JDK 本地计数器的 `getPhase`/`arrive` 为纳秒级——网络成本模型显式声明，观察类计数建议低频读取或应用侧缓存句柄本地最近所见）、查询为 Leader 本地读数不保证线性化（返回即刻过期是契约）、无 onAdvance 的"动作先于全体放行"排序（应用侧钩子与他人的醒转无先后承诺）、无终止态（JDK 终止语义不映射）、`arriveAndDeregister`/`bulkRegister` 的配额严格归属（JDK 匿名 party 面收敛为会话记账，跨会话代扣不存在）、等待超时的 CANCEL 为尽力撤销（ghost 有界且受护栏钳制——与 v9 AWAIT 权限降级同型的宽容面声明）；**增强面**——跨进程参与者同相合拢（JDK 句柄进程内私有）、等待谓词随复制态跨换主自愈、管理面全集群配额/到场/等待读数可见。句柄无状态：同 key 重复 `newPhaser` 等价绑定同一服务端账簿（判例 v9 命名寻址跨进程等价的同型声明）；SDK MUST NOT 在本地伪造计数（读数恒来自服务端应答回显）。
+
+指标与诊断：`ClientMetrics.statusCodeOf` 扩 `PHASER_OP` 归线；握手常量升 10；`FairOrderingSuite` 类公平性套件对 PHASER 不适用（合拢是广播事件、到场先后由 Raft apply 序承载——判例 v5 D6 BARRIER/ATOMIC 豁免的正文同款，豁免登记随实现提交）。
+
+#### Scenario: 多方会合与返回值保真
+
+- **WHEN** 两个进程各 `newPhaser(key, 2)`、各自 `register()` 使 registered=4，随后四方（跨两会话）依次 `arriveAndAwaitAdvance()`
+- **THEN** 前三次到场返回到场相位号且调用挂起/排队，最后一次到场触发合拢；全部四方以 `OK` 收束，`arriveAndAwaitAdvance` 均返回同一到场相位号（JDK 返回值语义）；`getPhase()` 推进 1、`getArrivedParties()` 归零
+
+#### Scenario: 超时不泄漏等待位
+
+- **WHEN** 单参与者 `awaitAdvanceInterruptibly(0, 50ms)` 而无人使其相位推进
+- **THEN** 到期抛 `TimeoutException`，SDK 已发出 `CANCEL`；该 request_id 的后续迟到唤醒通知被挂起环按既有终止竞争纪律忽略；服务端等待集经三路回收不残留（ghost 至多存续至清扫/会话收口，且全程计入合并护栏）
+
+#### Scenario: 换主窗等待自愈
+
+- **WHEN** 等待方 `expected_phase=5` 挂起期间集群换主，新相位 6 的变异条目已提交，旧 Leader 的通知随进程灭失
+- **THEN** SDK 经车道激活/保活通道重挂 `AWAIT_ADVANCE(5)`，新 Leader 即刻回 `OK{phase=6}`——等待无损耗醒转；该差异（对照条件 signal 丢失窗）在 Javadoc 声明且 E2E 钉住
+
+#### Scenario: 配额严格归属与构造注册
+
+- **WHEN** 会话 A `newPhaser(key, 3)` 后，未注册的会话 B 对其 key 调用 `arriveAndDeregister()`；随后会话 A 第三次 `arriveAndDeregister()` 后又追加一次
+- **THEN** B 被 `INVALID_REQUEST`（零配额拒绝，账簿零扰动）；A 的第三次离场正常（registered 归 0、空转）、第四次的配额透支同样被拒——JDK 匿名 party 的未定义行为在本 SDK 显式化为拒绝

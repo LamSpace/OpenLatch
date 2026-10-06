@@ -2,9 +2,11 @@ package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.result.AtomicOpResult;
+import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -143,5 +145,110 @@ class CoreEngineAtomicTest {
         engine.expireDue();
         assertThat(engine.atomicOp(at(a, "k", LockType.ATOMIC_LONG, AtomicOp.GET, 0, 0, 0, 0, 0))
                 .value()).isEqualTo(5);
+    }
+
+    // ===================== 有值引用形态（v6）=====================
+
+    /** 引用命令简构（会话 sid、请求 1）。 */
+    private AtomicRefOpCommand ref(long sid, String key, AtomicOp op, byte[] operand,
+            byte[] expected, long expectedVersion, byte[] initial, long opSeq) {
+        return new AtomicRefOpCommand(sid, 1, key, op, operand, expected,
+                expectedVersion, initial, opSeq);
+    }
+
+    @Test
+    void refScalarCrossFormMutualRejectionsLeaveStateUntouched() {
+        long a = engine.sessionOpened();
+        // 标量 key 上引用请求 → 形态互拒，标量态零扰动。
+        set(a, "k", 7, 1);
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .outcome()).isEqualTo(Outcome.REJECT_TYPE_MISMATCH);
+        assertThat(engine.atomicOp(at(a, "k", LockType.ATOMIC_LONG, AtomicOp.GET, 0, 0, 0, 0, 0))
+                .value()).isEqualTo(7);
+        // 引用 key 上标量请求 → 形态互拒，引用态零扰动。
+        assertThat(engine.atomicRefOp(ref(a, "r", AtomicOp.SET, new byte[] {1},
+                null, 0, null, 1)).outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(engine.atomicOp(at(a, "r", LockType.ATOMIC_INTEGER, AtomicOp.SET,
+                1, 0, 0, 0, 2)).outcome()).isEqualTo(Outcome.REJECT_TYPE_MISMATCH);
+        // 标量门面携引用形态属通道误用。
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                engine.atomicOp(at(a, "r", LockType.ATOMIC_REFERENCE, AtomicOp.GET,
+                        0, 0, 0, 0, 0)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void refGetOnAbsentKeyReturnsNullAndCreatesNothing() {
+        long a = engine.sessionOpened();
+        AtomicRefOpResult r = engine.atomicRefOp(ref(a, "k", AtomicOp.GET,
+                null, null, 0, null, 0));
+        assertThat(r.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(r.value()).isNull();
+        assertThat(r.version()).isZero();
+        // 条目未建：随后带主张的 SET 正常创建（主张值为旧值基准）。
+        AtomicRefOpResult w = engine.atomicRefOp(ref(a, "k", AtomicOp.SET,
+                new byte[] {5}, null, 0, new byte[] {9}, 1));
+        assertThat(w.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(w.oldValue()).containsExactly(9);
+        assertThat(w.value()).containsExactly(5);
+        assertThat(w.version()).isEqualTo(1);
+    }
+
+    @Test
+    void refNullAndEmptyAreDistinctStates() {
+        long a = engine.sessionOpened();
+        // 建条目（无主张）→ 初值 null 态。
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.SET, new byte[] {1},
+                null, 0, null, 1)).outcome()).isEqualTo(Outcome.GRANTED);
+        // 置 null 态并 CAS 自 null 建立。
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.SET, null,
+                null, 0, null, 2)).applied()).isTrue();
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .value()).isNull();
+        // CAS 期望 null 命中。
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.CAS, new byte[] {2},
+                null, 0, null, 3)).applied()).isTrue();
+        // 空字节串 ≠ null：期望 null 的 CAS 不再命中。
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.CAS, new byte[] {3},
+                null, 0, null, 4)).applied()).isFalse();
+        // 空串与 null 亦可经初值主张区分：null 主张=不主张，空串主张可冲突。
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.SET, new byte[] {4},
+                null, 0, new byte[0], 5)).outcome()).isEqualTo(Outcome.REJECT_ATOMIC_INIT);
+    }
+
+    @Test
+    void refAddRejectedAndClosedSessionRejected() {
+        long a = engine.sessionOpened();
+        engine.atomicRefOp(ref(a, "k", AtomicOp.SET, new byte[] {1}, null, 0, null, 1));
+        // ADD 对引用形态属值域外，条目零扰动。
+        AtomicRefOpResult bad = engine.atomicRefOp(ref(a, "k", AtomicOp.ADD,
+                new byte[] {1}, null, 0, null, 2));
+        assertThat(bad.outcome()).isEqualTo(Outcome.REJECT_ATOMIC_RANGE);
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .value()).containsExactly(1);
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .version()).isEqualTo(1);
+        // 会话不存在与已关闭均拒。
+        assertThat(engine.atomicRefOp(ref(999, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .outcome()).isEqualTo(Outcome.REJECT_SESSION);
+        engine.sessionClosed(a);
+        assertThat(engine.atomicRefOp(ref(a, "k", AtomicOp.GET, null, null, 0, null, 0))
+                .outcome()).isEqualTo(Outcome.REJECT_SESSION);
+    }
+
+    @Test
+    void refValueUnboundFromSessionLife() {
+        long a = engine.sessionOpened();
+        long b = engine.sessionOpened();
+        engine.atomicRefOp(ref(a, "k", AtomicOp.SET, new byte[] {7, 7}, null, 0, null, 1));
+        // A 死亡不回滚：B 读到同字节、同版本，且 B 写不重置初值。
+        engine.sessionClosed(a);
+        AtomicRefOpResult r = engine.atomicRefOp(ref(b, "k", AtomicOp.GET,
+                null, null, 0, null, 0));
+        assertThat(r.value()).containsExactly(7, 7);
+        assertThat(r.version()).isEqualTo(1);
+        // B 携初值主张亦不隐式重建：非 null 主张与定型（无主张→null 初值）不符。
+        assertThat(engine.atomicRefOp(ref(b, "k", AtomicOp.SET, new byte[] {8},
+                null, 0, new byte[] {1}, 2)).outcome()).isEqualTo(Outcome.REJECT_ATOMIC_INIT);
     }
 }

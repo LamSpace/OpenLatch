@@ -82,15 +82,22 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      * @param permitsTotal Semaphore 条目的许可总量（非 Semaphore 恒 0）
      * @param latchTotal  Latch 条目的定型初始计数（非 Latch 恒 0）
      * @param latchCount  Latch 条目的当前剩余计数（非 Latch 恒 0）
-     * @param atomic      ATOMIC 条目的状态组（形态合法值、版本戳与去重槽；
+     * @param atomic      ATOMIC 标量条目的状态组（形态合法值、版本戳与去重槽；
      *                    非 ATOMIC 恒 {@code null}）
      * @param barrier     BARRIER 条目的状态组（parties/世代/到场账簿/挂账/
      *                    了结记录；非 BARRIER 恒 {@code null}）
+     * @param atomicRef   ATOMIC 有值引用条目的状态组（初值/载荷/版本戳与
+     *                    去重槽；非该形态恒 {@code null}）
+     * @param queue       QUEUE/DELAY_QUEUE 条目的状态组（容量/元素列表/去重槽表；
+     *                    非队列形态恒 {@code null}）
+     * @param phaser      PHASER 条目的账簿状态组（相位/注册/到场/配额/换代窗口；
+     *                    非相位器形态恒 {@code null}，v10）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
-                        AtomicState atomic, BarrierState barrier) {
+                        AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef,
+                        QueueState queue, PhaserState phaser) {
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -104,7 +111,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          */
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
-            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders, 0, 0, 0, null, null);
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    0, 0, 0, null, null, null, null, null);
         }
 
         /**
@@ -124,7 +132,35 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 long expiresAtMs, List<Holder> holders, int permitsTotal,
                 long latchTotal, long latchCount) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    permitsTotal, latchTotal, latchCount, null, null);
+                    permitsTotal, latchTotal, latchCount, null, null, null, null, null);
+        }
+
+        /**
+         * v10 之前的十三参形态（含 atomic/barrier/atomicRef/queue 状态组、
+         * 不含相位器状态组）：PHASER 状态组恒 {@code null}——既有构造点
+         * （恢复装配与测试）不因新维改写。
+         *
+         * @param key         锁键
+         * @param lockType    锁类型
+         * @param leaseToken  当前租约凭证
+         * @param leaseMs     实际生效租期
+         * @param expiresAtMs 当前到期时刻
+         * @param holders     持有者列表
+         * @param permitsTotal Semaphore 许可总量
+         * @param latchTotal  Latch 定型初始计数
+         * @param latchCount  Latch 当前剩余计数
+         * @param atomic      标量原子状态组（非该形态 {@code null}）
+         * @param barrier     屏障状态组（非该形态 {@code null}）
+         * @param atomicRef   有值引用状态组（非该形态 {@code null}）
+         * @param queue       队列状态组（非该形态 {@code null}）
+         */
+        public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
+                long expiresAtMs, List<Holder> holders, int permitsTotal,
+                long latchTotal, long latchCount, AtomicState atomic, BarrierState barrier,
+                AtomicRefState atomicRef, QueueState queue) {
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    permitsTotal, latchTotal, latchCount, atomic, barrier, atomicRef,
+                    queue, null);
         }
 
         /**
@@ -133,7 +169,9 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
          * 非空；Latch 条目无租约与持有者（三元组与 holders 允许 0/空），
          * 计数须在 {@code [0, total]} 内且 {@code total >= 1}；ATOMIC 条目
          * 无租约与持有者、MUST 携带原子状态组且初值/当前值/槽应答属形态
-         * 值域（integer 截断域、boolean 限 {0,1}）；BARRIER 条目无租约与
+         * 值域（integer 截断域、boolean 限 {0,1}）；ATOMIC_REFERENCE 条目
+         * 无租约与持有者、MUST 携带引用状态组（载荷可为 null/零长度两态，
+         * 尺寸不校验——钳制属接入层）；BARRIER 条目无租约与
          * 持有者、MUST 携带屏障状态组且 parties/generation 为正、了结编码
          * 在值域内。
          *
@@ -160,9 +198,59 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 throw new IllegalArgumentException(
                         "non-barrier entry carries barrier state: key=" + key);
             }
+            boolean queueKind = lockType == LockType.QUEUE || lockType == LockType.DELAY_QUEUE;
+            if (queueKind) {
+                if (queue == null) {
+                    throw new IllegalArgumentException(
+                            "queue entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "queue entry carries lease or holders: key=" + key);
+                }
+            } else if (queue != null) {
+                throw new IllegalArgumentException(
+                        "non-queue entry carries queue state: key=" + key);
+            }
+            boolean phaserKind = lockType == LockType.PHASER;
+            if (phaserKind) {
+                if (phaser == null) {
+                    throw new IllegalArgumentException(
+                            "phaser entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "phaser entry carries lease or holders: key=" + key);
+                }
+            } else if (phaser != null) {
+                throw new IllegalArgumentException(
+                        "non-phaser entry carries phaser state: key=" + key);
+            }
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
                     || lockType == LockType.ATOMIC_BOOLEAN;
+            boolean atomicRefKind = lockType == LockType.ATOMIC_REFERENCE;
+            if (atomicRefKind) {
+                if (atomicRef == null) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry requires state group: key=" + key);
+                }
+                if (atomic != null) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must not carry scalar state: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must have no holders or lease: key=" + key);
+                }
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                    throw new IllegalArgumentException(
+                            "atomic reference entry must not carry other-family counters: key=" + key);
+                }
+            } else if (atomicRef != null) {
+                throw new IllegalArgumentException(
+                        "non-reference entry must not carry reference state: key=" + key);
+            }
             if (atomicKind) {
                 if (atomic == null) {
                     throw new IllegalArgumentException("atomic entry requires state group: key=" + key);
@@ -190,12 +278,35 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 }
             } else if (lockType == LockType.BARRIER) {
                 // 屏障自洽性已在家族首检完成；此处只拦他族字段携带。
-                if (atomic != null || permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0) {
                     throw new IllegalArgumentException(
                             "barrier entry must not carry other-family state: key=" + key);
                 }
+            } else if (queueKind) {
+                // 队列自洽性首检完成租约/持有面；此处校验状态组本身与他族字段零携带。
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0
+                        || atomic != null || atomicRef != null) {
+                    throw new IllegalArgumentException(
+                            "queue entry must not carry other-family state: key=" + key);
+                }
+                if (queue.capacity() < 1 || queue.elements().size() > queue.capacity()) {
+                    throw new IllegalArgumentException(
+                            "bad queue state: key=" + key + " capacity=" + queue.capacity()
+                                    + " elements=" + queue.elements().size());
+                }
+            } else if (phaserKind) {
+                // 相位器自洽性首检完成租约/持有面；此处校验他族字段零携带
+                // （账簿不变量由 PhaserState 构造器钉定）。
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0
+                        || atomic != null || atomicRef != null || barrier != null
+                        || queue != null) {
+                    throw new IllegalArgumentException(
+                            "phaser entry must not carry other-family state: key=" + key);
+                }
+            } else if (atomicRefKind) {
+                // 引用条目自洽性已在家族首检完成（载荷两态原样直写，不校验）。
             } else {
-                if (atomic != null) {
+                if (atomic != null || atomicRef != null) {
                     throw new IllegalArgumentException(
                             "non-atomic entry must not carry atomic state: key=" + key);
                 }
@@ -225,7 +336,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
                     && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
-                    && !atomicKind && holders.size() != 1) {
+                    && !atomicKind && !atomicRefKind && !queueKind && !phaserKind
+                    && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -275,6 +387,50 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
     }
 
     /**
+     * ATOMIC 有值引用条目的快照状态组（数据载体）：定型初值主张、当前
+     * 载荷、版本戳与去重槽（最近被处理写操作的会话/序号与载荷应答
+     * 四元组；空槽以 {@code slotSession = 0} 表达）。载荷的 null 与零
+     * 长度两态按原样保留（重建直写通道，不做解释）；尺寸不校验——
+     * 载荷钳制属接入层，快照/日志内容视为已钳制。构造时对载荷数组
+     * 做防御性复制（维持本类型"深不可变"承诺）。
+     *
+     * @param initial      定型初值主张（{@code null}=无主张创建）
+     * @param value        当前载荷（{@code null}=null 态、零长度=空字节串）
+     * @param version      版本戳（{@code >= 0}）
+     * @param slotSession  去重槽会话（0=空槽）
+     * @param slotOpSeq    去重槽序号（空槽恒 0；非空槽 {@code >= 1}）
+     * @param slotApplied  槽应答 applied
+     * @param slotOldValue 槽应答 oldValue 载荷（可为 null；空槽为 null）
+     * @param slotValue    槽应答 value 载荷（可为 null；空槽为 null）
+     * @param slotVersion  槽应答 version
+     */
+    public record AtomicRefState(byte[] initial, byte[] value, long version, long slotSession,
+                                 long slotOpSeq, boolean slotApplied, byte[] slotOldValue,
+                                 byte[] slotValue, long slotVersion) {
+
+        /**
+         * 构造并做载荷数组防御性复制与版本/槽形态自洽校验。
+         *
+         * @throws IllegalArgumentException 版本为负、空/非空槽与序号矛盾
+         */
+        public AtomicRefState {
+            if (version < 0) {
+                throw new IllegalArgumentException("atomic version must be >= 0: " + version);
+            }
+            if (slotSession == 0 && slotOpSeq != 0) {
+                throw new IllegalArgumentException("empty dedup slot must carry seq 0");
+            }
+            if (slotSession != 0 && slotOpSeq < 1) {
+                throw new IllegalArgumentException("occupied dedup slot must carry seq >= 1");
+            }
+            initial = initial == null ? null : initial.clone();
+            value = value == null ? null : value.clone();
+            slotOldValue = slotOldValue == null ? null : slotOldValue.clone();
+            slotValue = slotValue == null ? null : slotValue.clone();
+        }
+    }
+
+    /**
      * 循环屏障条目的复制态状态组（快照/重建直写通道）：
      * parties 定型、当前世代号与到场账簿、动作挂账 (会话, 请求)、
      * 最近完结世代的了结记录（形态 0=无、1=TRIPPED、2=BROKEN）。
@@ -317,6 +473,106 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             completedArrivals = java.util.List.copyOf(completedArrivals);
             if (completedGeneration == 0 && !completedArrivals.isEmpty()) {
                 throw new IllegalArgumentException("completed arrivals without completed generation");
+            }
+        }
+    }
+
+    /**
+     * 队列条目的复制态状态组（快照/重建直写通道，数据载体）：定型容量、
+     * 元素列表与每会话去重槽表。元素列表序即队列序（序列化确定性前提：
+     * {@code QUEUE} 形态为到达序，{@code DELAY_QUEUE} 形态为到期序且同到期
+     * 到达序），槽表按会话 id 升序导出；载荷与交付字节均为不透明原样直写，
+     * 尺寸不校验——钳制属接入层，快照/日志内容视为已钳制。构造时对列表与
+     * 数组做防御性复制（维持本类型"深不可变"承诺）。
+     *
+     * @param capacity 定型容量（{@code >= 1}，建条目非零主张的沉淀值）
+     * @param elements 元素列表（队列序；每项载荷非 null，到期时刻毫秒——
+     *                 {@code QUEUE} 形态恒 0）
+     * @param slots    去重槽表（会话 id 升序；每会话至多一条，含最近一次
+     *                 已应用写操作的序号/操作与交付回执）
+     */
+    public record QueueState(long capacity,
+            java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.ElementState> elements,
+            java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState> slots) {
+
+        /**
+         * 构造并校验容量下界与列表深复制。
+         *
+         * @throws IllegalArgumentException 容量 {@code < 1}
+         */
+        public QueueState {
+            if (capacity < 1) {
+                throw new IllegalArgumentException("queue capacity must be >= 1: " + capacity);
+            }
+            elements = java.util.List.copyOf(elements);
+            slots = java.util.List.copyOf(slots);
+        }
+    }
+
+    /**
+     * PHASER 条目的快照状态组（v10；账簿直写通道，数据载体）：相位号、
+     * 注册总数、当前相位到场计数、每会话配额表、当前在场去重槽与上一
+     * 推进周期窗口（换代重发判据）。列表序即确定性导出序（配额按会话
+     * id 升序、槽按 (会话,请求) 升序——跨副本摘要可比的前提）；等待集
+     * 不入本状态组（Leader 本地易失态，恢复即清空、客户端重挂补登记——
+     * v9 条件集条款同构）。
+     *
+     * <p><b>账簿不变量</b>（构造即钉定，快照存续的条目恒自洽）：
+     * {@code registered} 恒等于配额表 parties 之和；{@code arrived==0}
+     * 或 {@code arrived < registered}（推进判据 {@code arrived>0 ∧
+     * arrived≥registered} 的补集——已到场者死亡致 registered 缩小的形态
+     * 由 removeSession 的即时推进收口，恢复态恒满足）；{@code prevPhase}
+     * 为 -1（尚无换代）或小于 {@code phase} 的相位号；换代窗口空则
+     * {@code prevArrivals} 必空。槽与 {@code arrived} 刻意不互为镜像
+     * （死亡摘槽不回退计数——"已到场事实不撤销"）。
+     *
+     * @param phase        当前相位号（≥0）
+     * @param registered   注册总数（= 配额表之和）
+     * @param arrived      当前相位到场计数（≥0）
+     * @param parties      每会话注册配额（会话 id 升序）
+     * @param arrivals     当前在场去重槽（(会话,请求) 升序）
+     * @param prevPhase    上一推进周期到场相位（-1=尚无换代）
+     * @param prevArrivals 上一推进周期到场槽（升序）
+     */
+    public record PhaserState(long phase, int registered, int arrived,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.PartyView> parties,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival> arrivals,
+            long prevPhase,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival> prevArrivals) {
+
+        /**
+         * 构造并校验账簿自洽性与列表深复制。
+         *
+         * @throws IllegalArgumentException 自洽性违例
+         */
+        public PhaserState {
+            if (phase < 0) {
+                throw new IllegalArgumentException("phaser phase must be >= 0: " + phase);
+            }
+            parties = java.util.List.copyOf(parties);
+            arrivals = java.util.List.copyOf(arrivals);
+            prevArrivals = java.util.List.copyOf(prevArrivals);
+            int sum = 0;
+            for (var p : parties) {
+                if (p.parties() < 1) {
+                    throw new IllegalArgumentException("phaser party row must be positive: " + p);
+                }
+                sum += p.parties();
+            }
+            if (sum != registered) {
+                throw new IllegalArgumentException(
+                        "phaser registered mismatch: ledger=" + registered + " parties=" + sum);
+            }
+            if (arrived < 0 || (arrived > 0 && arrived >= registered)) {
+                throw new IllegalArgumentException(
+                        "bad phaser arrival counters: arrived=" + arrived
+                                + " registered=" + registered);
+            }
+            if (prevPhase < -1 || (prevPhase >= 0 && prevPhase >= phase)) {
+                throw new IllegalArgumentException("bad phaser prevPhase: " + prevPhase);
+            }
+            if (prevPhase == -1 && !prevArrivals.isEmpty()) {
+                throw new IllegalArgumentException("phaser prev arrivals without prev phase");
             }
         }
     }

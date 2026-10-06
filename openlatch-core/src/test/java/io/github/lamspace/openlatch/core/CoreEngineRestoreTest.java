@@ -17,9 +17,11 @@
 package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
@@ -210,5 +212,54 @@ class CoreEngineRestoreTest {
                 List.of(sid), 6));
         assertThatThrownBy(() -> fresh.restoreFrom(CoreStateRestore.empty()))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void restoredReferenceEntryPreservesPayloadAndDedupSlot() {
+        long holder = session();
+        byte[] big = new byte[2048];
+        java.util.Arrays.fill(big, (byte) 0x5A);
+        // 引用条目：初值主张 {1}、当前值 2KB 载荷、版本 5、槽 (holder,8) 应答四元组。
+        engine.restoreFrom(new CoreStateRestore(
+                List.of(new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE, 0, 0, 0,
+                        List.of(), 0, 0, 0, null, null,
+                        new CoreStateRestore.AtomicRefState(new byte[] {1}, big, 5,
+                                holder, 8, true, new byte[] {2}, new byte[] {3}, 4), null)),
+                List.of(holder), 1));
+        // 命中槽重放：返回槽内应答（恢复不重演操作规则），载荷字节级保真。
+        AtomicRefOpResult replay = engine.atomicRefOp(new AtomicRefOpCommand(holder, 1, "r",
+                AtomicOp.SET, new byte[] {9}, null, 0, null, 8));
+        assertThat(replay.outcome()).isEqualTo(Outcome.GRANTED);
+        assertThat(replay.value()).containsExactly(3);
+        assertThat(replay.version()).isEqualTo(4);
+        // 未重表演：当前值与版本仍为恢复所得。
+        AtomicRefOpResult read = engine.atomicRefOp(new AtomicRefOpCommand(holder, 2, "r",
+                AtomicOp.GET, null, null, 0, null, 0));
+        assertThat(read.value()).containsExactly(big);
+        assertThat(read.version()).isEqualTo(5);
+        // null 主张条目恢复后非 null 主张仍冲突（初值语义存续）。
+        assertThat(engine.atomicRefOp(new AtomicRefOpCommand(holder, 3, "r",
+                AtomicOp.SET, new byte[] {7}, null, 0, new byte[] {8}, 9)).outcome())
+                .isEqualTo(Outcome.REJECT_ATOMIC_INIT);
+    }
+
+    @Test
+    void referenceEntryStateGroupGuards() {
+        // 引用形态缺状态组拒。
+        assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE,
+                0, 0, 0, List.of(), 0, 0, 0, null, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class);
+        // 标量形态携带引用状态组拒。
+        assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_LONG,
+                0, 0, 0, List.of(), 0, 0, 0,
+                new CoreStateRestore.AtomicState(0, 1, 1, 0, 0, false, 0, 0, 0), null,
+                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0), null))
+                .isInstanceOf(IllegalArgumentException.class);
+        // 引用形态携租约/持有者拒。
+        assertThatThrownBy(() -> new CoreStateRestore.Entry("r", LockType.ATOMIC_REFERENCE,
+                3, 30_000, 1_000, List.of(new CoreStateRestore.Holder(1, 1, 1)), 0, 0, 0,
+                null, null,
+                new CoreStateRestore.AtomicRefState(null, null, 0, 0, 0, false, null, null, 0), null))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

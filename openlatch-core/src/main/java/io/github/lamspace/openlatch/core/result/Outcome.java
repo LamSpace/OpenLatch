@@ -36,7 +36,11 @@ package io.github.lamspace.openlatch.core.result;
  * 家族/形态判定（{@link #REJECT_TYPE_MISMATCH}）→ 布尔值域检查
  * （{@link #REJECT_ATOMIC_RANGE}）→ 初值断言（{@link #REJECT_ATOMIC_INIT}）→
  * 去重槽重放或操作执行（结果恒 {@link #GRANTED}，CAS 家族成败由
- * {@code applied} 承载、不占用本枚举判别位）。
+ * {@code applied} 承载、不占用本枚举判别位）。有值引用形态
+ * （{@code ATOMIC_REFERENCE}）判定顺序同构，仅两处换形：值域检查为
+ * "ADD 属值域外操作"（字节串无加法，复用 {@link #REJECT_ATOMIC_RANGE}），
+ * 初值断言为 presence 主张（非 {@code null} 主张须与定型初值字节相符，
+ * 复用 {@link #REJECT_ATOMIC_INIT}）；两者条目状态均零扰动。
  *
  * <p><b>屏障通道口径</b>：BARRIER 家族的判定顺序为会话预检 → key 校验 →
  * 家族判定（{@link #REJECT_TYPE_MISMATCH}）→ parties 断言
@@ -89,15 +93,17 @@ public enum Outcome {
     REJECT_LATCH_TOTAL,
     /**
      * 拒绝：原子变量初值主张不成立——既有条目上非零 {@code initial_value}
-     * 与定型初值不符；条目状态零扰动，server 层映射协议
+     * 与定型初值不符（有值引用形态：非 {@code null} 主张与定型初值字节
+     * 不符）；条目状态零扰动，server 层映射协议
      * {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
      * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
      */
     REJECT_ATOMIC_INIT,
     /**
      * 拒绝：原子变量参数越出形态值域——布尔形态的落值/期望值不在
-     * {0,1}，或布尔形态携带 ADD 操作；条目状态零扰动，server 层
-     * 映射协议 {@code INVALID_REQUEST}。
+     * {0,1}，布尔形态携带 ADD 操作，或有值引用形态携带 ADD 操作
+     * （字节串无加法）；条目状态零扰动，server 层映射协议
+     * {@code INVALID_REQUEST}。
      */
     REJECT_ATOMIC_RANGE,
     /**
@@ -115,10 +121,41 @@ public enum Outcome {
      */
     REJECT_BARRIER_ACTION,
     /**
+     * 拒绝：队列容量断言不成立——建条目（PUT/阻塞 TAKE）未携带
+     * {@code > 0} 的容量主张（协调面无无界队列），或既有队列条目上
+     * 非零主张与定型容量不符；条目状态零扰动，server 层映射协议
+     * {@code INVALID_REQUEST}（判例：{@link #REJECT_SEMAPHORE_TOTAL} /
+     * {@link #REJECT_LATCH_TOTAL} 的非零主张规则）。
+     */
+    REJECT_QUEUE_CAPACITY,
+    /**
      * 在带裁决：循环屏障等待项所属世代已破障（离场即破障：在队到场者
      * 超时离场/本地中断/会话死亡/显式 {@code breakBarrier()} 任一触发）；
      * 非请求错误，连接与会话不受影响，server 层映射协议同名状态码
      * {@code BARRIER_BROKEN}。
      */
-    BARRIER_BROKEN
+    BARRIER_BROKEN,
+    /**
+     * 拒绝：相位器注册使 {@code registeredParties} 超过
+     * {@code max-parties-per-phaser} 护栏（判定唯一在受理点——条目应用侧
+     * MUST NOT 复核本上限，节点本地配置参与账簿判定会引入跨副本回放分歧，
+     * 判例 {@link #REJECT_QUEUE_CAPACITY} 的"钳制属接入层"纪律）；server
+     * 层映射协议 {@code OVERLOADED}（资源护栏语义骑既有码，与队列"等待满"
+     * 同轨；线路判别由请求 op 标签承载——register 线超限=配额护栏）。
+     */
+    REJECT_PHASER_PARTIES,
+    /**
+     * 拒绝：{@code ARRIVE_AND_DEREGISTER} 的调用会话注册配额为零——本原语
+     * 对 JDK 匿名 party 未定义行为的显式化收紧（离场只能扣本会话配额，
+     * 死亡摘除因此有确定的归属域）；账簿与等待集零扰动，server 层映射
+     * 协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_PHASER_QUOTA,
+    /**
+     * 拒绝：非 REGISTER 操作命中不存在的相位器条目——REGISTER 是 PHASER
+     * 家族唯一的建条目入口（phaser 无 parties 定型断言可折叠，不做隐式
+     * 建条目，避免"key 在而账簿空"歧义窗）；server 层映射协议
+     * {@code INVALID_REQUEST}。
+     */
+    REJECT_PHASER_NO_ENTRY
 }

@@ -194,6 +194,40 @@ class HandshakeTest {
     }
 
     @Test
+    void v6_hello_accepted_with_version_echo() {
+        // v6 握手进入接受区间，回显请求版本 6。
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(6)
+                .setType(MessageType.HELLO)
+                .setRequestId(47)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(6))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(6);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(resp.getHelloResponse().getServerProtocolVersion())
+                .isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
+    }
+
+    @Test
+    void v7_hello_accepted_with_version_echo() {
+        // v7 握手进入接受区间，回显请求版本 7（队列能力对 v7 会话开放）。
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(7)
+                .setType(MessageType.HELLO)
+                .setRequestId(48)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(7))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(7);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(resp.getHelloResponse().getServerProtocolVersion())
+                .isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
+    }
+
+    @Test
     void cluster_view_on_single_node_rejected_invalid_request() {
         ch.writeInbound(hello(42, 2, "")); // 先完成 v2 握手进入业务阶段
         readOutboundEnvelope();
@@ -234,9 +268,26 @@ class HandshakeTest {
     }
 
     @Test
+    void v8_hello_accepted_with_version_echo() {
+        // v8 握手进入接受区间，回显请求版本 8（topic 能力对 v8 会话开放）。
+        ch.writeInbound(Envelope.newBuilder()
+                .setProtocolVersion(8)
+                .setType(MessageType.HELLO)
+                .setRequestId(49)
+                .setHelloRequest(HelloRequest.newBuilder().setClientProtocolVersion(8))
+                .build());
+
+        Envelope resp = readOutboundEnvelope();
+        assertThat(resp.getProtocolVersion()).isEqualTo(8);
+        assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(resp.getHelloResponse().getServerProtocolVersion())
+                .isEqualTo(OpenLatchServer.PROTOCOL_VERSION);
+    }
+
+    @Test
     void wrong_protocol_version_rejected_and_disconnected() {
-        // v5 起接受区间为 [1,5]：越界版本（6）拒绝并断连。
-        ch.writeInbound(hello(1, 6, ""));
+        // v10 起接受区间为 [1,10]：越界版本（11）拒绝并断连。
+        ch.writeInbound(hello(1, 11, ""));
 
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);

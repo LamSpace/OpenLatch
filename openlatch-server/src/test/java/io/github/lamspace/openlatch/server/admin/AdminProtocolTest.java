@@ -26,6 +26,7 @@ import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.AtomicOp;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse;
 import io.github.lamspace.openlatch.protocol.AdminKeyInfo;
@@ -262,6 +263,77 @@ class AdminProtocolTest {
         assertThat(s.getVersion()).isEqualTo(OpenLatchServer.serverVersion());
     }
 
+    /**
+     * v9 条件等待单机管理维：LIST_KEYS LOCK 行 {@code condition_waiters}、
+     * KEY_DETAIL 五字段明细与等待队列区段互斥计数（搬运不入 waiters 时两区
+     * 各表其主）、"持有已随 await 释放"形态（持有读数如实零、行仍可见——
+     * 条件集使条目存活）、SUMMARY 等待者合计含条件、非 LOCK 键条件字段恒
+     * 零值/空列表、反复观察零扰动。
+     */
+    @Test
+    void conditionWaitersVisibleInSummaryListAndDetail() {
+        long other = core.sessionOpened();
+        // 持有者折叠 await：重入一步清零（无持有者形态），登记入条件集 "gate"。
+        core.acquire(new AcquireCommand(sessionId, 300, "job:q",
+                LockType.REENTRANT, 11, 30_000, false, 1, 0));
+        var fold = core.acquire(new AcquireCommand(sessionId, 301, "job:q",
+                LockType.REENTRANT, 11, 30_000, true, 1, 0, "gate"));
+        assertThat(fold.outcome()).isEqualTo(io.github.lamspace.openlatch.core.result.Outcome.QUEUED);
+        assertThat(core.conditionWaiterCount("job:q")).isEqualTo(1);
+        // 非持有者 ghost 登记（重挂形态同径，权限降级面）：第二条件集 "ready"。
+        core.acquire(new AcquireCommand(other, 302, "job:q",
+                LockType.REENTRANT, 12, 30_000, true, 1, 0, "ready"));
+        // Semaphore 对照键：非 LOCK 家族条件字段恒零。
+        core.acquire(new AcquireCommand(other, 303, "sem", LockType.SEMAPHORE,
+                12, 30_000, true, 1, 2));
+
+        AdminSummaryResponse s = admin(adminSummary(8, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getTotalWaiters()).as("等待者合计含条件等待者").isEqualTo(2);
+
+        AdminKeyInfo row = admin(adminListKeys(9, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("job:q")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("lock");
+        assertThat(row.getHolders()).as("持有已随 await 释放").isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getWaiterCount()).as("无搬运项，等待队列口径为 0").isZero();
+        assertThat(row.getConditionWaiters()).isEqualTo(2);
+        AdminKeyInfo semRow = admin(adminListKeys(10, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("sem")).findFirst().orElseThrow();
+        assertThat(semRow.getFamily()).isEqualTo("semaphore");
+        assertThat(semRow.getConditionWaiters()).as("非 LOCK 键恒零").isZero();
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(11, TOKEN, "job:q"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getConditionWaiters()).isEqualTo(2);
+        assertThat(d.getWaitersList()).as("条件等待不在队，不并入位次编号").isEmpty();
+        assertThat(d.getConditionWaitersInfoList()).hasSize(2);
+        // 集建立序（gate 先建）→ 集内到达序；五字段齐备。
+        var first = d.getConditionWaitersInfoList().get(0);
+        assertThat(first.getCondition()).isEqualTo("gate");
+        assertThat(first.getSessionId()).isEqualTo(sessionId);
+        assertThat(first.getRequestId()).isEqualTo(301);
+        assertThat(first.getThreadId()).isEqualTo(11);
+        assertThat(first.getRegisteredAtMs()).isPositive();
+        var second = d.getConditionWaitersInfoList().get(1);
+        assertThat(second.getCondition()).isEqualTo("ready");
+        assertThat(second.getSessionId()).isEqualTo(other);
+        assertThat(second.getRequestId()).isEqualTo(302);
+        assertThat(second.getThreadId()).isEqualTo(12);
+
+        // 观察零扰动：反复查询后登记计数与到达序不变，业务侧 LEAVE 照常命中。
+        AdminKeyDetailResponse again = admin(adminKeyDetail(12, TOKEN, "job:q"))
+                .getAdminKeyDetailResponse();
+        assertThat(again.getConditionWaitersInfoList()).hasSize(2);
+        assertThat(again.getConditionWaitersInfoList().get(0).getRequestId()).isEqualTo(301);
+        core.conditionOp(new io.github.lamspace.openlatch.core.command
+                .ConditionOpCommand(other, 0, "job:q", "ready",
+                io.github.lamspace.openlatch.core.command.ConditionOp.LEAVE, 302));
+        assertThat(core.conditionWaiterCount("job:q")).isEqualTo(1);
+    }
+
     @Test
     void atomicEntriesVisibleInSummaryListAndDetail() {
         long w = core.sessionOpened();
@@ -303,6 +375,138 @@ class AdminProtocolTest {
         assertThat(plain.getFamily()).isEqualTo("lock");
         assertThat(plain.getAtomicKind()).isEmpty();
         assertThat(plain.getAtomicVersion()).isZero();
+    }
+
+    @Test
+    void referenceEntriesVisibleWithBoundedTruncatedPreview() {
+        long w = core.sessionOpened();
+        // 300B 载荷：前 20 字节可打印、其后全 0xff——预览恒截断于 64B 并转义。
+        byte[] big = new byte[300];
+        java.util.Arrays.fill(big, (byte) 0xff);
+        for (int i = 0; i < 20; i++) {
+            big[i] = (byte) ('a' + i);
+        }
+        core.atomicRefOp(new AtomicRefOpCommand(sessionId, 500, "ref:a", AtomicOp.SET,
+                big, null, 0, new byte[] {9}, 1));
+        core.atomicRefOp(new AtomicRefOpCommand(w, 501, "ref:null", AtomicOp.SET,
+                null, null, 0, null, 1));
+        core.atomicRefOp(new AtomicRefOpCommand(w, 502, "ref:empty", AtomicOp.SET,
+                new byte[0], null, 0, null, 2));
+
+        // SUMMARY：引用条目并入 atomic_entries 单列计数（per-kind 不扩计数线）。
+        AdminSummaryResponse s = admin(adminSummary(20, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getAtomicEntries()).isEqualTo(3);
+
+        AdminKeyInfo row = admin(adminListKeys(21, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:a")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("atomic");
+        assertThat(row.getAtomicKind()).isEqualTo("reference");
+        assertThat(row.getAtomicValue()).isZero(); // 引用形态标量位恒 0
+        assertThat(row.getAtomicPayloadSize()).isEqualTo(300);
+        // 预览有界：可打印前缀 + \xHH 转义 + 省略号；不随载荷膨胀，全量不外发。
+        assertThat(row.getAtomicPayloadPreview())
+                .startsWith("abcdefghijklmnopqrst")
+                .contains("\\xff")
+                .endsWith("…")
+                .hasSizeLessThan(300);
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(22, TOKEN, "ref:a"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getFamily()).isEqualTo("atomic");
+        assertThat(d.getAtomicKind()).isEqualTo("reference");
+        assertThat(d.getAtomicPayloadSize()).isEqualTo(300);
+        assertThat(d.getAtomicVersion()).isEqualTo(1);
+
+        // null 态：size 0、preview 空串；空字节串：size 0、preview "\"\""——两态可区分。
+        AdminKeyInfo nullRow = admin(adminListKeys(23, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:null")).findFirst().orElseThrow();
+        assertThat(nullRow.getAtomicPayloadSize()).isZero();
+        assertThat(nullRow.getAtomicPayloadPreview()).isEmpty();
+        AdminKeyInfo emptyRow = admin(adminListKeys(24, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("ref:empty")).findFirst().orElseThrow();
+        assertThat(emptyRow.getAtomicPayloadSize()).isZero();
+        assertThat(emptyRow.getAtomicPayloadPreview()).isEqualTo("\"\"");
+    }
+
+    @Test
+    void queueEntriesVisibleInSummaryListAndDetailWithTrack() {
+        // v7 预设：一个队列 key 灌入两个元素（恰限 64KB 大元素 + 小元素），
+        // 一次 TAKE 交付、一次挂起等待（等元素轨）。
+        byte[] big = new byte[64 * 1024 - 1024];
+        java.util.Arrays.fill(big, (byte) 0x21);
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 600, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 4, big, 0, 0, 1));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 601, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 0, "tail".getBytes(java.nio.charset.StandardCharsets.UTF_8), 0, 0, 2));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 602, "queue:a", LockType.QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                false, 0, null, 0, 0, 3));
+        // 延时条目 + 挂起消费者（put 满挂起走等容量轨）：容量 1 的 delay 队列。
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 603, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.PUT,
+                false, 1, new byte[0], 60_000, 0, 4));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 604, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                true, 0, null, 0, 0, 5));
+        core.queueOp(new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, 605, "queue:d", LockType.DELAY_QUEUE,
+                io.github.lamspace.openlatch.core.QueueOpType.TAKE,
+                true, 0, null, 0, 0, 6));
+
+        AdminSummaryResponse s = admin(adminSummary(30, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getQueueEntries()).isEqualTo(2);
+
+        AdminKeyInfo row = admin(adminListKeys(31, TOKEN, 0, 10, "queue:"))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("queue:a")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("queue");
+        assertThat(row.getHolders()).isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getQueueCapacity()).isEqualTo(4);
+        assertThat(row.getQueueDepth()).isEqualTo(1); // 恰限大元素已被 TAKE
+        assertThat(row.getQueueHeadPayloadSize())
+                .isEqualTo("tail".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        assertThat(row.getQueueHeadPayloadPreview()).isEqualTo("tail");
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(32, TOKEN, "queue:a"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getFamily()).isEqualTo("queue");
+        assertThat(d.getQueueCapacity()).isEqualTo(4);
+        assertThat(d.getQueueDepth()).isEqualTo(1);
+        assertThat(d.getQueueHeadExpiryMs()).isZero(); // QUEUE 形态无到期属性
+        assertThat(d.getQueueTotalPayloadBytes()).isEqualTo(4);
+        // 大元素零外发：观察应答远小于曾驻留的 64KB 级载荷。
+        assertThat(d.toByteArray().length).isLessThan(4096);
+        // 去重槽镜像不观察（明细不外发槽表）；挂起等待经等待队列视图：queue:d
+        // 两挂起者分列位次与轨道。
+        AdminKeyDetailResponse dd = admin(adminKeyDetail(33, TOKEN, "queue:d"))
+                .getAdminKeyDetailResponse();
+        assertThat(dd.getQueueDepth()).isEqualTo(1);
+        assertThat(dd.getQueueHeadExpiryMs()).isGreaterThan(0); // DELAY 形态读数
+        assertThat(dd.getWaitersCount()).isEqualTo(2);
+        assertThat(dd.getWaiters(0).getQueueTrack()).isEqualTo(2); // 等元素
+        assertThat(dd.getWaiters(1).getQueueTrack()).isEqualTo(2);
+        assertThat(dd.getWaiters(0).getPosition()).isEqualTo(1);
+        assertThat(dd.getWaiters(1).getPosition()).isEqualTo(2);
+        // 锁条目队列字段恒缺省。
+        core.acquire(new AcquireCommand(sessionId, 610, "plain-queue", LockType.REENTRANT,
+                11, 30_000, true));
+        AdminKeyDetailResponse lock = admin(adminKeyDetail(34, TOKEN, "plain-queue"))
+                .getAdminKeyDetailResponse();
+        assertThat(lock.getQueueCapacity()).isZero();
+        assertThat(lock.getQueueDepth()).isZero();
+        assertThat(lock.getQueueHeadPayloadPreview()).isEmpty();
     }
 
     @Test

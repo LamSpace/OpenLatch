@@ -32,4 +32,34 @@
 | 离场即破障 | leave-breaks | 任一已到场方超时/中断/死亡/显式 break 即时打破其当前世代的契约（增强于 JDK） |
 | 版本戳 | version stamp | 原子变量每次成功写恰 +1 的单调计数；超时复判与 ABA 消除的依据 |
 | 去重槽 | dedup slot | 原子条目记录的最近已应用写操作 (会话, 序号, 应答)，保证超时同序号重发不双加 |
-| 初值主张 | initial claim | 原子句柄携带的非零初值断言：首建生效、既有条目不符即拒（判例：屏障 total） |
+| 初值主张 | initial claim | 原子句柄携带的非零初值断言：首建生效、既有条目不符即拒（判例：屏障 total）；引用形态换为 presence 主张（缺省=不主张、零长度=空串主张） |
+| 有值引用 | atomic reference | ATOMIC 家族的载荷形态（v6）：一段不透明字节 + 版本戳，get/set/版本 CAS，服务端永不反序列化 |
+| 载荷钳制 | payload clamp | 有值引用载荷字节上限（`max-value-bytes`，默认 4KB）：仅在接入层判定，超限命令不入日志、零生效；下调不追溯存量 |
+| 截断预览 | truncated preview | 管理观察面对引用载荷的呈现形态：恒定长度（≤64B）转义前缀 + 真实字节数，全量载荷不出现在管理应答中 |
+| 定型容量 | declared capacity | 队列首建写入主张并定格的容量上限（v7，受服务端 `max-queue-capacity` 钳制）；后续非零主张不符即拒 |
+| 出队谓词 | dequeue predicate | 队首元素可否被消费之判定：QUEUE 形态恒真；DELAY 形态要求队首绝对到期不晚于判定时刻（未到期不得被越过） |
+| 到期折算 | expiry folding | 延时元素绝对到期时刻在应用点以条目携带时刻折算（判例租约 `expires_at`）；跨副本回放逐毫秒一致 |
+| 双轨等待 | dual-track waiting | 队列挂起的两种身份：等容量（put-waiter）与等元素（take-waiter），按轨独立计位次与唤醒（v7） |
+| 应用点回弹 | apply-point bounce | 预检放行提交后应用点不可满足：阻塞请求经改写回 QUEUED 原位续挂，对调用者透明（v7） |
+| 队首门 | head gate | 非队首的挂起者重发不得越过在队前辈直接生效（单机条目与 Leader 预检两路同判），保证唤醒授予序=挂起到达序（v7） |
+| 广播 term | broadcast term | 一任 Leader 任期的广播域：`topic_seq` 仅在 term 内单调有序，换主后重新起算、跨 term 不可比（v8） |
+| topic_seq | topic sequence number | 广播消息在 term 内的受理序号（Leader 内存分配、不入日志）；单订阅视角严格升序，其缺口即订阅者丢弃推断依据（v8） |
+| 弱背压 | weak backpressure | 广播的显式背压契约：每订阅两级缓冲（服务端 + SDK 本地）满则 drop-newest——不反压发布者、不断开订阅，丢弃仅计数不通知（v8） |
+| drop-newest | drop-newest | 缓冲溢出裁决：丢最新一条并计数，既有缓冲照常交付（区别于 JDK `SubmissionPublisher` 的 overflow-close 判例）（v8） |
+| gap 推断 | gap inference | 订阅侧丢弃计数：同 term 内 `topic_seq` 跳号数 + 本地缓冲溢出数，`droppedCount()` 的构成（v8） |
+| 死亡即退订 | death-as-unsubscribe | topic 订阅与存活会话绑定：订阅者进程死亡即回收登记、缓冲与去重槽（与队列"死亡不吞元素"刻意相反）（v8） |
+| 条件等待集 | condition wait set | 锁 key 之下按条件名分组的到达序等待者登记（v9）：Leader 进程易失、不入日志不入快照，三路回收（LEAVE/会话死亡/换主），与等待队列合并计数受 `max-queue-depth-per-key` 护栏 |
+| 命名寻址 | named addressing | 条件身份 = (锁 key, 条件名) 而非句柄身份（v9）：同名句柄进程内重复创建与跨进程创建均绑定同一服务端等待集——JDK 句柄身份的分布式适配，跨进程等价是能力面 |
+| 释放折叠 | release folding | await 的"全量释放 + 入等待集登记"两半程以一条既有 ACQUIRE 条目原子承载（v9）：登记先于释放可见，同关键区无丢唤醒窗 |
+| 搬运 | carry | SIGNAL/SIGNAL_ALL 将条件等待项按到达序从等待集移入锁等待队列的动作（v9）：搬运后走既有队首授予纪律，不再计入条件等待集读数 |
+| signal 事件性 | signal-as-event | signal 家族是事件不是状态（v9）：不入日志、不补偿、不重放——换主窗内发出的 signal 丢失，等待者以 timed await 自救 |
+| 返回时持锁 | returns holding the lock | await 无论唤醒、超时还是中断收束，返回（或抛出）前必须重新持有锁的 JDK 保真契约（v9）：重入计数从 1 级起 |
+| guard loop 义务 | guard-loop obligation | 虚假唤醒允许且调用方 MUST 以谓词复查循环包裹 await（v9）：唤醒不证明谓词为真，促醒来源清单属契约面 |
+| 等待是承诺、signal 是事件 | wait-as-promise, signal-as-event | 条件的换主分层语义（v9）：等待承诺经日志重放与客户端自动重挂幸存；signal 为即时事件，换主窗内丢失即丢失（与 topic"至多一次"同句不同域） |
+| 到场相位 | arrival phase | 到场操作发生时相位器账簿所处的相位号（v10）：`arrive` 族的返回值语义，恰触发合拢的回显仍为到场时相位 |
+| 应到集合 | expected party set | 当前相位需到场的注册总数（v10）：注册跨相位存续、离场/死亡才缩容；合拢判据"到场数 > 0 且 ≥ 应到数" |
+| 注册配额 | registration quota | 各会话在相位器中未离场的注册参与数（v10）：`arriveAndDeregister` 仅可扣本会话、透支拒绝；会话死亡整行隐式摘除——JDK 匿名 party 的显式化收紧 |
+| 隐式摘除 | implicit quota removal | 参与者会话死亡时服务端自动减其注册配额、不撤销其已到场事实的死亡语义（v10）：应到集合缩小可当场合拢（不空转），与屏障"死亡即破障"刻意对照（单死者不炸锅） |
+| 空转复活 | idle-then-revive | 相位器注册归零的非终止语义（v10）：账簿空转（相位保持、配额 0），后续注册自当前相位恢复运转——与 JDK"归零即终止粘滞"相反 |
+| 换代窗口 | previous-generation window | 相位推进时保留的上一周期到场身份集与到场相位（v10）：跨推进的同请求重发据此终态回显、不双计数；再推进即滚出，更早迟到按新到场计（声明竞态，窗口下界同屏障了结记录口径） |
+| 双速呈现 | two-speed projection | phaser 管理观察的 Follower 口径（v10）：账簿三计数与配额为复制态照常可读、挂起等待明细为 Leader 本地态如实零——两区速度不同属如实呈现，MUST NOT 以计数可读误判"无人等待" |

@@ -33,8 +33,21 @@
                     <td th:text="${item.holders}">0</td>
                     <td th:text="${item.remainingLeaseMs} + 'ms'">0ms</td>
                     <td th:text="${item.waiterCount}">0</td>
-                    <td th:text="${item.family == 'atomic' ? item.atomicKind + ' = ' + item.atomicValue
-                        : (item.family == 'barrier' ? item.barrierParties + ' 方 · 世代 ' + item.barrierGeneration + ' · 到场 ' + item.barrierArrived : '')}">long = 0</td>
+                    <td th:text="${item.family == 'atomic'
+                        ? (item.atomicKind == 'reference'
+                            ? 'reference = ' + item.atomicPayloadSize + 'B ' + item.atomicPayloadPreview
+                            : item.atomicKind + ' = ' + item.atomicValue)
+                        : (item.family == 'barrier'
+                            ? item.barrierParties + ' 方 · 世代 ' + item.barrierGeneration + ' · 到场 ' + item.barrierArrived
+                            : (item.family == 'queue'
+                                ? item.queueCapacity + ' 容量 · 深度 ' + item.queueDepth + ' · 队首 ' + item.queueHeadPayloadSize + 'B ' + item.queueHeadPayloadPreview
+                                : (item.family == 'phaser'
+                                    ? item.phaserRegistered + ' registered · 相位 ' + item.phaserPhase + ' · 到场 ' + item.phaserArrived
+                                    : (item.family == 'topic'
+                                    ? item.topicSubscribers + ' 订阅（Leader 本地登记）'
+                                    : (item.family == 'lock' and item.conditionWaiters > 0
+                                        ? item.conditionWaiters + ' 条件等待'
+                                        : '')))))}">long = 0</td>
                 </tr>
                 <tr th:if="${row.value.itemsList.isEmpty()}">
                     <td colspan="6" class="empty">无条目</td>

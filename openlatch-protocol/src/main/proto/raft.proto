@@ -31,6 +31,15 @@ enum RaftEntryType {
   BARRIER_AWAIT_ENTRY       = 10;
   BARRIER_LEAVE_ENTRY       = 11;
   BARRIER_ACTION_DONE_ENTRY = 12;
+  // v7：队列操作——写（put/take/drain）与读（peek/size）皆进日志（读应用为
+  // 零迁移，判例 ATOMIC GET）；等待挂起、唤醒推送与已通知时序是 Leader 本地态，
+  // 不入日志与快照；应用点不可满足的回执 DENIED 为零迁移判定。
+  QUEUE_OP_ENTRY            = 13;
+  // v10：相位器变异命令——注册/到场/离场逐条进日志（账簿为复制态，"到场是状态
+  // 迁移"沿 v5 BARRIER 判例）；等待登记、取消与查询读数 MUST NOT 产生条目
+  // （Leader 本地裁决——"等待是订阅不是状态"类目）。14 号位即 v10 编号证据：
+  // 13 之前各值语义逐项不变、MUST NOT 复用为 phaser 变体；本值仅 phaser 占用。
+  PHASER_OP_ENTRY           = 14;
 }
 
 // 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
@@ -102,6 +111,27 @@ message BarrierActionDonePayload {
   openlatch.BarrierActionDoneRequest request    = 2;
 }
 
+// v7：队列命令载荷。request 携带 op/形态/容量断言/元素/延迟/批量上限/op_seq；
+// 写操作的去重判定在应用侧按条目内每会话去重槽完成（同槽重放返回原交付回执，
+// TAKE/DRAIN 重放交付同一份字节），跨副本回放得出一致应答；延时元素的绝对
+// 到期时刻于应用点以条目携带时刻折算（expires_at = wall_clock_ms + delay_ms），
+// 任何副本任何物理时刻回放逐毫秒一致。
+message QueueOpPayload {
+  int64                      session_id  = 1;
+  int64                      request_id  = 2;  // 原 QUEUE_OP 信封 request_id（阻塞式回弹重挂的幂等位）
+  openlatch.QueueOpRequest   request     = 3;
+}
+
+// v10：相位器变异命令载荷。request 携带 op/parties/expected_phase/await_request_id
+// （仅变异三族的字段会出现在条目中——AWAIT_ADVANCE/CANCEL/QUERY 不入日志）。
+// 到场的去重判定（(会话,请求) 在场槽）与配额扣减、合拢推进全在应用侧条目内状态
+// 完成，跨副本回放得出一致应答与一致 phaser_advanced_keys。
+message PhaserOpPayload {
+  int64                       session_id  = 1;
+  int64                       request_id  = 2;  // 原 PHASER_OP 信封 request_id（到场去重槽身份位、ARRIVE_AND_AWAIT 等待半程的关联键）
+  openlatch.PhaserOpRequest   request     = 3;
+}
+
 // LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
 // wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
 message ExpirePayload {
@@ -151,6 +181,31 @@ message ApplyResult {
   int64       barrier_parties     = 15; // 条目定型许可数回显
   bool        barrier_settled     = 16; // v5：本条目应用点使一个世代到达终态——Leader 据此对该 key 广播放行
   repeated string barrier_released_keys = 17; // v5：SESSION_CLOSE 打破世代的屏障 key 集（Leader 逐一广播破障）
+  // v6：有值引用形态的载荷回执（status=OK 时择用，显式 presence：缺省=null、
+  // 零长度=""；标量形态与其余条目恒缺省）。atomic_old_value/atomic_value
+  // 标量位对引用形态恒 0。
+  optional bytes atomic_old_value_bytes = 18; // 操作前载荷
+  optional bytes atomic_value_bytes     = 19; // 操作后（或当前）载荷
+  // v7：QUEUE_OP_ENTRY 回执（status=OK/DENIED 时择用；QUEUED 不产生——挂起为
+  // Leader 本地裁决，不经应用点）。DENIED 回执 MUST NOT 携带元素/列表。
+  // 同槽重放时即重放本组（TAKE 的 queue_element_bytes / DRAIN 的
+  // queue_drained_bytes 为重放交付的同一份字节）。
+  optional bytes queue_element_bytes = 20; // TAKE 交付 / PEEK 读数（缺省=无元素）
+  repeated bytes queue_drained_bytes = 21; // DRAIN 按出队序交付列表
+  sint64         queue_size          = 22; // SIZE 读数（驻留口径；其余 op 恒 0）
+  // v10：PHASER_OP_ENTRY 回执（status=OK/QUEUED/QUEUE_FULL/INVALID_REQUEST 时择用）。
+  // QUEUE_FULL 在此泛化为"服务端资源护栏"统一应用层码（v7 等待满既有映射骑
+  // OVERLOADED 线路）——parties 上限与合并等待深度上限两超限共码、由请求 op 在线路
+  // 侧分轨（register=配额、await 族=深度），不新增 ApplyStatus 词表值。
+  // phaser_phase 为到场相位回显（AWAIT 了结语义由 Leader 在预检/回执改写侧承载，
+  // 不占条目回执）；phaser_registered/phaser_arrived 为应用点后的账簿快照。
+  // phaser_advanced_keys：本条目应用使哪些 phaser key 的相位发生推进（含
+  // SESSION_CLOSE 配额摘除驱动的推进——判例 barrier_released_keys），Leader 据此
+  // 对相应 key 等待集执行"已见相位 < 新相位"的唤醒广播（非复制状态、仅 Leader 用）。
+  sint64         phaser_phase         = 23; // 到场相位回显（PHASER 条目外恒 0）
+  int32          phaser_registered    = 24; // 回执时刻注册总数快照
+  int32          phaser_arrived       = 25; // 回执时刻当前相位到场快照（推进后为 0）
+  repeated string phaser_advanced_keys = 26; // 本条目推进相位的 phaser key 集（唤醒广播依据）
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -195,6 +250,76 @@ message SnapshotLock {
   int32  barrier_completed_result    = 25;  // 完结形态：1=TRIPPED、2=BROKEN
   repeated SnapshotBarrierArrival barrier_completed_arrivals = 26;  // 完结世代到场账簿
   int64  barrier_completed_executor  = 27;  // 完结世代执行者会话（0=无）
+  // v6 扩展（ATOMIC 有值引用形态，lock_type = LOCK_TYPE_ATOMIC_REFERENCE；
+  // 其余家族不出现）。值/初值/槽内 old_value/value 为字节串并按显式 presence
+  // 口径序列化（缺省=null、零长度=""，两态保真可区分）；版本戳与去重槽骨架
+  // 复用标量形态既有字段（atomic_version=12、atomic_slot_session=13、
+  // atomic_slot_op_seq=14、atomic_slot_applied=15、atomic_slot_version=18），
+  // 引用条目的标量值字段（10/11/16/17）恒缺省。
+  optional bytes atomic_ref_initial     = 28; // 定型初值主张（缺省=建条目无主张，初值 null）
+  optional bytes atomic_ref_value       = 29; // 当前值（缺省=null）
+  optional bytes atomic_ref_slot_old_value = 30; // 去重槽应答 old 载荷（槽空时缺省）
+  optional bytes atomic_ref_slot_value     = 31; // 去重槽应答 value 载荷（槽空时缺省）
+  // v7 扩展（QUEUE 家族，lock_type ∈ {LOCK_TYPE_QUEUE, LOCK_TYPE_DELAY_QUEUE}；
+  // 其余家族不出现）。元素列表序列化序即队列序（跨副本摘要可比的确定性前提）；
+  // QUEUE 形态元素到期字段恒缺省（0），DELAY 形态逐毫秒保真；去重槽表每会话
+  // 至多一条（客户端同 key 在途写互斥纪律保证），TAKE/DRAIN 槽含已交付字节。
+  sint64 queue_capacity = 32;  // 定型容量（建条目非零主张的沉淀值）
+  repeated SnapshotQueueElement queue_elements = 33;      // 元素列表（队首在前）
+  repeated SnapshotQueueSlot    queue_dedup_slots = 34;   // 每会话去重槽表（会话 id 升序导出）
+  // v10 扩展（PHASER 家族，lock_type = LOCK_TYPE_PHASER；其余家族不出现）。
+  // 账簿只呈当前 (phase, registered, arrived, 在场槽, 了结窗)——相位历史零驻留、
+  // 不随推进轮次增长（尺寸有界的序列化面依据）。确定性导出序：配额表与会话
+  // 注册无关、按会话 id 升序；在场槽按 (会话, 请求) 升序；了结记录按登记到达序。
+  // 等待集与唤醒通知时序 MUST NOT 进入快照（Leader 易失，恢复即清空、客户端
+  // 重挂补登记——与 v9 条件集条款同构，差异在 phaser 的账簿本体是复制态）。
+  sint64  phaser_phase      = 35;  // 当前相位号（自 0 起单调递增，恢复不回退）
+  int32   phaser_registered = 36;  // registeredParties 注册总数
+  int32   phaser_arrived    = 37;  // 当前相位到场计数
+  repeated SnapshotPhaserParty    phaser_parties   = 38;  // 每会话注册配额（账簿插入序=注册先后，判例队列槽的确定性导出纪律但序取插入序——内部 sid 升序跨副本不可比）
+  repeated SnapshotPhaserArrival  phaser_arrivals  = 39;  // 当前相位在场去重槽（插入序=到场先后）
+  // 换代窗口（跨推进重发的终态回显判据，判例屏障完结世代账簿的计数形对偶）：
+  // prev_phase 用显式 presence——相位 0 的换代是合法值，proto3 缺省 0 无法与
+  // "尚无窗口"区分。
+  optional int64 phaser_prev_phase    = 40;  // 上一推进周期到场相位（缺省=无窗口）
+  repeated SnapshotPhaserArrival phaser_prev_arrivals = 41;  // 上一周期到场槽
+}
+
+// v10：phaser 每会话注册配额（死亡摘除与 arriveAndDeregister 扣减的归属域）。
+message SnapshotPhaserParty {
+  int64 session_id = 1;  // 逻辑会话 id
+  int32 parties    = 2;  // 该会话未离场的注册配额（>0，行存在即非零）
+  // 注册幂等槽（判例 v7 队列每会话去重槽）：该会话最近一次 REGISTER 的
+  // (请求 id, 到场相位)——同请求重发单计数回显；0=尚无注册。
+  int64 last_register_request_id = 3;
+  int64 last_register_phase      = 4;
+}
+
+// v10：phaser 在场到场身份（(会话, 请求) 二元组，当前相位去重槽列表项——
+// 相位推进即清空，与 barrier 世代到场账簿的"完结后滚动"形态对应但更简单）。
+message SnapshotPhaserArrival {
+  int64 session_id = 1;
+  int64 request_id = 2;  // 到场操作的 PHASER_OP 信封 request_id
+}
+
+// v7：队列元素（载荷 + 绝对到期时刻）。载荷为不透明字节且非 null——空串元素
+// 以零长度表达；expires_at_ms 为应用点折算产物（EntryClock 确定化语义），
+// QUEUE 形态恒 0（缺省）。
+message SnapshotQueueElement {
+  bytes payload        = 1;  // 元素载荷字节（零长度=空串元素）
+  int64 expires_at_ms  = 2;  // 绝对到期时刻（0=无到期属性）
+}
+
+// v7：队列每会话去重槽（最近一次已应用写操作及其交付回执）。op 取
+// 0=PUT / 1=TAKE / 2=DRAIN：PUT 槽无交付字节（重放=OK 已插入）；TAKE 槽
+// element_bytes 为已交付元素（含空串元素的零长度形态）；DRAIN 槽 drained_bytes
+// 为按出队序的交付列表。SESSION_CLOSE 应用点摘除对应槽。
+message SnapshotQueueSlot {
+  int64  session_id    = 1;  // 槽主会话
+  uint64 op_seq        = 2;  // 槽内写序号（同 op_seq 重放命中本槽）
+  int32  op            = 3;  // 了结的写类 op（0=PUT/1=TAKE/2=DRAIN）
+  bytes  element_bytes = 4;  // TAKE 交付字节（重放交付同一份）
+  repeated bytes drained_bytes = 5; // DRAIN 交付列表（重放交付同一份）
 }
 
 // v5：循环屏障到场身份（(会话, 请求) 二元组，快照内列表项）。

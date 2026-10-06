@@ -150,6 +150,18 @@ class RollingRestartDrillIT {
             OCountDownLatch la = a.newCountDownLatch("roll-latch", 2);
             la.init();
             assertThat(la.countDown()).isEqualTo(1);
+            // v7 队列：滚动前由 A 投递两元素——验证跨全量滚动存续与非归属会话消费。
+            OBlockingQueue qSeed = a.newBlockingQueue("roll-queue", 8);
+            qSeed.put("roll-1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            qSeed.put("roll-2".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            // v10 phaser：A 注册两方配额并到场一发（相位 0、1/2）——条目与
+            // 相位为复制态跨滚动存续；配额绑会话，A 连接换代时会被隐式摘除
+            // （契约，区别于队列"元素绑 key"）——故滚动后的断言面是"条目
+            // 存续可读 + 存活侧续注册续到场后合拢照常推进"。
+            io.github.lamspace.openlatch.client.OPhaser pSeed = a.newPhaser("roll-phaser");
+            pSeed.register();
+            pSeed.register();
+            assertThat(pSeed.arrive()).isZero();
 
             // 全量滚动（leader 先序）：逐节点停止→重启→等端口与选主。
             Node leader0 = waitLeader(nodes);
@@ -181,6 +193,66 @@ class RollingRestartDrillIT {
 
             // 许可池终态：A 归还或到期后满量可再取（两径之一，不赌时序）。
             awaitSemUntilFull(b, "roll-sem", 3, 120_000);
+            // v7 队列跨滚动：深度存续 + 另一会话（B）按到达序 drain 摘净——
+            // 元素绑定 key 不绑定会话的演练级可执行化（A 会话历经 leader 宕机
+            // 可能已换代，仍不影响这两元素的可消费性）。
+            OBlockingQueue qProbe = b.newBlockingQueue("roll-queue", 8);
+            long qDeadline = System.currentTimeMillis() + 60_000;
+            int depth = -1;
+            while (System.currentTimeMillis() < qDeadline) {
+                try {
+                    depth = qProbe.size();
+                    if (depth == 2) {
+                        break;
+                    }
+                } catch (OpenLatchException transientQ) {
+                    // 改道/重连窗（含超时子类）：重试收敛。
+                }
+                Thread.sleep(500);
+            }
+            assertThat(depth).as("队列深度跨三节点滚动存续").isEqualTo(2);
+            List<byte[]> drained = new ArrayList<>();
+            assertThat(qProbe.drainTo(drained, 8)).isEqualTo(2);
+            assertThat(new String(drained.get(0), java.nio.charset.StandardCharsets.UTF_8))
+                    .isEqualTo("roll-1");
+            assertThat(new String(drained.get(1), java.nio.charset.StandardCharsets.UTF_8))
+                    .isEqualTo("roll-2");
+            assertThat(qProbe.size()).isZero();
+            // v10 phaser 跨滚动断言面（契约形）：①条目存续、读数 QUERY 经
+            // 换代重试后可得；②存活侧 B 续注册两方并循环到场——相位必然
+            // 严格前进（合拢照常，无空转；A 配额被隐式摘除后所需的到场数
+            // 随之缩小，B 逐发到满足应到为止）。
+            io.github.lamspace.openlatch.client.OPhaser pProbe = b.newPhaser("roll-phaser");
+            long pDeadline = System.currentTimeMillis() + 60_000;
+            for (;;) {
+                try {
+                    pProbe.bulkRegister(2);
+                    break;
+                } catch (OpenLatchException transientP) {
+                    if (System.currentTimeMillis() > pDeadline) {
+                        throw transientP;
+                    }
+                    Thread.sleep(500);
+                }
+            }
+            long advancedTo = -1;
+            long aDeadline = System.currentTimeMillis() + 60_000;
+            while (advancedTo < 0) {
+                if (System.currentTimeMillis() > aDeadline) {
+                    throw new AssertionError("phaser 跨滚动后 60s 内相位未推进");
+                }
+                try {
+                    long before = pProbe.getPhase();
+                    pProbe.arrive();
+                    long after = pProbe.getPhase();
+                    if (after > before) {
+                        advancedTo = after;
+                    }
+                } catch (OpenLatchException transientA) {
+                    Thread.sleep(500);
+                }
+            }
+            assertThat(advancedTo).as("滚动重启后合拢照常推进（相位严格前进）").isPositive();
             System.out.println("[drill-C] extended primitives survived rolling restart");
         } finally {
             if (a != null) {
@@ -509,16 +581,29 @@ class RollingRestartDrillIT {
         return jar;
     }
 
+    /**
+     * 定位 openlatch-server shaded jar：前后缀匹配、不钉版本文件名
+     * （钉死 {@code 1.0-SNAPSHOT} 的旧写法在发版改号后静默跳过全部用例，
+     * 2026-10-03 实证，判例 {@link LeaderKillDrillIT} 同修）。
+     */
     private static Path locateServerJar() {
-        List<Path> candidates = List.of(
-                Path.of("..", "openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"),
-                Path.of("openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"));
-        for (Path c : candidates) {
-            Path abs = c.toAbsolutePath().normalize();
-            if (Files.exists(abs)) {
-                return abs;
+        for (Path dir : List.of(
+                Path.of("..", "openlatch-server", "target"),
+                Path.of("openlatch-server", "target"))) {
+            Path abs = dir.toAbsolutePath().normalize();
+            if (!Files.isDirectory(abs)) {
+                continue;
+            }
+            try (var files = Files.list(abs)) {
+                Path jar = files
+                        .filter(p -> p.getFileName().toString().startsWith("openlatch-server-"))
+                        .filter(p -> p.getFileName().toString().endsWith("-executable.jar"))
+                        .findFirst().orElse(null);
+                if (jar != null) {
+                    return jar;
+                }
+            } catch (java.io.IOException ignored) {
+                // 目录不可读按未找到处理（保持显式跳过告警语义）
             }
         }
         return null;

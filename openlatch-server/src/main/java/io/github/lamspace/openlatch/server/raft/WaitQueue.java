@@ -61,8 +61,11 @@ public final class WaitQueue {
      * @param requestId 原 ACQUIRE 请求 id
      * @param key       锁键
      * @param permits   请求许可数（锁/屏障恒 1，Semaphore 为申请量）
+     * @param track     v7 队列挂起轨道（0=非队列单轨；1=等容量 put-waiter；
+     *                  2=等元素 take-waiter）——双轨在同 key 的 FIFO 序列内
+     *                  交错存储、按轨独立计位次与推进
      */
-    public record Waiter(long sessionId, long requestId, String key, int permits) {
+    public record Waiter(long sessionId, long requestId, String key, int permits, int track) {
 
         /**
          * 单许可等待项便捷构造（锁与屏障路径）。
@@ -72,7 +75,19 @@ public final class WaitQueue {
          * @param key       锁键
          */
         public Waiter(long sessionId, long requestId, String key) {
-            this(sessionId, requestId, key, 1);
+            this(sessionId, requestId, key, 1, 0);
+        }
+
+        /**
+         * 许可数形态便捷构造（Semaphore 路径，单轨）。
+         *
+         * @param sessionId 逻辑会话 id
+         * @param requestId 原请求 id
+         * @param key       锁键
+         * @param permits   请求许可数
+         */
+        public Waiter(long sessionId, long requestId, String key, int permits) {
+            this(sessionId, requestId, key, permits, 0);
         }
     }
 
@@ -101,15 +116,16 @@ public final class WaitQueue {
      * 管理观察的等待项视图：位次、归属与已等待时长的不可变
      * 快照——{@code waitedMs} 以调用方提供的 {@code now} 折算。
      *
-     * @param position   1 起位次
+     * @param position   轨道内 1 起位次
      * @param sessionId  逻辑会话 id
      * @param requestId  挂起的原请求 id
      * @param permits    请求许可数（锁/屏障恒 1）
      * @param waitedMs   已等待时长（毫秒，下限 0）
      * @param notified   是否处于"已通知、待重发"窗口
+     * @param track      v7 队列轨道（0=非队列单轨；1=等容量；2=等元素）
      */
     public record WaiterView(int position, long sessionId, long requestId, int permits,
-                             long waitedMs, boolean notified) {
+                             long waitedMs, boolean notified, int track) {
     }
 
     /** key → FIFO 队列（插入序=登记序）。 */
@@ -157,20 +173,130 @@ public final class WaitQueue {
      * @return 1 起位次；深度超限返回 {@code -1}
      */
     public synchronized int enqueue(long sessionId, long requestId, String key, int permits, long now) {
+        return enqueue(sessionId, requestId, key, permits, 0, now);
+    }
+
+    /**
+     * 队列双轨入队（v7，QUEUE 阻塞式挂起专用；permits 恒 1）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param requestId 原 QUEUE_OP 请求 id（去重键）
+     * @param key       队列键
+     * @param track     轨道（1=等容量，2=等元素）
+     * @param now       当前时刻（毫秒）
+     * @return 轨内 1 起位次；深度超限（双轨合计）返回 {@code -1}
+     */
+    public synchronized int enqueueTrack(long sessionId, long requestId, String key,
+                                         int track, long now) {
+        return enqueue(sessionId, requestId, key, 1, track, now);
+    }
+
+    /**
+     * 入队实现（全轨道共用）：幂等命中返回轨内位次并续约通知窗口；
+     * 深度护栏按整键合计（双轨共用判例）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param requestId 请求 id
+     * @param key       锁键
+     * @param permits   许可数
+     * @param track     轨道
+     * @param now       当前时刻（毫秒）
+     * @return 轨内位次或 -1
+     */
+    private int enqueue(long sessionId, long requestId, String key, int permits, int track,
+            long now) {
         ArrayDeque<Node> q = queues.computeIfAbsent(key, k -> new ArrayDeque<>());
         for (Node n : q) {
             if (n.waiter.sessionId() == sessionId && n.waiter.requestId() == requestId) {
                 if (n.notifiedAtMs != 0) {
                     n.notifiedAtMs = now; // 已通知队首重发抵达：窗口续约
                 }
-                return indexOf(q, n); // 幂等：重复请求返回当前位次，不二次入队
+                return trackIndexOf(q, n); // 幂等：重复请求返回轨内位次，不二次入队
             }
         }
         if (q.size() >= maxDepthPerKey) {
             return -1;
         }
-        q.addLast(new Node(new Waiter(sessionId, requestId, key, permits), now));
-        return q.size();
+        q.addLast(new Node(new Waiter(sessionId, requestId, key, permits, track), now));
+        return trackIndexOf(q, q.peekLast());
+    }
+
+    /**
+     * 元素落地唤醒（v7）：该 key take 轨（track=2）队首若未通知则标记已通知
+     * 并返回待推送项；满足性谓词（队首已到期等）由调用方判定后经
+     * {@code elementAvailable} 传入——{@code false} 时不推进。
+     *
+     * @param key              队列键
+     * @param now              当前时刻（毫秒）
+     * @param elementAvailable 当前存在可消费元素（调用侧按影子表判定）
+     * @return 至多一个待通知等待项
+     */
+    public synchronized List<Waiter> onElementReady(String key, long now,
+                                                    boolean elementAvailable) {
+        return wakeTrackHead(key, now, 2, elementAvailable);
+    }
+
+    /**
+     * 容量释放唤醒（v7）：该 key put 轨（track=1）队首若未通知且
+     * {@code capacityFree} 为真则标记已通知并返回待推送项。
+     *
+     * @param key          队列键
+     * @param now          当前时刻（毫秒）
+     * @param capacityFree 当前存在空余容量（调用侧按影子表判定）
+     * @return 至多一个待通知等待项
+     */
+    public synchronized List<Waiter> onCapacityFreed(String key, long now,
+                                                    boolean capacityFree) {
+        return wakeTrackHead(key, now, 1, capacityFree);
+    }
+
+    /**
+     * 轨内队首推进实现。
+     *
+     * @param key       队列键
+     * @param now       当前时刻（毫秒）
+     * @param track     目标轨
+     * @param satisfied 调用侧判定的满足性
+     * @return 待推送列表（空=不推进）
+     */
+    private List<Waiter> wakeTrackHead(String key, long now, int track, boolean satisfied) {
+        if (!satisfied) {
+            return List.of();
+        }
+        ArrayDeque<Node> q = queues.get(key);
+        if (q == null) {
+            return List.of();
+        }
+        for (Node n : q) {
+            if (n.waiter.track() == track) {
+                if (n.notifiedAtMs != 0) {
+                    return List.of(); // 轨首已通知窗口内：不重复推
+                }
+                n.notifiedAtMs = now;
+                return List.of(n.waiter);
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * 节点在其轨道内的 1 起位次（双轨交错时按轨独立计）。
+     *
+     * @param q     队列
+     * @param target 目标节点
+     * @return 轨内位次
+     */
+    private static int trackIndexOf(ArrayDeque<Node> q, Node target) {
+        int position = 0;
+        for (Node n : q) {
+            if (n.waiter.track() == target.waiter.track()) {
+                position++;
+            }
+            if (n == target) {
+                return position;
+            }
+        }
+        return position;
     }
 
     /**
@@ -278,20 +404,45 @@ public final class WaitQueue {
         List<Waiter> promote = new ArrayList<>();
         for (Iterator<java.util.Map.Entry<String, ArrayDeque<Node>>> it = queues.entrySet().iterator();
                 it.hasNext(); ) {
-            java.util.Map.Entry<String, ArrayDeque<Node>> en = it.next();
-            ArrayDeque<Node> q = en.getValue();
-            boolean headRemoved = !q.isEmpty() && q.peekFirst().waiter.sessionId() == sessionId;
+            ArrayDeque<Node> q = it.next().getValue();
+            // 受影响轨道：会话死亡节点恰为该轨（轨道内）队首时，摘除后须推进新轨首。
+            java.util.Set<Integer> affectedTracks = new java.util.HashSet<>();
+            java.util.Set<Integer> seenTracks = new java.util.HashSet<>();
+            for (Node n : q) {
+                if (seenTracks.add(n.waiter.track()) && n.waiter.sessionId() == sessionId) {
+                    affectedTracks.add(n.waiter.track());
+                }
+            }
             q.removeIf(n -> n.waiter.sessionId() == sessionId);
             if (q.isEmpty()) {
                 it.remove();
                 continue;
             }
-            if (headRemoved && q.peekFirst().notifiedAtMs == 0) {
-                q.peekFirst().notifiedAtMs = now;
-                promote.add(q.peekFirst().waiter);
+            for (int track : affectedTracks) {
+                Node head = firstOfTrack(q, track);
+                if (head != null && head.notifiedAtMs == 0) {
+                    head.notifiedAtMs = now;
+                    promote.add(head.waiter);
+                }
             }
         }
         return promote;
+    }
+
+    /**
+     * 轨道内队首节点。
+     *
+     * @param q     队列
+     * @param track 轨道
+     * @return 首个该轨节点；无则 {@code null}
+     */
+    private static Node firstOfTrack(ArrayDeque<Node> q, int track) {
+        for (Node n : q) {
+            if (n.waiter.track() == track) {
+                return n;
+            }
+        }
+        return null;
     }
 
     /**
@@ -306,21 +457,88 @@ public final class WaitQueue {
         for (Iterator<java.util.Map.Entry<String, ArrayDeque<Node>>> it = queues.entrySet().iterator();
                 it.hasNext(); ) {
             ArrayDeque<Node> q = it.next().getValue();
-            Node head = q.peekFirst();
-            if (head != null && head.notifiedAtMs > 0 && now - head.notifiedAtMs >= headReplyTimeoutMs) {
-                q.pollFirst();
-                if (q.isEmpty()) {
-                    it.remove();
-                    continue;
-                }
-                Node next = q.peekFirst();
-                if (next.notifiedAtMs == 0) {
-                    next.notifiedAtMs = now;
-                    promote.add(next.waiter);
-                }
+            // 逐轨道扫描：每轨的队首独立判定超时与推进（单轨键行为与既有一致）。
+            java.util.Set<Integer> tracks = new java.util.LinkedHashSet<>();
+            for (Node n : q) {
+                tracks.add(n.waiter.track());
+            }
+            for (int track : tracks) {
+                sweepTrack(q, track, now, promote);
+            }
+            if (q.isEmpty()) {
+                it.remove();
             }
         }
         return promote;
+    }
+
+    /**
+     * 单轨队首超时摘除与新队首推进。
+     *
+     * @param q       队列
+     * @param track   轨道
+     * @param now     当前时刻（毫秒）
+     * @param promote 推进收集列表
+     */
+    private void sweepTrack(ArrayDeque<Node> q, int track, long now, List<Waiter> promote) {
+        Node head = firstOfTrack(q, track);
+        if (head == null || head.notifiedAtMs <= 0 || now - head.notifiedAtMs < headReplyTimeoutMs) {
+            return;
+        }
+        q.remove(head);
+        Node next = firstOfTrack(q, track);
+        if (next != null && next.notifiedAtMs == 0) {
+            next.notifiedAtMs = now;
+            promote.add(next.waiter);
+        }
+    }
+
+    /**
+     * 已挂起等待项在其轨道内的位次（v7 重发队首门判定用——非队首的重发
+     * 不得越过在队前辈直接提交，判例锁"队首已通知窗口禁止越过"）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param requestId 请求 id
+     * @param key       队列键
+     * @param track     轨道（1/2）
+     * @return 轨内位次（1 起）；未在队返回 0
+     */
+    public synchronized int trackPosition(long sessionId, long requestId, String key,
+                                          int track) {
+        ArrayDeque<Node> q = queues.get(key);
+        if (q == null) {
+            return 0;
+        }
+        int position = 0;
+        for (Node n : q) {
+            if (n.waiter.track() == track) {
+                position++;
+                if (n.waiter.sessionId() == sessionId && n.waiter.requestId() == requestId) {
+                    return position;
+                }
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 存在指定轨道挂起等待者的键集合（v7 就绪扫描的驱动面——只扫有
+     * 等待者的键，不做全表扫描）。
+     *
+     * @param track 轨道（1=等容量，2=等元素）
+     * @return 键列表（登记序快照）
+     */
+    public synchronized List<String> trackKeys(int track) {
+        List<String> out = new ArrayList<>();
+        for (java.util.Map.Entry<String, ArrayDeque<Node>> en : queues.entrySet()) {
+            for (Node n : en.getValue()) {
+                if (n.waiter.track() == track) {
+                    out.add(en.getKey());
+                    break;
+                }
+            }
+        }
+        return out;
     }
 
     /**
@@ -382,11 +600,13 @@ public final class WaitQueue {
             return List.of();
         }
         List<WaiterView> out = new ArrayList<>(q.size());
-        int position = 0;
+        int[] perTrack = new int[3];
         for (Node n : q) {
-            position++;
-            out.add(new WaiterView(position, n.waiter.sessionId(), n.waiter.requestId(),
-                    n.waiter.permits(), Math.max(0, now - n.enqueuedAtMs), n.notifiedAtMs != 0));
+            int track = n.waiter.track();
+            perTrack[track]++;
+            out.add(new WaiterView(perTrack[track], n.waiter.sessionId(), n.waiter.requestId(),
+                    n.waiter.permits(), Math.max(0, now - n.enqueuedAtMs), n.notifiedAtMs != 0,
+                    track));
         }
         return List.copyOf(out);
     }

@@ -23,6 +23,7 @@ import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
+import io.github.lamspace.openlatch.protocol.raft.QueueOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.server.session.ServerSession;
@@ -51,7 +52,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p><b>Leader 侧应用副效应</b>（仅当本节点为当值 Leader）：
  * 授予出队、"需排队"竞态的排队登记与 QUEUED 改写、按
  * {@code freed_keys} 推进等待队首并推送 {@code AWAIT_NOTIFY}、会话关闭
- * 摘除。Follower 应用同一批条目但跳过全部副效应——等待队列非复制状态，
+ * 摘除（含 v9 条件登记与 topic 订阅）、授予应用点按 (会话,线程) 收口
+ * 陈旧条件登记（v9）。Follower 应用同一批条目但跳过全部副效应——等待队列非复制状态，
  * 副本一致性只由影子表/引擎的迁移维持。
  *
  * <p><b>Leadership 边界</b>：{@link #onLeaderChanged} 失去 Leadership 时把
@@ -111,6 +113,68 @@ public final class ReplicationGateway implements ApplyObserver {
     public void setExpiryDriver(LeaseExpiryDriver driver) {
         this.expiryDriver = driver;
     }
+
+    /**
+     * 回挂队列就绪驱动（v7，装配后期绑定）。
+     *
+     * @param driver 就绪驱动，可为 {@code null}（摘挂）
+     */
+    public void setQueueReadyDriver(QueueReadyDriver driver) {
+        this.queueReadyDriver = driver;
+    }
+
+    /** v8 topic 登记表（会话摘除与换主清零钩子；可为未挂载）。 */
+    private volatile io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry;
+
+    /**
+     * 回挂 topic 登记表（v8，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
+     * 应用点摘除该会话的订阅登记/缓冲/去重槽，并在当选事件清零登记表
+     * （判例 {@code WaitQueue} 换主清零）。
+     *
+     * @param registry 登记表，可为 {@code null}（摘挂）
+     */
+    public void setTopicRegistry(io.github.lamspace.openlatch.server.topic.TopicRegistry registry) {
+        this.topicRegistry = registry;
+    }
+
+    /** v9 条件等待登记表（会话摘除、换主清零与授予侧收口钩子；可为未挂载）。 */
+    private volatile io.github.lamspace.openlatch.server.condition.ConditionRegistry
+            conditionRegistry;
+    /**
+     * v10：phaser 等待簿记（Leader 本地易失态——等待登记/唤醒排空/展示读数，
+     * 账簿本体在复制状态机；{@code null}=夹具形态无 phaser 面，抵达即回
+     * INTERNAL_ERROR 记 WARN）。
+     */
+    private volatile io.github.lamspace.openlatch.server.phaser.PhaserRegistry phaserRegistry;
+
+    /**
+     * 回挂条件等待登记表（v9，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
+     * 应用点摘除该会话的全部条件登记（死亡不吞锁——持有/租约/队列零触碰），
+     * 在当选事件清零登记表（等待集随换主清零、客户端 ACQUIRE 车道迁移重挂
+     * 补登记，判例 {@code WaitQueue}/{@code TopicRegistry}），并在
+     * {@code LOCK_ACQUIRE_ENTRY} 授予应用点按 (会话,线程) 收口陈旧登记
+     * （await 终结的授予侧摘除）。
+     *
+     * @param registry 登记表，可为 {@code null}（摘挂）
+     */
+    public void setConditionRegistry(
+            io.github.lamspace.openlatch.server.condition.ConditionRegistry registry) {
+        this.conditionRegistry = registry;
+    }
+
+    /**
+     * 装配 v10 phaser 等待簿记（判例 {@code setConditionRegistry}——Leader
+     * 受理与副作用登记、换主清零、会话摘除的唯一挂点）。
+     *
+     * @param registry 簿记实例，{@code null} 表示不启用 phaser 面
+     */
+    public void setPhaserRegistry(io.github.lamspace.openlatch.server.phaser.PhaserRegistry
+            registry) {
+        this.phaserRegistry = registry;
+    }
+
+    /** v7 队列就绪驱动（当选首扫钩子；可为未挂载）。 */
+    private volatile QueueReadyDriver queueReadyDriver;
 
     /**
      * 回挂会话协调器（装配后期绑定）。
@@ -203,7 +267,8 @@ public final class ReplicationGateway implements ApplyObserver {
 
     /**
      * Leadership 变更（状态机事件线程）。失去：未决 future 全部可重试完成；
-     * 当选：清空上一任期等待队列并启动到期驱动首扫。
+     * 当选：清空上一任期等待队列、topic 登记表与条件等待登记表（进程本地态
+     * 不跨任期存续，等待项经客户端车道迁移重挂补登记）并启动到期驱动首扫。
      *
      * @param isLeader 本节点当前是否 Leader
      */
@@ -225,9 +290,35 @@ public final class ReplicationGateway implements ApplyObserver {
         }
         if (!wasLeader && isLeader) {
             waitQueue.clear();
+            io.github.lamspace.openlatch.server.topic.TopicRegistry tr = topicRegistry;
+            if (tr != null) {
+                // v8：订阅登记随换主清零——客户端 home 迁移后自动重订阅
+                // （判例挂起者清零重挂；登记表无复制来源，新任期从零开始）。
+                tr.clear();
+            }
+            io.github.lamspace.openlatch.server.condition.ConditionRegistry cr =
+                    conditionRegistry;
+            if (cr != null) {
+                // v9：条件等待集随换主清零——进程本地态无快照/日志来源，
+                // 等待项经客户端 ACQUIRE 车道迁移重挂以重发折叠 ACQUIRE
+                // 补登记（幂等接纳；判例 WaitQueue/TopicRegistry 换主清零）。
+                cr.clear();
+            }
+            io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                    phaserRegistry;
+            if (pr != null) {
+                // v10：phaser 等待簿记随换主清零——簿记无日志/快照来源；等待项
+                // 经双通道重挂以 AWAIT_ADVANCE 重发补登（谓词在复制账簿，重挂
+                // 无损耗——对照 v9 signal 丢失窗的本原语增强面）。
+                pr.clear();
+            }
             LeaseExpiryDriver driver = expiryDriver;
             if (driver != null) {
                 driver.onLeadershipGained();
+            }
+            QueueReadyDriver qdriver = queueReadyDriver;
+            if (qdriver != null) {
+                qdriver.onLeadershipGained();
             }
         }
         SessionCoordinator coordinator = sessionCoordinator;
@@ -246,6 +337,12 @@ public final class ReplicationGateway implements ApplyObserver {
      * @return 改写后的回执（当前仅"预演失效→排队"一处改写）
      */
     private ApplyResult leaderSideEffects(RaftLogEntry entry, ApplyResult result) {
+        // v7：队列侧效（回弹重挂 + 双轨唤醒）独立分支即返——其 DENIED 回弹
+        // 与锁"预演失效改写"同型但判据不同（轨道、满足性谓词），MUST NOT
+        // 落入下方锁改写臂。
+        if (entry.getType() == RaftEntryType.QUEUE_OP_ENTRY) {
+            return queueSideEffects(entry, result);
+        }
         switch (entry.getType()) {
             case LOCK_ACQUIRE_ENTRY -> {
                 if (result.getStatus() == ApplyStatus.OK) {
@@ -253,6 +350,20 @@ public final class ReplicationGateway implements ApplyObserver {
                         var p = entry.getCommandPayload().toByteArray();
                         var ap = io.github.lamspace.openlatch.protocol.raft.AcquirePayload.parseFrom(p);
                         waitQueue.onGranted(ap.getSessionId(), ap.getRequestId());
+                        if (!ap.getRequest().hasCondition()) {
+                            // v9 授予侧收口：普通/唤醒后重发（condition 已清除）的
+                            // 授予按 (会话,线程) 归属摘除该等待者可能残留的陈旧条件
+                            // 登记（同一线程不可能既持锁又条件等待，判例
+                            // LockEntry 授予侧 purge）。折叠 ACQUIRE 自身的 OK 是
+                            // "释放半程守卫通过"而非授予——其登记刚在受理预检点
+                            // 生效，MUST NOT 被本臂误摘（"登记先于释放可见"不变式）。
+                            io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                    cr = conditionRegistry;
+                            if (cr != null) {
+                                cr.purgeOwner(ap.getSessionId(),
+                                        ap.getRequest().getThreadId());
+                            }
+                        }
                     } catch (InvalidProtocolBufferException e) {
                         log.warn("acquire payload unparsable in side effects (seq={})", entry.getSeq());
                     }
@@ -261,13 +372,47 @@ public final class ReplicationGateway implements ApplyObserver {
             case LEASE_RENEW_ENTRY -> {
                 // 续租成功仅刷新队列无关状态（唤醒来源为释放/到期/会话关闭）。
             }
+            case PHASER_OP_ENTRY -> {
+                // v10：phaser 变异应用点簿记——QUEUED（ARRIVE_AND_AWAIT 未合拢
+                // 形态）登记等待簿记（expected=回执到场相位）；OK 摘簿记（含
+                // 唤醒后的了结重发）；本条目推进相位则排空唤醒（含第三方等待）。
+                try {
+                    var pp = io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    var pop = pp.getRequest().getOp();
+                    String pkey = pp.getRequest().getKey();
+                    long now = System.currentTimeMillis();
+                    io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                            phaserRegistry;
+                    if (pr == null) {
+                        break;
+                    }
+                    if (result.getStatus() == ApplyStatus.QUEUED && pop == io.github
+                            .lamspace.openlatch.protocol.PhaserOp
+                            .PHASER_OP_ARRIVE_AND_AWAIT) {
+                        pr.register(pkey, pp.getSessionId(), pp.getRequestId(),
+                                result.getPhaserPhase(), now);
+                    } else if (result.getStatus() == ApplyStatus.OK) {
+                        pr.remove(pkey, pp.getSessionId(), pp.getRequestId());
+                    }
+                    for (String adv : result.getPhaserAdvancedKeysList()) {
+                        wakePhaserWaiters(adv, now);
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("phaser op payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
+            }
             default -> {
             }
         }
         // 预演失效改写：提交时判定可授予、应用时锁已被占——
         // 原请求愿意排队（wait_ms != 0）则在应用点登记本地队列并回 QUEUED；
         // 立即式保持 DENIED。仅改写本节点在途请求的回执。
-        if (result.getStatus() == ApplyStatus.DENIED
+        // v7 注记：类型守卫收口——队列的 DENIED 回弹经 queueSideEffects 独立
+        // 承载，MUST NOT 被本臂以 AcquirePayload 误解析。
+        if (entry.getType() == RaftEntryType.LOCK_ACQUIRE_ENTRY
+                && result.getStatus() == ApplyStatus.DENIED
                 && pending.containsKey(entry.getSeq())) {
             try {
                 var ap = io.github.lamspace.openlatch.protocol.raft.AcquirePayload
@@ -410,6 +555,32 @@ public final class ReplicationGateway implements ApplyObserver {
                 for (WaitQueue.Waiter w : waitQueue.purgeSession(sp.getSessionId(), now)) {
                     pushAwaitNotify(w, w.key());
                 }
+                io.github.lamspace.openlatch.server.topic.TopicRegistry tr = topicRegistry;
+                if (tr != null) {
+                    // v8：死亡即退订——摘除该会话全部订阅登记、缓冲与去重槽
+                    //（防泄漏三路回收之一；失联探针补发的 SESSION_CLOSE 同径）。
+                    tr.removeSession(sp.getSessionId());
+                }
+                io.github.lamspace.openlatch.server.condition.ConditionRegistry cr =
+                        conditionRegistry;
+                if (cr != null) {
+                    // v9：死亡不吞锁——摘除该会话全部条件登记（三路回收之
+                    // SESSION_CLOSE 双路同径：本节点断连传播与失联探针补发）；
+                    // 锁持有/租约/等待队列由条目侧既有簿记各自收口。
+                    cr.removeSession(sp.getSessionId());
+                }
+                io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                        phaserRegistry;
+                if (pr != null) {
+                    // v10：死亡即退订——摘该会话全部 phaser 等待簿记（配额摘除
+                    // 与推进判定在条目应用侧，本臂仅簿记回收，判例 v8/v9 同径）。
+                    pr.removeSession(sp.getSessionId());
+                }
+                // v10：隐式摘除驱动的相位推进传播——被推进 key 的存活等待者
+                // （簿记形）收唤醒通知（判例 barrier_released_keys 臂）。
+                for (String pkey : result.getPhaserAdvancedKeysList()) {
+                    wakePhaserWaiters(pkey, now);
+                }
                 // 离场即破障经会话关闭传播：被破世代的存活等待者收放行通知。
                 for (String bkey : result.getBarrierReleasedKeysList()) {
                     for (WaitQueue.Waiter w : waitQueue.broadcastKey(bkey, now)) {
@@ -424,11 +595,126 @@ public final class ReplicationGateway implements ApplyObserver {
     }
 
     /**
+     * 队列条目 Leader 侧效（v7）。两件事——
+     * <ol>
+     *   <li><b>回弹重挂</b>：预检放行提交、应用点 {@code DENIED}（并发竞态
+     *       使元素被抢先摘走/容量被抢先占满）且原请求携 {@code blocking}
+     *       时，把该 (会话,请求) 挂回对应轨道并改写回执为 {@code QUEUED}
+     *       （位次为轨内新位——判例锁"预演失效改写"；挂满回
+     *       {@code QUEUE_FULL}，由分发层映射 OVERLOADED 终结本次重发）；
+     *       立即式保持 DENIED 原样透传。</li>
+     *   <li><b>双轨唤醒</b>：{@code PUT} 落地后若队首元素可消费（QUEUE 形态
+     *       有深度即可；DELAY 形态须队首到期不晚于本时刻）唤醒 take 轨队首；
+     *       {@code TAKE}/{@code DRAIN} 交付后按影子表深度与容量的空位判定
+     *       唤醒 put 轨队首。谓词全部基于影子表（复制状态镜像）判定，
+     *       推送仅提示、消费仍经提交路径在应用点终判。</li>
+     * </ol>
+     * 非本节点在途的条目（Follower 提交或转发而来）不改写回执，仅执行
+     * 唤醒推送（挂起登记属当值 Leader 车道，与锁改写臂的 pending 守卫同理）。
+     *
+     * @param entry  已应用条目（{@link RaftEntryType#QUEUE_OP_ENTRY}）
+     * @param result 原始回执
+     * @return 改写后的回执（非回弹路径原样返回）
+     */
+    private ApplyResult queueSideEffects(RaftLogEntry entry, ApplyResult result) {
+        long now = System.currentTimeMillis();
+        try {
+            var qp = QueueOpPayload.parseFrom(entry.getCommandPayload().toByteArray());
+            var req = qp.getRequest();
+            String qkey = req.getKey();
+            var op = req.getOp();
+            if (result.getStatus() == ApplyStatus.DENIED && req.getBlocking()
+                    && pending.containsKey(entry.getSeq())) {
+                int track = op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT
+                        ? 1 : 2;
+                int pos = waitQueue.enqueueTrack(qp.getSessionId(), qp.getRequestId(),
+                        qkey, track, now);
+                if (pos > 0) {
+                    return ApplyResult.newBuilder()
+                            .setStatus(ApplyStatus.QUEUED)
+                            .setQueuePosition(pos)
+                            .build();
+                }
+                return ApplyResult.newBuilder().setStatus(ApplyStatus.QUEUE_FULL).build();
+            }
+            if (result.getStatus() == ApplyStatus.OK) {
+                // 交付/入队成功即摘本 (会话,请求) 的挂起项（判例锁授予出队）——
+                // 残留陈旧队首会挡住同轨后继者的唤醒推进。
+                waitQueue.onGranted(qp.getSessionId(), qp.getRequestId());
+                if (op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_PUT) {
+                    if (queueElementVisible(qkey, now)) {
+                        for (WaitQueue.Waiter w : waitQueue.onElementReady(qkey, now, true)) {
+                            pushAwaitNotify(w, qkey);
+                        }
+                    }
+                } else if (op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_TAKE
+                        || op == io.github.lamspace.openlatch.protocol.QueueOp.QUEUE_OP_DRAIN) {
+                    boolean free = kernel.shadow().queueDepth(qkey)
+                            < kernel.shadow().queueCapacity(qkey);
+                    for (WaitQueue.Waiter w : waitQueue.onCapacityFreed(qkey, now, free)) {
+                        pushAwaitNotify(w, qkey);
+                    }
+                }
+            }
+        } catch (InvalidProtocolBufferException e) {
+            log.warn("queue op payload unparsable in side effects (seq={})", entry.getSeq());
+        }
+        return result;
+    }
+
+    /**
+     * 队首元素可见性判定（唤醒谓词，影子表口径）：QUEUE 形态队首到期恒 0
+     * ——有深度即可见；DELAY 形态要求队首绝对到期时刻不晚于给定时刻。
+     *
+     * @param key 队列键
+     * @param now 判定时刻（epoch 毫秒，与条目折算的到期时刻同域）
+     * @return 队首可消费为 {@code true}
+     */
+    private boolean queueElementVisible(String key, long now) {
+        var shadow = kernel.shadow();
+        if (shadow.queueDepth(key) <= 0) {
+            return false;
+        }
+        long expiry = shadow.queueHeadExpiryMs(key);
+        return expiry == 0 || expiry <= now;
+    }
+
+    /**
      * 推送 AWAIT_NOTIFY（Leader 本地连接投递；跨接入节点转发不在本方法职责）。
      * 应用线程内仅做查表与非阻塞写投递。
      *
      * @param w   待通知的队首等待项
      * @param key 释放的锁键
+     */
+    /**
+     * 排空唤醒指定 phaser key 的等待簿记：当前相位读影子表账簿（镜像与 apply
+     * 同线程推进，此处读数即当值终态），谓词 {@code expected < 当前相位} 的
+     * 簿记项出集并逐一推送 {@code AWAIT_NOTIFY}（ref=其 request_id，判例
+     * barrier broadcastKey 臂；推送丢失由客户端重发/保活重挂自愈——簿记
+     * 摘除不丢正确性，谓词恒可判）。
+     *
+     * @param key 相位器键
+     * @param now 当前时刻（簿记侧未消费，保形参一致）
+     */
+    private void wakePhaserWaiters(String key, long now) {
+        io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr = phaserRegistry;
+        if (pr == null) {
+            return;
+        }
+        var view = kernel.shadow().adminEntry(key);
+        if (view == null || !ShadowTable.isPhaserType(view.lockType())) {
+            return;
+        }
+        for (var w : pr.wake(key, view.phaserPhase())) {
+            pushAwaitNotify(new WaitQueue.Waiter(w.sessionId(), w.requestId(), key), key);
+        }
+    }
+
+    /**
+     * 向等待者所在连接写一条 AWAIT_NOTIFY（连接已不存在即静默丢弃）。
+     *
+     * @param w   等待者簿记项
+     * @param key 锁键（随通知一并报告）
      */
     private void pushAwaitNotify(WaitQueue.Waiter w, String key) {
         ServerSession session = sessions.get(w.sessionId());
@@ -498,6 +784,36 @@ public final class ReplicationGateway implements ApplyObserver {
                 continue;
             }
             pushAwaitNotify(w, w.key());
+        }
+    }
+
+    /**
+     * 队列就绪扫描（v7，{@code QueueReadyDriver} 与当选首扫的共用体）：
+     * 遍历存在挂起等待者的队列键（由等待队列反查，非全表扫描影子表），
+     * take 轨按队首可见性（DELAY 形态须到期不晚于当前时刻）、put 轨按
+     * 容量空位（兼作事件唤醒丢失的自愈兜底）推进队首并推送
+     * {@code AWAIT_NOTIFY}。零日志、零状态变更——推送只是重发提示，
+     * 消费与创建的终判恒在应用点；已通知窗口内不重复推送。
+     *
+     * @param now 扫描时刻（epoch 毫秒，与条目折算到期时刻同域）
+     */
+    public void sweepQueueReady(long now) {
+        if (!isLeaderAuthoritative()) {
+            return;
+        }
+        for (String key : waitQueue.trackKeys(2)) {
+            if (!queueElementVisible(key, now)) {
+                continue;
+            }
+            for (WaitQueue.Waiter w : waitQueue.onElementReady(key, now, true)) {
+                pushAwaitNotify(w, key);
+            }
+        }
+        for (String key : waitQueue.trackKeys(1)) {
+            boolean free = kernel.shadow().queueDepth(key) < kernel.shadow().queueCapacity(key);
+            for (WaitQueue.Waiter w : waitQueue.onCapacityFreed(key, now, free)) {
+                pushAwaitNotify(w, key);
+            }
         }
     }
 

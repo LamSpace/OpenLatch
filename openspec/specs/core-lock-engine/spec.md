@@ -3,6 +3,7 @@
 ## Purpose
 提供与网络、协议、存储完全解耦的分布式锁语义引擎：锁的获取/释放/续租裁决、可重入与读写语义、严格 FIFO 的等待与通知、租约到期强制释放、会话生命周期清理、幂等去重与保护限额，使全部锁正确性可在纯单元环境中闭环验证。
 ## Requirements
+
 ### Requirement: 锁归属与会话校验
 
 锁归属 MUST 由 `(sessionId, threadId)` 二元组唯一确定。引擎仅服务已登记的会话；未登记会话的任何请求 MUST 被拒绝（对应协议 `SESSION_EXPIRED`）。
@@ -220,11 +221,11 @@
 
 ### Requirement: 条目家族定型与类型不匹配拒绝
 
-key 条目 SHALL 由首次创建它的请求定型所属家族：LOCK（`REENTRANT`/`SIMPLE`/`READ`/`WRITE`/`FAIR`）、SEMAPHORE、LATCH、ATOMIC（`ATOMIC_LONG`/`ATOMIC_INTEGER`/`ATOMIC_BOOLEAN` 三形态同族共享条目类型，形态间互斥——条目定型后形态不可变更）、BARRIER。`FAIR` 与 `REENTRANT` 同为锁家族且语义等价（互通互认，可相互重入）。跨家族请求 MUST 返回结果 `REJECT_TYPE_MISMATCH` 且 MUST NOT 改变条目任何状态；同跨形态的 ATOMIC 请求（如 `ATOMIC_LONG` 条目上请求 `ATOMIC_INTEGER`）MUST 同样返回 `REJECT_TYPE_MISMATCH`；server 层将该结果映射为协议 `INVALID_REQUEST`。锁家族既有条目的定型规则（可重入性由首次请求决定）MUST NOT 变化。
+key 条目 SHALL 由首次创建它的请求定型所属家族：LOCK（`REENTRANT`/`SIMPLE`/`READ`/`WRITE`/`FAIR`）、SEMAPHORE、LATCH、ATOMIC（`ATOMIC_LONG`/`ATOMIC_INTEGER`/`ATOMIC_BOOLEAN`/`ATOMIC_REFERENCE` 四形态同族共享条目类型，形态间互斥——条目定型后形态不可变更）、BARRIER、QUEUE（`LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` 两形态同族共享条目类型，形态间互斥——出队规则由定型形态决定：到达序 vs 最早到期序）、PHASER（`LOCK_TYPE_PHASER` 单形态家族——phaser 无子形态判别，动态注册使"参与者构成"成为账簿内容而非定型属性，对照 BARRIER 的 parties 定型断言为刻意分轨）。`FAIR` 与 `REENTRANT` 同为锁家族且语义等价（互通互认，可相互重入）。跨家族请求 MUST 返回结果 `REJECT_TYPE_MISMATCH` 且 MUST NOT 改变条目任何状态；同跨形态的 ATOMIC 请求（如 `ATOMIC_LONG` 条目上请求 `ATOMIC_INTEGER`，或标量形态条目上请求 `ATOMIC_REFERENCE` 及反向）与同跨形态的 QUEUE 请求（`QUEUE` 条目上请求 `DELAY_QUEUE` 及反向）MUST 同样返回 `REJECT_TYPE_MISMATCH`；server 层将该结果映射为协议 `INVALID_REQUEST`。锁家族既有条目的定型规则（可重入性由首次请求决定）MUST NOT 变化。
 
 #### Scenario: 跨家族请求被拒
 
-- **WHEN** 以 `REENTRANT` 建立并持有的 key 上发起 `SEMAPHORE`、`LATCH_AWAIT`、`ATOMIC_OP` 或 `BARRIER_AWAIT` 请求
+- **WHEN** 以 `REENTRANT` 建立并持有的 key 上发起 `SEMAPHORE`、`LATCH_AWAIT`、`ATOMIC_OP`、`BARRIER_AWAIT`、`QUEUE_OP` 或 `PHASER_OP` 请求
 - **THEN** 返回类型不匹配拒绝，原持有者、租约与等待队列逐项不变
 
 #### Scenario: FAIR 与 REENTRANT 互通
@@ -234,14 +235,18 @@ key 条目 SHALL 由首次创建它的请求定型所属家族：LOCK（`REENTRA
 
 #### Scenario: 同族跨形态被拒
 
-- **WHEN** 已以 `ATOMIC_LONG` 建立并写入的 key 上发起 `lock_type = ATOMIC_INTEGER` 的 ATOMIC 操作
-- **THEN** 返回 `REJECT_TYPE_MISMATCH`，值与版本戳逐项不变
+- **WHEN** 已以 `ATOMIC_LONG` 建立并写入的 key 上发起 `lock_type = ATOMIC_INTEGER` 的 ATOMIC 操作，或已以标量形态定型的 key 上发起 `lock_type = ATOMIC_REFERENCE` 的操作（及反向），或已以 `QUEUE` 形态建立并写入的 key 上发起 `lock_type = DELAY_QUEUE` 的队列操作（及反向）
+- **THEN** 返回 `REJECT_TYPE_MISMATCH`，值/元素队列与版本戳逐项不变
 
 #### Scenario: LATCH 与 BARRIER 互斥
 
 - **WHEN** 已以 `LATCH_AWAIT` 定型的 key 上发起 `BARRIER_AWAIT`，或反向
 - **THEN** 返回 `REJECT_TYPE_MISMATCH`，既有条目状态零扰动
 
+#### Scenario: BARRIER 与 PHASER 互斥
+
+- **WHEN** 已以 `BARRIER_AWAIT` 定型的 key 上发起 `PHASER_OP`（REGISTER 或任意操作），或已以 REGISTER 定型的 phaser key 上发起 `BARRIER_AWAIT`
+- **THEN** 返回 `REJECT_TYPE_MISMATCH`，世代账簿与相位账簿逐项零扰动（两家族同为"会合"语义家族但状态机互不相通——泛化关系不构成条目复用，判例 v5 D1 Latch/Barrier 分立）
 ### Requirement: Semaphore 队首式授予
 
 `SemaphoreEntry` SHALL 以许可为授予单位：`permits_total` 由首次请求定型，`permits_available` 随授予扣减、随归还回升。授予 MUST 同时满足：请求者为等待队列队首或队列为空，且 `permits_available ≥` 请求数；非队首请求（含所需许可更少的请求）MUST NOT 越位授予（防大请求饥饿）。同归属（session, thread）的重入获取 MUST 先于队首与空位检查、按次累加持有许可并刷新租约。`queueIfBusy = false` 且条件不满足时 MUST 返回拒绝（不排队、不入队）。授予成功 MUST 登记租约（挂在归属维度）。
@@ -473,3 +478,255 @@ BARRIER 条目 SHALL 为无租约家族：等待者与到场账簿 MUST NOT 登�
 - **WHEN** 租约到期扫描与队首清扫驱动经过含 BARRIER 条目的时刻堆
 - **THEN** 无该条目的到期登记与清扫动作（其等待者的通知-重发窗口兜底与 Latch 同机制：已通知等待者的响应超时摘除等待项身份，MUST NOT 触发破障——已通知即已了结在途）
 
+### Requirement: AtomicRefEntry 有值引用操作与版本戳
+
+引擎 SHALL 支持 ATOMIC 家族的有值引用形态条目：装定型形态（`ATOMIC_REFERENCE`）、当前值（`byte[]`，null 与零长度空数组为两个可区分的合法值）、单调版本戳（`version`，自 0 起）与初值记录（`initial`，null 表示建条目时无主张）。操作集为 `GET / SET / GET_AND_SET / CAS / CAS_STAMPED`（`ADD` 对该形态为值域外操作，MUST 返回 `REJECT_ATOMIC_RANGE` 且条目零扰动，判例布尔形态 ADD 拒绝）。版本戳契约与标量形态逐项一致：任一成功改变值的写操作 MUST 使 `version` 恰 +1；`GET` MUST NOT 改变值与版本戳；失败的 CAS/CAS_STAMPED MUST NOT 改变值与版本戳。值比较 MUST 为字节内容相等判定。各操作语义：`SET(x)` 落 `x` 返回旧值（`x` 可为 null——清空语义）；`GET_AND_SET(x)` 同 `SET` 并返回旧值；`CAS(e,x)` 当且仅当当前值与 `e` 字节相等（含 null==null）时落 `x` 并回 `applied=true`，否则 `applied=false` 并回当前值；`CAS_STAMPED(e,ev,x)` 当且仅当值匹配且 `version==ev` 时落 `x`（ABA-free 形态）。应答 MUST 携带 `(applied, old_value, value, version)` 四元组，其中载荷读数为字节串（可为 null）。建条目走"非零主张"判例的 presence 形态：写操作对不存在的 key 携带初值主张（`initial` 非 null，含空数组主张）时 MUST 以该值创建条目并紧接应用本操作；对既有条目携带的主张与定型初值字节比对不符 MUST 返回 `REJECT_ATOMIC_INIT`（条目状态零扰动，server 层映射 `INVALID_REQUEST`）；不主张时以 null 创建。`GET` 对不存在的 key MUST 返回 `(null, 0)` 且 MUST NOT 创建条目。去重：写操作携带会话内单调 `op_seq`，条目记最近已应用写操作的 `(session, op_seq, 应答四元组)` 单槽（槽内载荷读数为字节串）；同槽重放请求 MUST 直接返回原应答且 MUST NOT 重复推进版本戳；`GET` 的 `op_seq=0` 不参与去重。全部操作 MUST 校验会话存在（不符返回 `REJECT_SESSION`），但 MUST NOT 将 key 登记入会话触及集。条目与引擎 MUST NOT 以本地配置复核载荷字节数——尺寸钳制是接入层的专属判定点，进入状态机的命令视为已钳制（节点本地配置参与 apply 判定会引入跨副本回放分歧）。生命周期条款（无租约、不入到期堆、会话关闭零触碰、`isEmpty()` 恒 false、常驻不回收）沿用 ATOMIC 家族既有条款，对两种形态一体适用。
+
+#### Scenario: CAS 字节比较命中与不命中
+
+- **WHEN** 值为字节串 `"ab"`、版本 3 的条目上先后执行 `CAS("ab", "cd")` 与 `CAS("ab", "ef")`（参数均为字节串）
+- **THEN** 前者回 `applied=true, old="ab", value="cd", version=4`；后者因当前值已变回 `applied=false`、读数 `("cd", 4)`，值与版本不变
+
+#### Scenario: null 与空串两形态可区分
+
+- **WHEN** 依次执行 `SET(null)`、`GET`、`CAS(null, "x")`、`SET(空数组)`、`CAS(null, "y")`
+- **THEN** 第一步后读数为 null 且版本推进；`CAS(null,…)` 命中 null 态；置空数组后 `CAS(null,…)` 不命中（空串≠null），回 `applied=false`
+
+#### Scenario: 版本戳恰进与 GET 零迁移
+
+- **WHEN** 对同一条目连续执行 SET、GET、CAS_STAMPED 成功各一次
+- **THEN** version 依次为 1、1、2；GET 读数与之前一致且未推进版本；key 不存在时 GET 返回 `(null, 0)` 且不建条目
+
+#### Scenario: 同 op_seq 重发载荷不双写
+
+- **WHEN** 携带 `(session, op_seq=7)` 的 `SET(4KB 字节串)` 应用成功后，同会话以完全相同请求重发
+- **THEN** 返回与原应答一致的载荷四元组（old 字节级一致），值与版本戳不再推进
+
+#### Scenario: 初值主张冲突与 ADD 越域拒绝
+
+- **WHEN** key 不存在时 `SET("a", initial 主张="b")` 成功；另一请求携带 `initial 主张="c"` 作用于既有条目；再有请求对该条目携带 `ADD`
+- **THEN** 第一次以 "b" 为初值基准建条目并落 "a"（version=1）；主张冲突返回 `REJECT_ATOMIC_INIT` 零扰动；ADD 返回 `REJECT_ATOMIC_RANGE`，值与版本零扰动
+
+#### Scenario: 条目侧不复核超限载荷
+
+- **WHEN** 以 `maxValueBytes` 配置为较小值的节点，对日志中既有的更大载荷条目执行回放 apply
+- **THEN** apply 正常落值不因本地配置拒绝（尺寸判定仅属接入层；回放结果与 Leader 一致）
+
+#### Scenario: 会话关闭与到期扫描对载荷零触碰
+
+- **WHEN** 会话 A 写入有值引用条目后关闭，或到期扫描经过含该条目的时刻
+- **THEN** 值、版本戳与去重槽逐项不变；条目不入到期堆、不因收尾回收
+
+### Requirement: QueueEntry 有界队列操作与每会话去重槽
+
+引擎 SHALL 支持 QUEUE 家族的队列条目：定型形态（`QUEUE`/`DELAY_QUEUE`）、定型容量（`capacity > 0`，由首次携带非零主张的 PUT 建条目时定型——对不存在 key 的 PUT 携带 `capacity ≤ 0` MUST 返回 `REJECT_QUEUE_CAPACITY`（server 层映射 `INVALID_REQUEST`；协调面无无界队列），对既有条目的主张与定型值不符 MUST 返回 `REJECT_QUEUE_CAPACITY` 且条目零扰动，0 为不主张）、元素双端队列（每项含不透明字节载荷与绝对到期时刻）与**每会话去重槽**（`session → (op_seq, op, 已交付回执)`）。操作判定顺序（首个命中者即为结果）：会话存在校验 → key 校验 → 家族/形态互拒 → 容量断言 → 写操作去重判定 → 执行。操作语义：
+
+- `PUT(e, blocking, delay?)`：深度 < capacity → 入队（QUEUE 形态按到达序追加且到期时刻无意义；DELAY 形态按到期时刻升序插入、**同到期时刻内保持到达 FIFO——相对 JDK `DelayQueue` 的语义增强，契约注释 MUST 显式声明**）、写槽回执并返回 `GRANTED`，并使容量减一；满且 `blocking` → 挂入等待轨回 `QUEUED`（位次 1 起，等待深度超 `maxQueueDepthPerKey` 回 `REJECT_QUEUE_FULL`）；满且非阻塞 → `DENIED` 零变更。
+- `TAKE(blocking)`：存在可消费头元素（QUEUE 形态恒真；DELAY 形态要求头元素到期时刻不晚于当前判定时刻——**未到期头 = 不可见，其后已到期元素不得越过它先出**）→ 摘出队首、写槽回执（含交付字节）、返回 `GRANTED` 并携带元素；无 → 阻塞挂起回 `QUEUED` / 非阻塞回 `DENIED`。
+- `DRAIN(maxN)`：立即式（阻塞位 MUST NOT 为 true），摘出 `min(maxN, 自队首起连续满足谓词段)` 项按出队序返回列表（空队回 `GRANTED` + 空列表，不报错），写槽回执（含交付列表）。
+- `PEEK`：与 TAKE 同谓词的头元素读数（未到期/空队回 null），零迁移、不建条目、不去重。
+- `SIZE`：当前元素总数读数（DELAY 形态含未到期项——可见元素数由 `PEEK`/消费侧判定，SIZE 为驻留口径），零迁移、不建条目（key 不存在回 0）、不去重。
+
+去重（写操作携会话内单调 `op_seq`）：条目记每会话最近已应用写操作的 `(op_seq, op, 回执)` 单槽——同会话同 `op_seq` 重放 MUST 直接返回原回执且 MUST NOT 重复入队/出队（`TAKE`/`DRAIN` 的重放回执 MUST 重发**同一份已交付字节**，MUST NOT 再次摘取元素）；同会话新 `op_seq` 覆盖本会话槽位（客户端"同 key 在途写互斥"纪律保证被覆盖槽必已了结）；他会话槽互不遮蔽；`PEEK/SIZE` 的 `op_seq=0` 不参与去重。唤醒收集：成功入队 MUST 收集该 key take 轨队首（DELAY 形态仅当队首已到期）至通知列表；成功出队（TAKE/DRAIN）使容量释放 MUST 收集 put 轨队首至通知列表——两轨判定与收集在条目锁内完成，通知触发在条目锁外（判例锁/Latch/Barrier）。全部操作 MUST 校验会话存在（不符返回 `REJECT_SESSION`），但队列 MUST NOT 将 key 登记入会话触及集的持有面（元素不绑定归属；挂起等待随 `removeSession` 摘除）。条目与引擎 MUST NOT 以本地配置复核载荷字节数/容量/批量上限——尺寸与钳制属接入层专属判定点（判例 v6，节点本地配置参与 apply 判定会引入回放分歧）。
+
+#### Scenario: 满容量阻塞挂起与立即拒绝
+
+- **WHEN** 容量 2 的空队列先后 `PUT(a)`、`PUT(b)` 成功，随后 `PUT(c, blocking=true)` 与 `PUT(d, blocking=false)`
+- **THEN** c 挂起回 `QUEUED`（位次 1），d 回 `DENIED` 且队列不变；此后一次 `TAKE` 成功出队 MUST 唤醒 c（d 早已终结不受影响）
+
+#### Scenario: 空队消费立即拒绝与阻塞挂起
+
+- **WHEN** 空队列上 `poll` 式 `TAKE(blocking=false)` 与 `take` 式 `TAKE(blocking=true)` 先后到达
+- **THEN** 前者回 `DENIED`；后者挂起回 `QUEUED`；随后 `PUT(x)` 提交 MUST 唤醒该等待者且其重发取回 x
+
+#### Scenario: 同 op_seq 重放不双插不偷吃
+
+- **WHEN** 会话 A 以 `op_seq=7` 的 `PUT(4KB 元素)` 应用成功后应答丢失，同会话以完全相同请求重发；随后会话 B 亦写入一元素，会话 A 再以 `op_seq=8` 的 `TAKE` 成功取走一元素后重发同请求
+- **THEN** PUT 重放返回原回执（深度不因重发 +1）；TAKE 重放返回**同一份已交付字节**且深度不再减一（不偷吃下一个元素）
+
+#### Scenario: 跨会话槽互不遮蔽
+
+- **WHEN** 会话 A 与会话 B 先后各自完成 `PUT`（各占本会话槽），随后 A 以原 `op_seq` 重发
+- **THEN** A 命中 A 槽重放回执（B 的写入不影响 A 的去重判定），元素不双插
+
+#### Scenario: DELAY 未到期货不可见与同到期 FIFO
+
+- **WHEN** 延时队列依次注入 +5s、+2s、+2s 三个元素（到期时刻后到者与之相等），在 t=+1s 执行 `PEEK` 与 `SIZE`，t=+2s 起连续 `TAKE` 两次
+- **THEN** t=+1s：`PEEK` 回 null（头元素未到期，+5s 元素不得越过 -2s 未到期头先出）、`SIZE` 回 3（驻留口径含未到期）；t=+2s 两次 TAKE 按注入到达序取回两个 +2s 元素（同到期 FIFO 增强），第三元素仍不可见
+
+#### Scenario: 容量断言与跨形态互拒
+
+- **WHEN** 不存在 key 上 `PUT(capacity 主张=0)`；既有容量 4 条目上 `PUT(capacity 主张=8)`；既有 `QUEUE` 形态条目上 `DELAY_QUEUE` 形态请求
+- **THEN** 三者分别回 `REJECT_QUEUE_CAPACITY`、`REJECT_QUEUE_CAPACITY`、`REJECT_TYPE_MISMATCH`，条目与元素逐项零扰动
+
+#### Scenario: DRAIN 空列表与部分摘取
+
+- **WHEN** 深度 3 的队列执行 `DRAIN(maxN=5)`，随后空队列执行 `DRAIN(maxN=5)`
+- **THEN** 前者回 3 元素列表（出队序）且队清空；后者回 `GRANTED` + 空列表（不报错、不挂起）
+
+#### Scenario: 条目侧不复核配置限额
+
+- **WHEN** 以较小 `maxValueBytes`/`maxQueueCapacity` 配置的节点对日志中既有的超限尺寸元素/容量执行回放 apply
+- **THEN** 照常入队落态不因本地配置拒绝（钳制仅属接入层；回放结果与 Leader 一致）
+
+### Requirement: QUEUE 条目生命周期与会话无关
+
+队列条目的元素 SHALL 绑定 key 而非会话：元素生命周期与投递者/任何消费者的会话存续无关——会话关闭 MUST NOT 摘除、改写或回收任何元素（`SESSION_CLOSE` 仅摘除该会话的挂起等待项与其去重槽）；进程死亡后元素照常对其余会话可见并可消费（相对 JDK 队列的分布式增强声明点：JDK 内同进程死亡随堆消散，协调面元素为复制状态、投递者消亡不吞元素）。队列条目 MUST NOT 具备租约语义（到期字段恒 0、不入租约到期堆、不被租约到期清扫回收）；元素的 `expires_at_ms` 为**消费可见性判据**而非条目回收判据——未消费元素 MUST NOT 因到期被服务端删除（与 JDK `DelayQueue` 本体一致，条目常驻不回收判例延伸）。`isEmpty()` 对队列条目 MUST 恒为 false（元素清零不触发条目回收，判例 Latch/ATOMIC/BARRIER 常驻条款）；key 清理仅经显式消费清空或运维处置（不做清单口径：服务端无自动回收路径）。
+
+#### Scenario: 投递者死亡元素存续
+
+- **WHEN** 会话 A 向队列 `PUT` 两个元素后进程被杀（会话关闭传播），会话 B 执行 `SIZE` 与 `TAKE`
+- **THEN** `SIZE` 回 2、`TAKE` 按 FIFO 取回 A 投递的元素——元素逐项保真，无因 A 死亡产生的丢失或回滚
+
+#### Scenario: 等待者死亡仅摘等待
+
+- **WHEN** 会话 C 在满队列上 `PUT` 挂起（`QUEUED`）后被杀，其余挂起者与在队元素状态如何
+- **THEN** C 的挂起等待项与其去重槽被摘除，队列元素与他会话等待逐项不变，队首推进正常唤醒下一等待者
+
+#### Scenario: 到期清扫与租约机制对队列零触碰
+
+- **WHEN** 租约到期扫描经过含队列条目（含 DELAY 形态元素全部到期）的时刻
+- **THEN** 队列条目不被回收、元素不因到期消失；条目无租约凭证、不入到期堆
+
+### Requirement: 条件等待集与 await 释放折叠
+
+LOCK 家族条目（`LockEntry`）SHALL 承载进程内条件等待集：`condition_name → 到达序等待队列`，条目锁内读写、与既有 `waiters` 等待队列同生命周期（Leader 本地裁决态、MUST NOT 进入快照与日志——边界条款由 replicated-state-machine 与 snapshot-recovery 能力钉定）。**双拓扑落位**：单机形态下折叠命令在本条目关键区内原子执行"释放半程+登记半程"（下述判定顺序）；集群形态下应用点仅执行**释放半程**（引擎 release-only 应用方法：持有归属则重入一步清零+清租约+队首通知评估，非持有零操作，恒经复制确定重放），登记由受理节点的 Leader 本地结构在预检点承载——两拓扑对上层呈现同一判定语义与"登记先于释放可见"不变式。await 折叠的引擎裁决（单机 ACQUIRE 应用点，判定顺序）：会话有效 → key 合法 → 家族与形态匹配（非 LOCK 家族/READ·WRITE 形态携带 condition → 既有类型不匹配拒绝映射）→ **合并深度护栏**：本 key 等待项合计（`waiters` 队列 + 全部条件等待集）达 `max-queue-depth-per-key` 时返回等待满拒绝（线路 `OVERLOADED`），集合零扰动 → **同一关键区内**依序执行释放半程与登记半程：(会话,线程) 恰为当前持有归属时重入计数一步清零、清除租约并按既有队首通知纪律评估可推者；非持有归属时释放半程零操作（服务端宽容面，权限降级条款由 client-sdk 能力承载声明）；随后以 (会话, request_id) 登记入 `condition_name` 等待集，返回排队回执（位次为本 key 等待项合计口径）。登记 MUST 幂等：同 (会话, request_id) 重复到达（应答丢失重发/换主重挂）不二次入集、不重复执行释放半程、返回同位次；已在集等待项的重复经复制应用（条目重放）MUST NOT 产生第二登记。
+
+清理与搬运的摘除 MUST 三路收口且互不重复计数：LEAVE 按 (会话, request_id) 显式摘除（幂等，未存在亦回无操作成功）；会话关闭摘除该会话在全部条件集与全部 key 的登记（与既有 `closeSession` 家族扫描同钩子；摘除仅触等待集，MUST NOT 改动锁持有/租约/等待队列——"死亡不吞锁"，等待者死亡时不持锁、无账可碰）；授予侧收口：任一归属 (会话,线程) 经正常或折叠获取被授予时，MUST 顺带摘除该归属在全部条件集的陈旧登记（LEAVE 在途丢失的 ghost 由此收敛——同一线程不可能既持锁又条件等待，授予即其上一次 await 的终结，按 (会话,线程) 收口覆盖同线程换 request_id 的重新获取形态）。等待集的 `registered_at_ms` 为观察值（条目时刻注入，MUST NOT 参与任何判定；换 term 后基线重置）。
+
+`waiterCount` 与明细只读观察面口径 SHALL 计入条件等待者（它们是等待者——对照 topic 订阅者不计入既有分轨，口径差异随行注释）；Follower 侧条件集恒空（登记为 Leader-only 应用副作用），读数如实呈现。
+
+#### Scenario: 持有者 await 单步全量释放并登记
+
+- **WHEN** 重入计数为 3 的持有者 (s,t) 对条件 c 提交折叠 ACQUIRE（request_id=R），随后应用
+- **THEN** 同一关键区内：writeCount 一步清零、租约清除、既有队首通知照常评估、(s,R) 入 c 到达序队尾，应答排队回执；后续对同 R 的重复应用（重发/重放）不双登记、不再次释放
+
+#### Scenario: 非持有者登记为合法 ghost
+
+- **WHEN** 未持有该锁的会话提交折叠 ACQUIRE（误用/重挂形态）
+- **THEN** 释放半程零操作、登记照常入集（服务端不查持有权限），应答排队回执；该 ghost 的收敛路径为 LEAVE/会话死亡/被授予时顺带摘除三路，人数受合并护栏钳制
+
+#### Scenario: 合并深度护栏超限拒绝
+
+- **WHEN** 某 key 的 `waiters` 队列 + 条件等待集合计已达 `max-queue-depth-per-key`，新折叠 ACQUIRE 到达
+- **THEN** 返回等待满拒绝（线路 `OVERLOADED`），等待队列与条件集零扰动、释放半程不执行
+
+#### Scenario: 会话死亡只摘等待集不碰锁账
+
+- **WHEN** 承载条件等待者的会话经 `SESSION_CLOSE` 摘除
+- **THEN** 该会话全部条件集登记摘除；该 key 的持有者、重入计数、租约、等待队列逐项不变（死亡不吞锁）
+
+#### Scenario: 授予顺带摘除 ghost 登记
+
+- **WHEN** (s,R) 的 LEAVE 请求在途丢失，其后同归属 (s,t) 以新请求 R2 经正常获取被授予
+- **THEN** 授予应用点同关键区摘除 (s,t) 在各条件集的陈旧登记（含 R 项），等待集不残留死登记
+
+#### Scenario: Follower 条件集恒空
+
+- **WHEN** Follower 副本回放含折叠 ACQUIRE 的日志并对外提供观察读数
+- **THEN** 释放半程照常生效（复制态），条件等待集为空、观察读数如实零（登记为 Leader-only 副作用）
+
+### Requirement: signal 权限与条件等待搬运
+
+SIGNAL/SIGNAL_ALL 的引擎裁决 SHALL 以服务端为权威：(会话,线程) 恰为该 key 当前持有归属方可搬运，否则返回未持有拒绝（线路 `NOT_HELD`）——与 JDK"非持有者 signal 抛 IllegalMonitorStateException"同型；该权限检查与搬运 MUST 在条目同一关键区内完成（持有者变更与搬运互斥）。SIGNAL 摘取该条件到达序队首**一人**（搬运候选人 MUST 排除调用归属 (会话,线程) 自身——集群预检登记窗内 awaiter 短暂持有且在集，自 signal 防御性跳过；JDK 中持有者恒不在集，同款效果）搬入既有 `waiters` 队列尾（搬运时刻定序——FAIR 位次承诺按搬运入队序约束同队列后来者，MUST NOT 承诺优先于搬运前已入队者）；SIGNAL_ALL 按到达序全员搬运。权限先行的收束口径：条目不存在/无人持有亦属"归属不匹配"（恒 `NOT_HELD`——JDK 中不持锁即 IllegalMonitorStateException，无锁对象则更无从 signal）；调用者恰为持有归属而目标集为空/无此条件名 = 无操作成功（JDK 对齐：signal 不报错、不追溯）。搬运项的唤醒权自此移交既有等待队列纪律：signal 权限论证使搬运恒发生于"调用者持有（锁必忙）"的时点——不存在"搬运即空闲可推"的分支，通知由后续**释放/到期/会话关闭应用点的队首通知**接力送达（事件驱动——无就绪定时器、无 tick 精度语义，对照 v7 延时形态的缺失为有意设计）。被搬运等待项的了结走既有队首重发授予路径（规则 7 语义），授予时重入计数从 1 起、签发新租约凭证。
+
+`headReplyTimeoutMs` 已通知队首清扫 MUST 覆盖搬运后未回重发的等待项（既有纪律原样适用，摘除仅触等待队列；其条件集登记已随搬运消失，无二次摘除）。
+
+#### Scenario: 非持有者 signal 被权威拒绝
+
+- **WHEN** 未持有该锁的会话（或持有但线程不匹配的会话）发送 SIGNAL
+- **THEN** 返回未持有拒绝（线路 `NOT_HELD`），条件集与等待队列零扰动，连接与会话不受影响
+
+#### Scenario: SIGNAL 取一人按到达序
+
+- **WHEN** 条件 c 集内依次有 W1、W2、W3 到达，持有者连续 SIGNAL 两次
+- **THEN** W1、W2 依次被搬入等待队列（W3 留集），搬运序=到达序；每次 SIGNAL 回无操作歧义不存在（命中即搬）
+
+#### Scenario: SIGNAL_ALL 全员搬运且通知由释放接力
+
+- **WHEN** 持有者发 SIGNAL_ALL（集内 3 人）随后释放锁
+- **THEN** 3 人按到达序全部搬入等待队列尾（搬运时点锁恒被持——权限论证），释放应用点的队首通知逐个推进唤醒链（事件驱动，无 tick 等待）
+
+#### Scenario: 空集 signal 无操作成功
+
+- **WHEN** 对无任何等待者的条件名（或从未出现过的条件名）发送 SIGNAL/SIGNAL_ALL
+- **THEN** 回无操作成功（`OK`），零扰动——signal 是事件不是状态，不追溯历史
+
+#### Scenario: 搬运后重发授予重入一级
+
+- **WHEN** 被搬运等待项收到队首通知并以原信封重发折叠 ACQUIRE
+- **THEN** 队首重发命中被授予：新租约凭证、重入计数 1（与其 await 前的 N 级无关），同 (会话,request_id) 的条件集残留登记顺带摘除
+
+### Requirement: PhaserEntry 相位账簿与合拢
+
+PHASER 家族条目（`PhaserEntry`）SHALL 承载 JDK `Phaser` 的可判定分布式子集：复制侧账簿 = **相位号**（自 0 起、单调递增、不取模、跨重启/换主不回退）+ `registeredParties` 注册总数 + **每会话注册配额**（`session → parties`，死亡摘除与 `ARRIVE_AND_DEREGISTER` 扣减的归属依据）+ **当前相位到场计数** `arrived` + **到场去重槽**（`{(session, request_id) → 已计数}`——同请求重发/重放单计数，判例 v7 每会话去重槽与 v5 到场账簿）+ **换代窗口**（有界：仅保最近一次相位推进中已通知未重发的等待项集 `{(session, request_id), 了结相位}`——窗口下界由 `headReplyTimeoutMs` 压住，出窗迟到按新等待计，v5 D7 同款声明竞态）。等待集（`(session, request_id) → expected_phase` 到达序队列）为 Leader 本地裁决态：MUST NOT 进入日志与快照（边界条款由 replicated-state-machine 与 snapshot-recovery 能力钉定），条目锁内读写、与 `waiters` 类既有本地态同生命周期。
+
+操作裁决的判定顺序与语义（条目锁内单关键区）：会话有效 → key 合法 → 家族匹配 → 操作分支：
+
+- **REGISTER(count)**：无条目时创建并定型 PHASER 家族（判例 v3 `permits_total`/v7 非零主张建条目——注册是 phaser 唯一的建条目入口）；`count` 加计入调用会话配额与 `registeredParties`；加计后超 `max-parties-per-phaser` → `REJECT_PHASER_PARTIES`（线路 `OVERLOADED`），配额账簿零扰动（在带拒绝，既有参与者零影响——判例 `REJECT_SUBSCRIBERS` 形态）；回显到场相位。注册不触发合拢判定（新参与者进入**当前**相位的应到集合——JDK 语义：注册者须在当相位到场方可合拢）。
+- **ARRIVE / ARRIVE_AND_AWAIT 的到场半程 / ARRIVE_AND_DEREGISTER 的到场半程**：`(session, request_id)` 命中去重槽 → 直接回显首计时的到场相位、不双计数（幂等）；未命中则 `arrived++` 入槽；`ARRIVE_AND_DEREGISTER` 在同一关键区先扣调用会话配额 1（配额为零 → `REJECT_PHASER_QUOTA` 线路 `INVALID_REQUEST`——JDK 匿名 party 此处本属未定义行为，我们显式从严并声明差异，扣减发生在合拢判定**前**：本次到场+离场可使剩余应到恰满足）；随后合拢判定。
+- **合拢判定（每一处状态迁移后执行）**：`arrived ≥ registeredParties` → `phase++`、`arrived` 清零、去重槽清空（新相位重新计次）、换代窗口滚动为"本轮被唤醒等待项集"，并对等待集中 `expected_phase < 新相位` 的全部项发唤醒通知（`AWAIT_NOTIFY` ref=其 request_id，经调用方收集在锁外触发——判例 `BarrierEntry.await` 的 notify 收集纪律）；`registeredParties == 0` 时合拢判定恒不成立（空转不推进、不终止——注册归零不是终止事件，见生命周期条款）。
+- **AWAIT_ADVANCE(expected_phase)**：不触达复制账簿——等待项以 `(session, request_id)` 入等待集（幂等：同 id 重复到达不二次入集，重挂即重演），回执 `QUEUED`；`expected_phase < 当前相位` 时在受理点直接 `OK` 了结（即刻可见已推进，不发生等待）。等待项登记 MUST NOT 要求调用者持有任何注册配额（`awaitAdvance` 可对旁观相位开放——JDK 同款：任意线程可 await 已见相位号）。
+- **CANCEL(await_request_id)**：按 `(session, await_request_id)` 从等待集摘除（幂等，未存在亦 `OK`——判例 v9 LEAVE），MUST NOT 触碰任何复制账簿；已通知未重发的 ghost 由 `headReplyTimeoutMs` 清扫与换代窗口窗口兜底。
+- **QUERY**：纯读回显 `phase`/`registered`/`arrived` 三计数，零迁移、零推进（观察不得使应到集合、合拢或唤醒时序发生变化）。
+
+非 REGISTER 操作命中不存在条目 → `REJECT_NO_ENTRY`（线路 `INVALID_REQUEST`——phaser 不做隐式建条目：无 parties 断言可依赖，"key 在而账簿空"的歧义窗与 topic 撞 key 尽力而为探测相反，此处机制互斥更严）。条目观察面：`waiterCount` 与明细快照计入 phaser 等待项（等待就是等待——v9 条件等待者计入口径延伸；对照 topic 订阅者不计入的分轨随行注释）。
+
+#### Scenario: 合拢单推进与去重重放
+
+- **WHEN** registered=3 的 phaser 上依次到场 2 个不同请求、随后对第 2 个到场以同 (会话, request_id) 重发
+- **THEN** 重发命中去重槽：`arrived` 保持 2、回显同一到场相位、不发生推进；第 3 个不同请求到场 → `arrived==registered` 合拢：相位 +1、`arrived` 清零、去重槽清空
+- **AND** 下一轮对已清空槽的同 id 再次到场（新到达事件）正常计数（去重仅约束同一在场周期的重发）
+
+#### Scenario: arriveAndDeregister 配额扣减与提前合拢
+
+- **WHEN** registered=2、当前相位 arrived=1 时，持 1 配额的会话 S 发起 `ARRIVE_AND_DEREGISTER`
+- **THEN** 同一关键区内到场计数与配额扣减一并生效（arrived 1→2、registered 2→1）→ 合拢判定 `arrived ≥ registered` 成立 → 推进并唤醒；调用方随后不再是任何相位的应到者（离场与到场的先后不影响终态，两序皆推进——确定性由 apply 全序承载）
+- **AND** 对配额为零的会话重复 `ARRIVE_AND_DEREGISTER` → `INVALID_REQUEST`，账簿零扰动
+
+#### Scenario: 中途注册进入当相位应到集
+
+- **WHEN** registered=2、当相位 arrived=1（一方已到场未合拢）时，新会话 REGISTER(1)
+- **THEN** registered 变 3、相位不推进；已到场方与新注册方各自到场后（arrived=3）方合拢——注册者**不**因注册即视为到场（JDK 同判：register 后仍须 arrive）
+
+#### Scenario: 空转与复活
+
+- **WHEN** 全部参与者 `arriveAndDeregister` 离场（registered=0）后，新会话对该 key REGISTER(2)
+- **THEN** 离场末次相位照常（arrived≥0 判定按规则执行，不终止、无粘滞态）；REGISTER(2) 在**当前相位号**续起、应到 2 方到场后合拢——key 的 phaser 身份与相位单调性跨空转存续（对照 JDK 归零终止：差异显式声明）
+
+#### Scenario: 无条目操作拒绝与家族定型
+
+- **WHEN** 对从未 REGISTER 的 key 直接发起 ARRIVE/AWAIT_ADVANCE/QUERY
+- **THEN** `INVALID_REQUEST`（无条目拒绝，MUST NOT 隐式建条目、MUST NOT 落日志副作用）；随后 REGISTER(1) 成功且 key 定型 PHASER，BARRIER/QUEUE 等其余家族请求此后对该 key 恒 `REJECT_TYPE_MISMATCH`
+
+#### Scenario: CANCEL 幂等与 ghost 收敛
+
+- **WHEN** 等待项 CANCEL 后其原请求重发 CANCEL（应答丢失重演），或 CANCEL 在途丢失而通知已发出
+- **THEN** 重复 CANCEL 幂等 `OK` 零扰动；ghost 已通知项经换代窗口窗口收敛——重发命中 `OK`（若恰在窗内）或按新等待入集（出窗声明），`headReplyTimeoutMs` 清扫不吞活人位次
+
+### Requirement: PHASER 条目生命周期与会话清理
+
+PHASER 条目 SHALL 定型后存续不回收（判例 v5 D9 BARRIER：key 即 phaser 身份、相位单调与配额账簿依赖条目存续；回收再重建丢账）；无租约家族不入到期堆（v6/v7 同款），常驻内存量 = O(key 数)、maxKeys 护栏兜底。会话死亡（`SESSION_CLOSE` 应用点与断连清理在条目侧的同一收口）SHALL 触发**隐式配额摘除**：该会话在全部 phaser key 的注册配额自 `registeredParties` 减除、配额账簿行删除；**已到场事实不撤销**（当前相位 `arrived` 不回退——到场是复制态事实，与 v7"死亡不吞元素"对偶：发生过的计数不因主体消亡而改写）；摘除后同关键区执行合拢判定（可因"应到集合缩小"而即时推进并唤醒——死亡不空转的机制本体）。摘除 MUST NOT 触碰其他会话的配额、已到场计数与在集等待项（除合拢唤醒的正常效应外零扰动）；MUST NOT 使条目进入任何终止/破相形态（无此概念）。该会话在 phaser 等待集中的登记随同摘除（等待项无租约、随会话灭——判例 v8"死亡即退订"与 v9"等待者无租约"两口径的合流）。`registeredParties` 归零属常态中间态而非生命周期终点（空转条款见合拢需求）；条目不设显式销毁操作（与 BARRIER/LATCH/QUEUE 同款，运维面经 key 治理而非 API）。
+
+恢复路径：`CoreStateRestore` 增 PHASER 分支、`PhaserEntry.restored` 工厂——复制账簿（相位、registered、配额表、arrived、去重槽、换代窗口窗口）自快照逐字段回灌，等待集恢复为空（Leader 易失、客户端重挂补登记——重挂非双登记）；重启后旧请求重发命中恢复的去重槽与换代窗口照常裁决。
+
+#### Scenario: 已到场者死亡不撤销其到场
+
+- **WHEN** registered=3、arrived=2（含会话 S 的一个已到场身份）时 S 进程被杀（`SESSION_CLOSE` 应用）
+- **THEN** registered 3→2、arrived 保持 2 → 合拢成立、相位推进并唤醒在集等待项；恢复/回放该条目日志的副本同判（摘除是 apply 内确定性迁移）
+
+#### Scenario: 未到场者死亡摘除应到集合
+
+- **WHEN** registered=3、arrived=1 时未到场的会话 S（配额 1）死亡
+- **THEN** registered 3→2、arrived 保持 1、相位不推进；剩余两名未到场者到场后（arrived=3>registered=2）照常合拢，无饿死（死亡不空转）
+- **AND** 同 key 其他会话的配额、等待集登记逐项不变
+
+#### Scenario: 死亡摘除不入等待者计数
+
+- **WHEN** S 死亡时其有 2 个在集等待项（AWAIT_ADVANCE 挂起）
+- **THEN** 等待集摘除 S 的两项、`waiterCount` 相应回落；复制账簿仅 registered 变化——等待集无账可碰（非复制态）
+
+#### Scenario: 重启恢复后重发与重挂照常裁决
+
+- **WHEN** 含 phaser 账簿（推进若干相位、有在场去重槽与换代窗口）的状态生成快照、重启加载、旧等待方以原 request_id 重发
+- **THEN** 相位号、配额、arrived、槽与换代窗口逐字段一致；命中槽/换代窗口的重发按幂等/了结裁决不双计数；等待集为空、旧唤醒不投递，客户端重挂后续唤醒照常

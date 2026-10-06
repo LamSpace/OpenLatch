@@ -22,13 +22,16 @@ import io.github.lamspace.openlatch.core.CoreEngine;
 import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.AtomicOp;
+import io.github.lamspace.openlatch.core.QueueOpType;
 import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
+import io.github.lamspace.openlatch.core.command.QueueOpCommand;
 import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
 import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
 import io.github.lamspace.openlatch.core.result.BarrierFinal;
 import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
+import io.github.lamspace.openlatch.core.result.QueueOpResult;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
@@ -44,6 +47,7 @@ import io.github.lamspace.openlatch.protocol.raft.AtomicOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
 import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
+import io.github.lamspace.openlatch.protocol.raft.QueueOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.AcquirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ExpirePayload;
 import io.github.lamspace.openlatch.protocol.raft.ReleasePayload;
@@ -54,6 +58,8 @@ import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.core.result.PhaserOpResult;
+import io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
@@ -280,6 +286,8 @@ public final class LockStateMachineCore {
                     case BARRIER_AWAIT_ENTRY -> applyBarrierAwait(entry);
                     case BARRIER_LEAVE_ENTRY -> applyBarrierLeave(entry);
                     case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
+                    case QUEUE_OP_ENTRY -> applyQueueOp(entry);
+                    case PHASER_OP_ENTRY -> applyPhaserOp(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -339,6 +347,7 @@ public final class LockStateMachineCore {
         long sid = p.getSessionId();
         java.util.List<String> freed;
         List<String> brokenBarriers = List.of();
+        List<String> advancedPhasers = List.of();
         Map<Long, Long> toLogical = new HashMap<>();
         if (shadow.hasSession(sid)) {
             // 折算表快照 MUST 先于 sidMap 摘除——死亡会话的内部 sid 仍需按
@@ -349,7 +358,9 @@ public final class LockStateMachineCore {
             shadow.removeSession(sid);
             Long local = sidMap.remove(sid);
             if (local != null) {
-                brokenBarriers = engine.sessionClosed(local);
+                CoreEngine.SessionCleanup cleanup = engine.sessionClosed(local);
+                brokenBarriers = cleanup.brokenBarriers();
+                advancedPhasers = cleanup.advancedPhasers();
             }
             freed = shadow.dropSessionHolders(sid);
         } else {
@@ -361,6 +372,12 @@ public final class LockStateMachineCore {
         for (String bk : brokenBarriers) {
             mirrorBarrier(bk, toLogical);
             b.addBarrierReleasedKeys(bk);
+        }
+        // v10：死亡隐式摘除配额驱动的相位推进（"死亡不空转"）——镜像刷新 +
+        // 回执携带被推进 key 供 Leader 侧 PhaserRegistry/等待簿记唤醒广播。
+        for (String pk : advancedPhasers) {
+            mirrorPhaser(pk, toLogical);
+            b.addPhaserAdvancedKeys(pk);
         }
         return b.build();
     }
@@ -384,6 +401,26 @@ public final class LockStateMachineCore {
         LockType lockType = toCoreLockType(req.getLockType().getNumber());
         if (lockType == null) {
             return ApplyResult.newBuilder().setStatus(ApplyStatus.INTERNAL_ERROR).build();
+        }
+        // v9：await 折叠应用点——仅执行释放半程（登记半程由 Leader 受理预检点
+        // 的本地结构承载，"登记先于释放可见"不变式；本应用面跨副本确定、零本地副作用）。
+        if (req.hasCondition()) {
+            io.github.lamspace.openlatch.core.result.AwaitReleaseResult ar =
+                    engine.awaitFoldRelease(new AcquireCommand(
+                            local, p.getRequestId(), req.getKey(), lockType,
+                            req.getThreadId(), req.getLeaseMs(), false,
+                            RequestDispatcher.normalizedPermits(req.getPermits()),
+                            req.getPermitsTotal(), req.getCondition()));
+            ApplyResult.Builder fb = ApplyResult.newBuilder().setStatus(switch (ar.outcome()) {
+                case GRANTED -> ApplyStatus.OK;
+                case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
+                default -> ApplyStatus.INVALID_REQUEST;
+            });
+            if (ar.released()) {
+                shadow.releaseFully(p.getSessionId(), req.getThreadId(), req.getKey());
+                fb.setFullyReleased(true).addFreedKeys(req.getKey());
+            }
+            return fb.build();
         }
         AcquireResult r = engine.acquire(new AcquireCommand(
                 local, p.getRequestId(), req.getKey(), lockType,
@@ -611,6 +648,11 @@ public final class LockStateMachineCore {
             // 非原子形态或未知 op：形状非法（ACQUIRE 面类型不得进入本通道）。
             return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
         }
+        if (kind == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+            // v6 有值引用形态：载荷数组自 optional bytes 还原（缺省=null、
+            // 零长度=""），入引擎引用门面；回执四元组走 bytes 字段。
+            return applyAtomicRefOp(entry, p, local, op);
+        }
         AtomicOpResult r = engine.atomicOp(new AtomicOpCommand(local, p.getRequestId(),
                 req.getKey(), kind, op, req.getOperand(), req.getExpected(),
                 req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq()));
@@ -632,6 +674,298 @@ public final class LockStateMachineCore {
                     REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
                     ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
             default -> error("unreachable atomic op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 有值引用形态的应用落点（{@link #applyAtomicOp} 的形态分派，v6）：
+     * {@code optional bytes} 三字段按显式 presence 还原为载荷数组——
+     * 缺省=null 态、零长度=空字节串，两态无损；入引擎引用门面后判定
+     * 顺序与标量通道逐规则同构（ADD 值域外、初值 presence 断言、GET
+     * 短路、同槽重放、字节内容 CAS）。GRANTED 时镜像影子表（载荷引用
+     * 存储）并以 {@code atomic_old_value_bytes}/{@code atomic_value_bytes}
+     * 回执（null 态=字段缺省）；标量值位恒不出现。尺寸 MUST NOT 在此
+     * 复核（钳制属接入层，见 {@code applyAtomicOp} 通道注记）。
+     *
+     * @param entry 复制条目（error 路径记日志用）
+     * @param p     已解析的原子载荷（引用形态请求）
+     * @param local 本副本引擎内部 sid（调用方已映射）
+     * @param op    已映射的 core 操作枚举
+     * @return 回执（OK 携带载荷应答四元组，拒绝态 bytes 全缺省）
+     */
+    private ApplyResult applyAtomicRefOp(RaftLogEntry entry, AtomicOpPayload p, long local,
+            AtomicOp op) {
+        var req = p.getRequest();
+        byte[] operand = req.hasOperandBytes() ? req.getOperandBytes().toByteArray() : null;
+        byte[] expected = req.hasExpectedBytes() ? req.getExpectedBytes().toByteArray() : null;
+        byte[] initial = req.hasInitialBytes() ? req.getInitialBytes().toByteArray() : null;
+        io.github.lamspace.openlatch.core.result.AtomicRefOpResult r =
+                engine.atomicRefOp(new io.github.lamspace.openlatch.core.command
+                        .AtomicRefOpCommand(local, p.getRequestId(), req.getKey(), op,
+                        operand, expected, req.getExpectedVersion(), initial, req.getOpSeq()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                shadow.atomicRefApplied(req.getKey(), req.getLockType().getNumber(),
+                        p.getSessionId(), req.getOpSeq(), initial,
+                        op == AtomicOp.GET, r.applied(), r.oldValue(), r.value(), r.version());
+                ApplyResult.Builder b = ApplyResult.newBuilder()
+                        .setStatus(ApplyStatus.OK)
+                        .setAtomicApplied(r.applied())
+                        .setAtomicVersion(r.version());
+                if (r.oldValue() != null) {
+                    b.setAtomicOldValueBytes(
+                            com.google.protobuf.ByteString.copyFrom(r.oldValue()));
+                }
+                if (r.value() != null) {
+                    b.setAtomicValueBytes(
+                            com.google.protobuf.ByteString.copyFrom(r.value()));
+                }
+                yield b.build();
+            }
+            case REJECT_SESSION ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_TYPE_MISMATCH, REJECT_ATOMIC_INIT, REJECT_ATOMIC_RANGE,
+                    REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable atomic ref op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * QUEUE_OP_ENTRY：队列操作应用落点（v7）。写（PUT/TAKE/DRAIN）与读
+     * （PEEK/SIZE）皆经多数派提交，读条目应用为零迁移（判例 ATOMIC GET）。
+     * <b>apply 侧恒以立即式判定</b>（命令 blocking 位固定 {@code false}）——
+     * 挂起是 Leader 本地等待队列的职责、不入日志（判例 Latch"等待队列不入
+     * 日志"），预检后应用点不可满足回 {@link ApplyStatus#DENIED} 零迁移
+     * （不改元素、不写去重槽），Leader 侧由网关把阻塞式请求回弹重挂。
+     * 延时元素的绝对到期时刻由引擎在应用点以条目携带时刻折算（{@code
+     * EntryClock} 确定化语义，判例租约）——本方法 MUST NOT 读物理时钟；
+     * 载荷尺寸/容量/批量预算 MUST NOT 在此复核（接入层唯一钳制，判例 v6）。
+     * GRANTED 后以引擎读数整体刷新影子表队列镜像（深度/队首到期/驻留字节/
+     * 首元素预览源），DENIED 与拒绝态零镜像变更。
+     *
+     * @param entry 条目（载荷为 {@link QueueOpPayload}）
+     * @return 回执（OK 择用元素/列表/读数；DENIED 无交付字段）
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyQueueOp(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        QueueOpPayload p = QueueOpPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        LockType kind = toCoreQueueKind(req.getLockType().getNumber());
+        QueueOpType op = toCoreQueueOp(req.getOp());
+        if (kind == null || op == null) {
+            // 非队列形态或未知 op：形状非法（ACQUIRE 面类型不得进入本通道）。
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+        }
+        QueueOpResult r = engine.queueOp(new QueueOpCommand(local, p.getRequestId(),
+                req.getKey(), kind, op, false, req.getCapacity(),
+                req.hasElementBytes() ? req.getElementBytes().toByteArray() : null,
+                req.getDelayMs(), req.getMaxElements(), req.getOpSeq()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                mirrorQueue(req.getKey(), req.getLockType().getNumber());
+                if (op == QueueOpType.PUT || op == QueueOpType.TAKE || op == QueueOpType.DRAIN) {
+                    // 写类 op 的槽镜像以逻辑会话 id 登记（引擎内部 sid 不出
+                    // 节点，判例 atomicApplied 的槽会话口径）；读类 op 不参与
+                    // 去重、不触槽。
+                    shadow.queueSlotApplied(req.getKey(), p.getSessionId(), op.ordinal(),
+                            req.getOpSeq(),
+                            op == QueueOpType.TAKE ? r.element() : null,
+                            op == QueueOpType.DRAIN ? r.drained() : java.util.List.of());
+                }
+                ApplyResult.Builder b = ApplyResult.newBuilder().setStatus(ApplyStatus.OK);
+                if ((op == QueueOpType.TAKE || op == QueueOpType.PEEK) && r.element() != null) {
+                    b.setQueueElementBytes(
+                            com.google.protobuf.ByteString.copyFrom(r.element()));
+                }
+                if (op == QueueOpType.DRAIN) {
+                    for (byte[] element : r.drained()) {
+                        b.addQueueDrainedBytes(
+                                com.google.protobuf.ByteString.copyFrom(element));
+                    }
+                }
+                if (op == QueueOpType.SIZE) {
+                    b.setQueueSize(r.size());
+                }
+                yield b.build();
+            }
+            case DENIED -> ApplyResult.newBuilder().setStatus(ApplyStatus.DENIED).build();
+            case REJECT_SESSION ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_TYPE_MISMATCH, REJECT_QUEUE_CAPACITY, REJECT_KEY_EMPTY,
+                    REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable queue op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 队列镜像刷新：以引擎复制态导出（{@code queueReplicatedState}）发布
+     * 影子表队列镜像（元素全列表 + 去重槽表为权威形，观察读数由镜像派生，
+     * 判例 {@code mirrorBarrier}）。条目缺席（读类零迁移路径）或非队列
+     * 家族（互拒）零扰动。
+     *
+     * @param key       队列键
+     * @param kindValue 协议形态数值（12/13）
+     */
+    private void mirrorQueue(String key, int kindValue) {
+        io.github.lamspace.openlatch.core.lock.QueueEntry.ReplicatedState state =
+                engine.queueReplicatedState(key);
+        if (state == null) {
+            return;
+        }
+        shadow.queueApplied(key, kindValue, state.capacity(), state.elements());
+    }
+
+    /**
+     * PHASER_OP_ENTRY：引擎变异应用（注册配额、到场计数与换代、离场扣减、
+     * 死亡摘除——全部账簿迁移在条目内确定性重放，跨副本一致；等待簿记
+     * MUST NOT 入引擎，判例"集群引擎恒不登记等待项"）。回执携带到场相位
+     * 与账簿快照（应答回显），tripped 经 {@code phaser_advanced_keys} 驱动
+     * Leader 侧唤醒广播（{@code ReplicationGateway}）。配额上限判定在受理
+     * 点（Leader 预检），应用侧不复核——配置漂移不撕裂账簿。
+     *
+     * @param entry 条目（载荷为 {@link PhaserOpPayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyPhaserOp(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        PhaserOpPayload p = PhaserOpPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        io.github.lamspace.openlatch.core.PhaserOpType op = toCorePhaserOp(req.getOp());
+        if (op == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+        }
+        PhaserOpResult r = engine.phaserApply(new io.github.lamspace.openlatch.core.command
+                .PhaserOpCommand(local, p.getRequestId(), req.getKey(), op,
+                req.getParties(),
+                req.hasExpectedPhase() ? req.getExpectedPhase() : null,
+                req.getAwaitRequestId()));
+        return switch (r.outcome()) {
+            case GRANTED, QUEUED -> {
+                mirrorPhaser(req.getKey(), null);
+                ApplyResult.Builder b = ApplyResult.newBuilder()
+                        .setStatus(r.outcome() == io.github.lamspace.openlatch.core.result.Outcome.GRANTED
+                                ? ApplyStatus.OK : ApplyStatus.QUEUED)
+                        .setPhaserPhase(r.phase())
+                        .setPhaserRegistered(r.registered())
+                        .setPhaserArrived(r.arrived());
+                if (r.tripped()) {
+                    b.addPhaserAdvancedKeys(req.getKey());
+                }
+                yield b.build();
+            }
+            case REJECT_SESSION ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_PHASER_QUOTA, REJECT_PHASER_NO_ENTRY, REJECT_PHASER_PARTIES,
+                    REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable phaser op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 协议 {@code PhaserOp} → core {@code PhaserOpType}（枚举序逐项对应 0–6）；
+     * 未知回 {@code null}。
+     *
+     * @param wireOp 协议操作枚举
+     * @return core 操作，未知为 {@code null}
+     */
+    public static io.github.lamspace.openlatch.core.PhaserOpType toCorePhaserOp(
+            io.github.lamspace.openlatch.protocol.PhaserOp wireOp) {
+        return switch (wireOp) {
+            case PHASER_OP_REGISTER -> io.github.lamspace.openlatch.core.PhaserOpType.REGISTER;
+            case PHASER_OP_ARRIVE -> io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE;
+            case PHASER_OP_ARRIVE_AND_AWAIT ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE_AND_AWAIT;
+            case PHASER_OP_ARRIVE_AND_DEREGISTER ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE_AND_DEREGISTER;
+            case PHASER_OP_AWAIT_ADVANCE ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.AWAIT_ADVANCE;
+            case PHASER_OP_CANCEL -> io.github.lamspace.openlatch.core.PhaserOpType.CANCEL;
+            case PHASER_OP_QUERY -> io.github.lamspace.openlatch.core.PhaserOpType.QUERY;
+            default -> null;
+        };
+    }
+
+    /**
+     * 镜像指定 key 的相位器账簿（应用点统一刷新落点）。
+     *
+     * @param key 相位器键
+     */
+    private void mirrorPhaser(String key) {
+        mirrorPhaser(key, null);
+    }
+
+    /**
+     * 镜像指定 key 的相位器账簿（映射表覆写形态，SESSION_CLOSE 传播专用：
+     * 先于 sidMap 摘除拍下的内部→逻辑折算表，防死者内部 sid 泄入镜像）。
+     *
+     * @param key         相位器键
+     * @param toLogicalBy 预置折算表，可为 {@code null}
+     */
+    private void mirrorPhaser(String key, Map<Long, Long> toLogicalBy) {
+        var st = engine.phaserReplicatedState(key);
+        if (st == null) {
+            return;
+        }
+        Map<Long, Long> toLogical = toLogicalBy != null ? toLogicalBy : new HashMap<>();
+        if (toLogicalBy == null) {
+            for (var en : sidMap.entrySet()) {
+                toLogical.put(en.getValue(), en.getKey());
+            }
+        }
+        var parties = st.parties().stream()
+                .map(pt -> new ShadowTable.PartyRef(
+                        toLogical.getOrDefault(pt.sessionId(), pt.sessionId()),
+                        pt.parties(), pt.lastRegisterRequestId(), pt.lastRegisterPhase()))
+                .toList();
+        java.util.function.Function<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival,
+                ShadowTable.ArrivalRef> ref = a -> new ShadowTable.ArrivalRef(
+                        toLogical.getOrDefault(a.sessionId(), a.sessionId()), a.requestId());
+        shadow.phaserMirror(key, new ShadowTable.PhaserMirrorData(st.phase(), st.registered(),
+                st.arrived(), parties,
+                st.arrivals().stream().map(ref).toList(),
+                st.prevPhase(),
+                st.prevArrivals().stream().map(ref).toList()));
+    }
+
+    /**
+     * 协议队列形态数值 → core 枚举（12/13）；其余回 {@code null}。
+     *
+     * @param number 协议 {@code LockType} 数值
+     * @return core 队列形态，非队列为 {@code null}
+     */
+    public static LockType toCoreQueueKind(int number) {
+        return switch (number) {
+            case 12 -> LockType.QUEUE;
+            case 13 -> LockType.DELAY_QUEUE;
+            default -> null;
+        };
+    }
+
+    /**
+     * 协议 {@code QueueOp} → core {@link QueueOpType}；未知回 {@code null}。
+     *
+     * @param wireOp 协议操作枚举
+     * @return core 操作，未知为 {@code null}
+     */
+    public static QueueOpType toCoreQueueOp(io.github.lamspace.openlatch.protocol.QueueOp wireOp) {
+        return switch (wireOp) {
+            case QUEUE_OP_PUT -> QueueOpType.PUT;
+            case QUEUE_OP_TAKE -> QueueOpType.TAKE;
+            case QUEUE_OP_DRAIN -> QueueOpType.DRAIN;
+            case QUEUE_OP_PEEK -> QueueOpType.PEEK;
+            case QUEUE_OP_SIZE -> QueueOpType.SIZE;
+            default -> null;
         };
     }
 
@@ -767,6 +1101,7 @@ public final class LockStateMachineCore {
             case 7 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_LONG;
             case 8 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_INTEGER;
             case 9 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_BOOLEAN;
+            case 11 -> io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE;
             default -> null;
         };
     }
@@ -944,16 +1279,131 @@ public final class LockStateMachineCore {
                 }
                 CoreStateRestore.AtomicState atomic = null;
                 if (ShadowTable.isAtomicType(l.getLockTypeValue())) {
+                    // 去重槽会话以内部 id 入引擎条目（apply 侧以 internal sid 比对）：
+                    // 快照存逻辑 id，重建经 newSidMap 折算（判例：屏障挂账/账簿）；
+                    // 空槽（0）无映射，原样保留。
                     atomic = new CoreStateRestore.AtomicState(l.getAtomicInitial(),
                             l.getAtomicValue(), l.getAtomicVersion(),
-                            l.getAtomicSlotSession(), l.getAtomicSlotOpSeq(),
+                            newSidMap.getOrDefault(l.getAtomicSlotSession(),
+                                    l.getAtomicSlotSession()),
+                            l.getAtomicSlotOpSeq(),
                             l.getAtomicSlotApplied(), l.getAtomicSlotOldValue(),
                             l.getAtomicSlotValue(), l.getAtomicSlotVersion());
+                }
+                // v6：引用条目状态组重建——载荷两态按 presence 还原（缺省
+                // =null），骨架字段与标量形态复用同一编号位。
+                CoreStateRestore.AtomicRefState atomicRef = null;
+                if (ShadowTable.isReferenceType(l.getLockTypeValue())) {
+                    atomicRef = new CoreStateRestore.AtomicRefState(
+                            l.hasAtomicRefInitial() ? l.getAtomicRefInitial().toByteArray() : null,
+                            l.hasAtomicRefValue() ? l.getAtomicRefValue().toByteArray() : null,
+                            l.getAtomicVersion(),
+                            // 同标量判例：槽会话逻辑 id 折算内部 id（空槽 0 原样）。
+                            newSidMap.getOrDefault(l.getAtomicSlotSession(),
+                                    l.getAtomicSlotSession()),
+                            l.getAtomicSlotOpSeq(),
+                            l.getAtomicSlotApplied(),
+                            l.hasAtomicRefSlotOldValue()
+                                    ? l.getAtomicRefSlotOldValue().toByteArray() : null,
+                            l.hasAtomicRefSlotValue()
+                                    ? l.getAtomicRefSlotValue().toByteArray() : null,
+                            l.getAtomicSlotVersion());
+                }
+                // v7：队列条目状态组重建——元素与交付槽原样直写（不解释、
+                // 尺寸不校验），槽会话经 newSidMap 折算引擎内部 id（判例
+                // 屏障账簿）；映射缺失（已消亡会话残留）的槽项剔除。
+                CoreStateRestore.QueueState queue = null;
+                if (ShadowTable.isQueueType(l.getLockTypeValue())) {
+                    java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry
+                            .ElementState> qElements =
+                            new java.util.ArrayList<>(l.getQueueElementsCount());
+                    for (io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement
+                            element : l.getQueueElementsList()) {
+                        qElements.add(new io.github.lamspace.openlatch.core.lock
+                                .QueueEntry.ElementState(element.getPayload().toByteArray(),
+                                element.getExpiresAtMs()));
+                    }
+                    java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry
+                            .SlotState> qSlots =
+                            new java.util.ArrayList<>(l.getQueueDedupSlotsCount());
+                    for (io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot
+                            slot : l.getQueueDedupSlotsList()) {
+                        Long slotSid = newSidMap.get(slot.getSessionId());
+                        if (slotSid == null) {
+                            continue; // 已消亡会话的槽残留：装配侧剔除
+                        }
+                        java.util.List<byte[]> drained =
+                                new java.util.ArrayList<>(slot.getDrainedBytesCount());
+                        for (com.google.protobuf.ByteString drainedBytes
+                                : slot.getDrainedBytesList()) {
+                            drained.add(drainedBytes.toByteArray());
+                        }
+                        // element_bytes 为裸 bytes：交付语义按 op 判别（1=TAKE
+                        // 恒有元素，零长度=空串元素；其余形态回 null）。
+                        qSlots.add(new io.github.lamspace.openlatch.core.lock.QueueEntry
+                                .SlotState(slotSid, slot.getOpSeq(),
+                                io.github.lamspace.openlatch.core.QueueOpType
+                                        .values()[slot.getOp()],
+                                slot.getOp() == 1
+                                        ? slot.getElementBytes().toByteArray() : null,
+                                drained));
+                    }
+                    queue = new CoreStateRestore.QueueState(l.getQueueCapacity(),
+                            qElements, qSlots);
+                }
+                // v10：相位器状态组重建——配额表/槽经 newSidMap 折算引擎内部 id
+                // （判例屏障账簿）；映射缺失（已消亡会话残留）的行剔除并重算
+                // registered 保持"配额和恒等于注册总数"不变量，arrived 防御性
+                // 收敛到推进判据补集（理论不可达——死亡摘除与推进同关键区）。
+                CoreStateRestore.PhaserState phaser = null;
+                if (ShadowTable.isPhaserType(l.getLockTypeValue())) {
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry
+                            .PartyView> keptParties = new java.util.ArrayList<>();
+                    int registeredSum = 0;
+                    for (var pt : l.getPhaserPartiesList()) {
+                        Long internal = newSidMap.get(pt.getSessionId());
+                        if (internal == null) {
+                            continue;
+                        }
+                        keptParties.add(new io.github.lamspace.openlatch.core.lock
+                                .PhaserEntry.PartyView(internal, pt.getParties(),
+                                        pt.getLastRegisterRequestId(),
+                                        pt.getLastRegisterPhase()));
+                        registeredSum += pt.getParties();
+                    }
+                    java.util.function.Function<io.github.lamspace.openlatch.protocol.raft
+                            .SnapshotPhaserArrival, io.github.lamspace.openlatch.core.lock
+                            .PhaserEntry.Arrival> conv = a ->
+                            new io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival(
+                                    newSidMap.get(a.getSessionId()), a.getRequestId());
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival>
+                            cur = new java.util.ArrayList<>();
+                    for (var a : l.getPhaserArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            cur.add(conv.apply(a));
+                        }
+                    }
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival>
+                            prev = new java.util.ArrayList<>();
+                    for (var a : l.getPhaserPrevArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            prev.add(conv.apply(a));
+                        }
+                    }
+                    long prevPhase = l.hasPhaserPrevPhase() ? l.getPhaserPrevPhase() : -1L;
+                    int registered = registeredSum;
+                    int arrived = l.getPhaserArrived();
+                    if (arrived > 0 && arrived >= registered) {
+                        arrived = Math.max(0, registered - 1);
+                    }
+                    phaser = new CoreStateRestore.PhaserState(l.getPhaserPhase(), registered,
+                            arrived, java.util.List.copyOf(keptParties), java.util.List.copyOf(cur),
+                            prevPhase, java.util.List.copyOf(prev));
                 }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
                         l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(),
-                        atomic, barrier));
+                        atomic, barrier, atomicRef, queue, phaser));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

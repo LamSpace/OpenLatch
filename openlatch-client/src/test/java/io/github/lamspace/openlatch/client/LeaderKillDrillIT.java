@@ -245,6 +245,12 @@ class LeaderKillDrillIT {
             OCountDownLatch la = a.newCountDownLatch("drill-latch", 2);
             assertThat(la.init()).isEqualTo(2);
             assertThat(la.countDown()).isEqualTo(1);
+            // v10 phaser：A 注册两方并到场一发（相位 0、1/2）——账簿复制态
+            // 必跨 kill 存续；kill 后由 B 补一发合拢。
+            io.github.lamspace.openlatch.client.OPhaser pa = a.newPhaser("drill-phaser");
+            pa.register();
+            pa.register();
+            assertThat(pa.arrive()).isZero();
 
             logRoles("C:kill前", nodes);
             leader.process().destroyForcibly();
@@ -270,11 +276,48 @@ class LeaderKillDrillIT {
             awaitSemAvailable(b.newSemaphore("drill-sem", 3), 3, 20_000);
             releaseEventually(b.newSemaphore("drill-sem", 3), 3);
 
+            // v10 phaser 跨 kill（契约形断言）：条目与相位为复制态存续可读；
+            // A 的配额随其会话被失联清理隐式摘除（绑会话，契约为"摘除即
+            // 缩小应到、可即时推进"）——存活侧 B 续注册并循环到场，断言
+            // 相位严格前进（合拢照常、无空转），不钉具体计数。
+            io.github.lamspace.openlatch.client.OPhaser pb = b.newPhaser("drill-phaser");
+            long pDeadline = System.currentTimeMillis() + 45_000;
+            for (;;) {
+                try {
+                    pb.bulkRegister(2);
+                    break;
+                } catch (OpenLatchException transientP) {
+                    if (System.currentTimeMillis() > pDeadline) {
+                        throw transientP;
+                    }
+                    Thread.sleep(500);
+                }
+            }
+            long advancedTo = -1;
+            long tDeadline = System.currentTimeMillis() + 45_000;
+            while (advancedTo < 0) {
+                if (System.currentTimeMillis() > tDeadline) {
+                    throw new AssertionError("phaser 跨 kill 后 45s 内相位未推进");
+                }
+                try {
+                    long before = pb.getPhase();
+                    pb.arrive();
+                    long after = pb.getPhase();
+                    if (after > before) {
+                        advancedTo = after;
+                    }
+                } catch (OpenLatchException transientT) {
+                    Thread.sleep(500);
+                }
+            }
+            assertThat(advancedTo).as("kill 后会合照常推进（相位严格前进）").isPositive();
+
             appendReport("## 场景 C：kill -9 Leader × 扩展原语存续\n\n"
                     + "| 指标 | 判定 |\n|---|---|\n"
                     + "| 切换后许可池收敛 | 会话清理归还可得 ✅ |\n"
                     + "| 切换后屏障计数存续 | 1→0→await 放行 ✅ |\n"
-                    + "| 归还无泄漏 | 满量可得 ✅ |\n\n");
+                    + "| 归还无泄漏 | 满量可得 ✅ |\n"
+                    + "| phaser 条目存续与合拢跨 kill | 换代后存活侧续注册→相位严格前进 ✅ |\n\n");
         } finally {
             if (a != null) {
                 a.shutdown();
@@ -513,17 +556,30 @@ class LeaderKillDrillIT {
         }
     }
 
-    /** 定位 openlatch-server shaded jar（与 ClientProcessKillIT 同策略）。 */
+    /**
+     * 定位 openlatch-server shaded jar（与 ClientProcessKillIT 同策略）：对
+     * 候选目录按前后缀（{@code openlatch-server-} 起、{@code -executable.jar} 终）匹配，
+     * MUST NOT 钉死版本文件名——发版改号曾把钉死 {@code 1.0-SNAPSHOT} 的
+     * 查找打成哑弹，进程级演练整批静默跳过（2026-10-03 实证）。
+     */
     private static Path locateServerJar() {
-        List<Path> candidates = List.of(
-                Path.of("..", "openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"),
-                Path.of("openlatch-server", "target",
-                        "openlatch-server-1.0-SNAPSHOT-executable.jar"));
-        for (Path c : candidates) {
-            Path abs = c.toAbsolutePath().normalize();
-            if (Files.exists(abs)) {
-                return abs;
+        for (Path dir : List.of(
+                Path.of("..", "openlatch-server", "target"),
+                Path.of("openlatch-server", "target"))) {
+            Path abs = dir.toAbsolutePath().normalize();
+            if (!Files.isDirectory(abs)) {
+                continue;
+            }
+            try (var files = Files.list(abs)) {
+                Path jar = files
+                        .filter(p -> p.getFileName().toString().startsWith("openlatch-server-"))
+                        .filter(p -> p.getFileName().toString().endsWith("-executable.jar"))
+                        .findFirst().orElse(null);
+                if (jar != null) {
+                    return jar;
+                }
+            } catch (IOException ignored) {
+                // 目录不可读按未找到处理（保持显式跳过告警语义）
             }
         }
         return null;

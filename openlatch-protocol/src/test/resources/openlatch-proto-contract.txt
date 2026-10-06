@@ -19,6 +19,11 @@ enum MessageType
   BARRIER_AWAIT 15
   BARRIER_LEAVE 16
   BARRIER_ACTION_DONE 17
+  QUEUE_OP 18
+  TOPIC_OP 19
+  TOPIC_MESSAGE 20
+  CONDITION_OP 21
+  PHASER_OP 22
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -31,6 +36,10 @@ enum LockType
   LOCK_TYPE_ATOMIC_INTEGER 8
   LOCK_TYPE_ATOMIC_BOOLEAN 9
   LOCK_TYPE_BARRIER 10
+  LOCK_TYPE_ATOMIC_REFERENCE 11
+  LOCK_TYPE_QUEUE 12
+  LOCK_TYPE_DELAY_QUEUE 13
+  LOCK_TYPE_PHASER 14
 enum StatusCode
   OK 0
   QUEUED 1
@@ -45,6 +54,7 @@ enum StatusCode
   NOT_LEADER 10
   INTERNAL_ERROR 11
   BARRIER_BROKEN 12
+  REJECT_SUBSCRIBERS 13
 enum AtomicOp
   ATOMIC_GET 0
   ATOMIC_SET 1
@@ -52,6 +62,28 @@ enum AtomicOp
   ATOMIC_ADD 3
   ATOMIC_CAS 4
   ATOMIC_CAS_STAMPED 5
+enum QueueOp
+  QUEUE_OP_PUT 0
+  QUEUE_OP_TAKE 1
+  QUEUE_OP_DRAIN 2
+  QUEUE_OP_PEEK 3
+  QUEUE_OP_SIZE 4
+enum TopicOp
+  TOPIC_OP_SUBSCRIBE 0
+  TOPIC_OP_UNSUBSCRIBE 1
+  TOPIC_OP_PUBLISH 2
+enum ConditionOp
+  CONDITION_OP_SIGNAL 0
+  CONDITION_OP_SIGNAL_ALL 1
+  CONDITION_OP_LEAVE 2
+enum PhaserOp
+  PHASER_OP_REGISTER 0
+  PHASER_OP_ARRIVE 1
+  PHASER_OP_ARRIVE_AND_AWAIT 2
+  PHASER_OP_ARRIVE_AND_DEREGISTER 3
+  PHASER_OP_AWAIT_ADVANCE 4
+  PHASER_OP_CANCEL 5
+  PHASER_OP_QUERY 6
 message Envelope
   protocol_version 1
   type 2
@@ -86,6 +118,15 @@ message Envelope
   barrier_leave_response 37
   barrier_action_done_request 38
   barrier_action_done_response 39
+  queue_op_request 40
+  queue_op_response 41
+  topic_op_request 42
+  topic_op_response 43
+  topic_message 44
+  condition_op_request 45
+  condition_op_response 46
+  phaser_op_request 47
+  phaser_op_response 48
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -105,6 +146,7 @@ message AcquireRequest
   wait_ms 5
   permits 6
   permits_total 7
+  condition 8
 message AcquireResponse
   status 1
   lease_token 2
@@ -169,6 +211,9 @@ message AdminSummaryResponse
   version 9
   atomic_entries 10
   barrier_entries 11
+  queue_entries 12
+  topic_entries 13
+  phaser_entries 14
 message AdminListKeysRequest
   token 1
   page 2
@@ -185,6 +230,17 @@ message AdminKeyInfo
   barrier_parties 8
   barrier_generation 9
   barrier_arrived 10
+  atomic_payload_size 11
+  atomic_payload_preview 12
+  queue_capacity 13
+  queue_depth 14
+  queue_head_payload_size 15
+  queue_head_payload_preview 16
+  topic_subscribers 17
+  condition_waiters 18
+  phaser_phase 19
+  phaser_registered 20
+  phaser_arrived 21
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -206,6 +262,17 @@ message AdminKeyWaiterInfo
   waited_ms 4
   permits 5
   notified 6
+  queue_track 7
+message AdminTopicSubscriberInfo
+  session_id 1
+  subscription_id 2
+  subscribed_at_ms 3
+message AdminConditionWaiterInfo
+  condition 1
+  session_id 2
+  request_id 3
+  thread_id 4
+  registered_at_ms 5
 message AdminKeyDetailResponse
   status 1
   family 2
@@ -227,6 +294,31 @@ message AdminKeyDetailResponse
   barrier_arrived 18
   barrier_action_pending 19
   barrier_last_final 20
+  atomic_payload_size 21
+  atomic_payload_preview 22
+  queue_capacity 23
+  queue_depth 24
+  queue_head_expiry_ms 25
+  queue_total_payload_bytes 26
+  queue_head_payload_size 27
+  queue_head_payload_preview 28
+  topic_subscribers 29
+  topic_subscribers_info 30
+  condition_waiters 31
+  condition_waiters_info 32
+  phaser_phase 33
+  phaser_registered 34
+  phaser_arrived 35
+  phaser_waiters_info 36
+  phaser_parties_info 37
+message AdminPhaserWaiterInfo
+  session_id 1
+  request_id 2
+  expected_phase 3
+  registered_at_ms 4
+message AdminPhaserPartyInfo
+  session_id 1
+  parties 2
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -247,6 +339,9 @@ message AtomicOpRequest
   expected_version 6
   initial_value 7
   op_seq 8
+  operand_bytes 9
+  expected_bytes 10
+  initial_bytes 11
 message AtomicOpResponse
   status 1
   op 2
@@ -254,6 +349,8 @@ message AtomicOpResponse
   old_value 4
   value 5
   version 6
+  old_value_bytes 7
+  value_bytes 8
 message BarrierAwaitRequest
   key 1
   parties 2
@@ -274,3 +371,59 @@ message BarrierActionDoneRequest
   generation 2
 message BarrierActionDoneResponse
   status 1
+message QueueOpRequest
+  key 1
+  op 2
+  lock_type 3
+  blocking 4
+  capacity 5
+  element_bytes 6
+  delay_ms 7
+  max_elements 8
+  op_seq 9
+message QueueOpResponse
+  status 1
+  op 2
+  queue_position 3
+  element_bytes 4
+  drained_bytes 5
+  size 6
+  capacity 7
+message TopicOpRequest
+  key 1
+  op 2
+  payload_bytes 3
+  op_seq 4
+message TopicOpResponse
+  status 1
+  op 2
+  subscription_id 3
+  topic_seq 4
+message TopicMessage
+  key 1
+  subscription_id 2
+  topic_seq 3
+  publisher_sid 4
+  publish_ts_ms 5
+  payload_bytes 6
+message ConditionOpRequest
+  key 1
+  op 2
+  condition 3
+  thread_id 4
+  await_request_id 5
+message ConditionOpResponse
+  status 1
+  op 2
+message PhaserOpRequest
+  key 1
+  op 2
+  parties 3
+  expected_phase 4
+  await_request_id 5
+message PhaserOpResponse
+  status 1
+  op 2
+  phase 3
+  registered 4
+  arrived 5

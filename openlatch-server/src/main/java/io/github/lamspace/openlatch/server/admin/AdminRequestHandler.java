@@ -79,7 +79,13 @@ import java.util.function.LongSupplier;
  * 集群读本节点 {@link ShadowTable#adminEntries()} 管理投影（应用点整体
  * 重发布的弱一致镜像、逻辑会话 id 口径）+ {@code WaitQueue} 明细
  * （等待队列非复制状态、Leader 权威——follower 应答等待区恒空并置
- * {@code wait_queue_leader_only}）。{@code ADMIN_LIST_SESSIONS} 两形态
+ * {@code wait_queue_leader_only}）。v9 条件等待读数两形态分源：单机读
+ * core 条目内条件等待集（{@code conditionWaiterCount}/{@code conditionWaiters}，
+ * 集内等待者使条目存活故行可见、持有读数如实无持有者）；集群读 Leader 本地
+ * {@code ConditionRegistry}（计数与明细仅 Leader 呈现，follower 恒零/空并随
+ * {@code wait_queue_leader_only} 同源标注——等待集不入复制态，如实零读），
+ * 且条件字段只挂 {@code family=lock} 行/详情（非 LOCK 键恒缺省零值/空列表，
+ * 条件骑 LOCK 家族）。{@code ADMIN_LIST_SESSIONS} 两形态
  * 均只覆盖受理节点自身接入的会话（{@link ServerSessionRegistry}），
  * 跨节点全景由控制台多节点聚合。
  *
@@ -112,9 +118,11 @@ public final class AdminRequestHandler {
     private final ServerSessionRegistry sessions;
     /** 运行时长供给（毫秒），装配自 {@link OpenLatchServer#uptimeMs()}。 */
     private final LongSupplier uptimeMs;
+    /** v8 单机形态 topic 登记表（集群形态为 {@code null}，经运行时取）。 */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry standaloneTopics;
 
     /**
-     * 构造管理处理器。
+     * 构造管理处理器（既有五参形态：无 topic 面，订阅维恒零）。
      *
      * @param config        管理配置（令牌）
      * @param standaloneCore 单机核心引擎；集群形态传 {@code null}
@@ -125,11 +133,107 @@ public final class AdminRequestHandler {
     public AdminRequestHandler(AdminConfig config, CoreEngine standaloneCore,
                                ClusterRuntime cluster, ServerSessionRegistry sessions,
                                LongSupplier uptimeMs) {
+        this(config, standaloneCore, cluster, sessions, uptimeMs, null);
+    }
+
+    /**
+     * 构造管理处理器（v8 全参形态）。
+     *
+     * @param config         管理配置（令牌）
+     * @param standaloneCore 单机核心引擎；集群形态传 {@code null}
+     * @param cluster        集群运行时；单机形态传 {@code null}
+     * @param sessions       本节点连接注册表
+     * @param uptimeMs       服务器运行时长供给（毫秒）
+     * @param standaloneTopics 单机形态 topic 登记表；集群形态传 {@code null}
+     *                        （数据源经 {@code ClusterRuntime.topicRegistry()}）
+     */
+    public AdminRequestHandler(AdminConfig config, CoreEngine standaloneCore,
+                               ClusterRuntime cluster, ServerSessionRegistry sessions,
+                               LongSupplier uptimeMs,
+                               io.github.lamspace.openlatch.server.topic.TopicRegistry standaloneTopics) {
         this.config = config;
         this.standaloneCore = standaloneCore;
         this.cluster = cluster;
         this.sessions = sessions;
         this.uptimeMs = uptimeMs;
+        this.standaloneTopics = standaloneTopics;
+    }
+
+    /**
+     * topic 登记表数据源（单机=自持；集群=运行时持有）与可见性判定：
+     * 订阅登记为 Leader 本地态，集群形态非 Leader MUST NOT 呈现（读数
+     * 口径判例 {@code wait_queue_leader_only}）。
+     *
+     * @return 可呈现时的登记表；不可见为 {@code null}
+     */
+    private io.github.lamspace.openlatch.server.topic.TopicRegistry topicsVisible() {
+        if (cluster == null) {
+            return standaloneTopics;
+        }
+        return leaderNow() ? cluster.topicRegistry() : null;
+    }
+
+    /**
+     * 订阅者明细 → 管理应答列表（会话 id、路由键、建立时刻；已交付
+     * 消息内容与字节零外发——观察面防放大纪律的 topic 延伸）。
+     *
+     * @param topics 登记表（非空）
+     * @param key    topic 键
+     * @return 应答项列表（未登记键为空列表）
+     */
+    private static java.util.List<io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo>
+            topicSubscriberInfos(io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                 String key) {
+        java.util.List<io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo> out =
+                new ArrayList<>();
+        for (var sv : topics.subscribers(key)) {
+            out.add(io.github.lamspace.openlatch.protocol.AdminTopicSubscriberInfo.newBuilder()
+                    .setSessionId(sv.sessionId()).setSubscriptionId(sv.subscriptionId())
+                    .setSubscribedAtMs(sv.subscribedAtMs()).build());
+        }
+        return out;
+    }
+
+    /**
+     * v9 条件等待明细五字段装配（{@code {condition, session_id, request_id,
+     * thread_id, registered_at_ms}}）：单机条目视图与集群 Leader 登记表视图
+     * 两数据源共用同一构装口径——条件维无内容面可外发，条件名即寻址文本，
+     * 明细仅结构五字段（观察面防放大纪律的条件延伸）。
+     *
+     * @param condition       条件名（命名寻址）
+     * @param sessionId       逻辑会话 id
+     * @param requestId       折叠 ACQUIRE 的请求 id
+     * @param threadId        归属线程 id
+     * @param registeredAtMs  登记时刻（epoch 毫秒，受理节点应用时钟）
+     * @return 明细应答项
+     */
+    private static io.github.lamspace.openlatch.protocol.AdminConditionWaiterInfo
+            conditionWaiterInfo(String condition, long sessionId, long requestId,
+                                long threadId, long registeredAtMs) {
+        return io.github.lamspace.openlatch.protocol.AdminConditionWaiterInfo.newBuilder()
+                .setCondition(condition).setSessionId(sessionId).setRequestId(requestId)
+                .setThreadId(threadId).setRegisteredAtMs(registeredAtMs).build();
+    }
+
+    /**
+     * v8：topic 键的明细应答（{@code family=topic}）——仅订阅数与订阅者
+     * 列表两维；无持有/等待/租约区段（"无此语义"以零值形呈现，消费者侧
+     * 按 family 分派渲染）。已交付消息内容 MUST NOT 出现在应答中。
+     *
+     * @param msg    请求信封
+     * @param topics 登记表（调用方保证可见性）
+     * @param key    topic 键
+     * @return 应答信封
+     */
+    private Envelope topicDetail(Envelope msg,
+            io.github.lamspace.openlatch.server.topic.TopicRegistry topics, String key) {
+        io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse resp =
+                io.github.lamspace.openlatch.protocol.AdminKeyDetailResponse.newBuilder()
+                        .setStatus(StatusCode.OK).setFamily("topic")
+                        .setTopicSubscribers(topics.subscriberCount(key))
+                        .addAllTopicSubscribersInfo(topicSubscriberInfos(topics, key))
+                        .build();
+        return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(resp));
     }
 
     /**
@@ -220,7 +324,11 @@ public final class AdminRequestHandler {
 
     /**
      * 装配摘要应答：聚合读数单机取 {@code stats()} + 屏障/原子条目计数、
-     * 集群取影子表投影计数；角色/会话数按节点视角如实呈现。
+     * 集群取影子表投影计数；角色/会话数按节点视角如实呈现。等待者总数
+     * v9 口径含条件等待者——单机 {@code stats().totalWaiters()} 天然计入
+     * 条目条件集；集群 Leader 取等待队列合计 + {@code ConditionRegistry}
+     * 在册人数加数（Follower 无队列与集合来源，恒 0 如实，判例 topic 订阅
+     * 者不计入的相反口径：条件等待者是等待者）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -236,6 +344,8 @@ public final class AdminRequestHandler {
             int latchEntries = 0;
             int atomicEntries = 0;
             int barrierEntries = 0;
+            int queueEntries = 0;
+            int phaserEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
@@ -243,11 +353,19 @@ public final class AdminRequestHandler {
                     atomicEntries++;
                 } else if (k.family() == KeyFamily.BARRIER) {
                     barrierEntries++;
+                } else if (k.family() == KeyFamily.QUEUE) {
+                    queueEntries++;
+                } else if (k.family() == KeyFamily.PHASER) {
+                    phaserEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
-                    .setBarrierEntries(barrierEntries)
+                    .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    .setPhaserEntries(phaserEntries)
+                    // v8：订阅登记键数（Leader/单机视角；无持有语义单列）。
+                    .setTopicEntries(standaloneTopics == null ? 0
+                            : standaloneTopics.topicKeyCount())
                     .setTotalWaiters(st.totalWaiters())
                     .setNodeRole("SINGLE");
         } else {
@@ -256,19 +374,41 @@ public final class AdminRequestHandler {
             int latchEntries = 0;
             int atomicEntries = 0;
             int barrierEntries = 0;
+            int queueEntries = 0;
+            int phaserEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
-                } else if (ShadowTable.isAtomicType(v.lockType())) {
+                } else if (ShadowTable.isAtomicFamily(v.lockType())) {
+                    // v6：有值引用条目并入 ATOMIC 家族单列计数（per-kind 区分
+                    // 由指标 kind 标签承担，不扩计数线）。
                     atomicEntries++;
                 } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                     barrierEntries++;
+                } else if (ShadowTable.isQueueType(v.lockType())) {
+                    // v7：队列两形态合并单列（判例 latch/atomic/barrier）。
+                    queueEntries++;
+                } else if (ShadowTable.isPhaserType(v.lockType())) {
+                    // v10：相位器条目数（复制态家族读数，各节点经镜像收敛一致，
+                    // 与 topic 的 Leader 本地表口径分轨）。
+                    phaserEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
-                    .setBarrierEntries(barrierEntries)
-                    .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
+                    .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    .setPhaserEntries(phaserEntries)
+                    // v8：订阅登记键数仅 Leader 视角呈现（降级残留随下次当选
+                    // 一并清零，非 Leader 恒 0——判例等待队列 Leader 门控）。
+                    .setTopicEntries(leaderNow() ? cluster.topicRegistry().topicKeyCount() : 0)
+                    // v9 等待者总数口径：等待队列合计 + 条件等待集在册人数
+                    //（Leader 本地登记表读数；Follower 两源皆无、恒 0 如实；
+                    // 单机侧 stats().totalWaiters() 已含条件集，两形态同口径）。
+                    .setTotalWaiters(leaderNow()
+                            ? cluster.waitQueue().totalWaiters()
+                                    + cluster.conditionRegistry().totalCount()
+                                    + (cluster.phaserRegistry() == null
+                                            ? 0 : cluster.phaserRegistry().totalCount()) : 0)
                     .setNodeRole(currentRole());
         }
         return envelope(msg, MessageType.ADMIN_SUMMARY, x -> x.setAdminSummaryResponse(b));
@@ -307,6 +447,9 @@ public final class AdminRequestHandler {
      * 装配 key 列表应答：全量视图 → 前缀过滤 → 字典序 → 切片。弱一致
      * 快照语义：并发增删 MAY 使相邻页漂移，同应答内自洽。参数越界
      * （page&lt;0、page_size∉[1,{@value #MAX_PAGE_SIZE}]）消息级拒绝。
+     * LOCK 行另列 {@code condition_waiters}（v9：单机读条目条件集、集群
+     * Leader 读本地登记表、Follower 恒 0 如实；已搬运入队项归
+     * {@code waiterCount} 口径不重复计数；非 LOCK 行恒缺省零值）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -326,15 +469,45 @@ public final class AdminRequestHandler {
                             .setHolders(k.holders().size())
                             .setRemainingLeaseMs(k.remainingLeaseMs())
                             .setWaiterCount(k.waiters().size());
+                    if (k.family() == KeyFamily.LOCK) {
+                        // v9：LOCK 行条件等待数读条目条件集（未搬运项口径；
+                        // 已搬运入队项归 waiterCount 等待队列口径，不重复计）。
+                        row.setConditionWaiters(standaloneCore.conditionWaiterCount(k.key()));
+                    }
+                    if (k.family() == KeyFamily.PHASER) {
+                        // v10：phaser 行账簿三计数（复制态读数）；等待数取
+                        // 条目等待集（单机条目即真源——明细另在 KEY_DETAIL）。
+                        row.setPhaserPhase(k.phaserPhase())
+                                .setPhaserRegistered(k.phaserRegistered())
+                                .setPhaserArrived(k.phaserArrived())
+                                .setWaiterCount(standaloneCore.phaserWaiters(k.key()).size());
+                    }
                     if (k.family() == KeyFamily.ATOMIC) {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
                         row.setAtomicKind(atomicKindNameOfCore(k.atomicKind()))
                                 .setAtomicValue(k.atomicValue());
+                        if (k.atomicKind()
+                                == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+                            // v6：引用行以大小+截断预览承载（全量载荷零外发）。
+                            row.setAtomicPayloadSize(
+                                            k.atomicRefValue() == null ? 0
+                                                    : k.atomicRefValue().length)
+                                    .setAtomicPayloadPreview(payloadPreview(k.atomicRefValue()));
+                        }
                     } else if (k.family() == KeyFamily.BARRIER) {
                         // v5：屏障行呈现 parties/世代/到场数（holders/租约恒零）。
                         row.setBarrierParties(k.barrierParties())
                                 .setBarrierGeneration(k.barrierGeneration())
                                 .setBarrierArrived(k.barrierArrived());
+                    } else if (k.family() == KeyFamily.QUEUE) {
+                        // v7：队列行呈现容量/深度/首元素大小+截断预览
+                        // （全量元素零外发）。
+                        row.setQueueCapacity(k.queueCapacity())
+                                .setQueueDepth(k.queueDepth())
+                                .setQueueHeadPayloadSize(
+                                        k.queueHeadPayload() == null
+                                                ? 0 : k.queueHeadPayload().length)
+                                .setQueueHeadPayloadPreview(payloadPreview(k.queueHeadPayload()));
                     }
                     rows.add(row.build());
                 }
@@ -348,21 +521,66 @@ public final class AdminRequestHandler {
                     continue;
                 }
                 ShadowTable.AdminEntryView v = en.getValue();
+                String family = familyNameOfLockType(v.lockType());
                 AdminKeyInfo.Builder row = AdminKeyInfo.newBuilder()
-                        .setKey(en.getKey()).setFamily(familyNameOfLockType(v.lockType()))
+                        .setKey(en.getKey()).setFamily(family)
                         .setHolders(v.holders().size())
                         .setRemainingLeaseMs(v.leaseToken() != 0
                                 ? Math.max(0, v.expiresAtMs() - now) : 0)
                         .setWaiterCount(leader ? cluster.waitQueue().waitCount(en.getKey()) : 0);
+                if ("lock".equals(family)) {
+                    // v9：LOCK 行另列条件等待数——Leader 读本地登记表合计，
+                    // Follower 无集合来源恒 0 如实（等待集不入复制态；已搬运
+                    // 入队项归 waiterCount 口径、不在本列重复计数）。
+                    row.setConditionWaiters(
+                            leader ? cluster.conditionRegistry().count(en.getKey()) : 0);
+                }
                 if (ShadowTable.isAtomicType(v.lockType())) {
                     row.setAtomicKind(atomicKindNameOf(v.lockType()))
                             .setAtomicValue(v.atomicValue());
+                } else if (ShadowTable.isReferenceType(v.lockType())) {
+                    // v6：引用行以大小+截断预览承载（全量载荷零外发）。
+                    row.setAtomicKind(atomicKindNameOf(v.lockType()))
+                            .setAtomicPayloadSize(
+                                    v.refValue() == null ? 0 : v.refValue().length)
+                            .setAtomicPayloadPreview(payloadPreview(v.refValue()));
                 } else if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                     row.setBarrierParties(v.barrierParties())
                             .setBarrierGeneration(v.barrierGeneration())
                             .setBarrierArrived(v.barrierArrived());
+                } else if (ShadowTable.isQueueType(v.lockType())) {
+                    // v7：队列行（容量/深度/首元素大小+截断预览，全量元素零外发）。
+                    row.setQueueCapacity(v.queueCapacity())
+                            .setQueueDepth(v.queueDepth())
+                            .setQueueHeadPayloadSize(
+                                    v.queueHeadPayload() == null
+                                            ? 0 : v.queueHeadPayload().length)
+                            .setQueueHeadPayloadPreview(payloadPreview(v.queueHeadPayload()));
+                } else if (ShadowTable.isPhaserType(v.lockType())) {
+                    // v10：phaser 行账簿三计数（复制态，各节点一致——与等待数
+                    // 的 Leader 本地簿记口径双轨同行，"三计数可读而等待数为零"
+                    // 非矛盾）。
+                    row.setPhaserPhase(v.phaserPhase())
+                            .setPhaserRegistered(v.phaserRegistered())
+                            .setPhaserArrived(v.phaserArrived());
+                    row.setWaiterCount(leader && cluster.phaserRegistry() != null
+                            ? cluster.phaserRegistry().count(en.getKey()) : 0);
                 }
                 rows.add(row.build());
+            }
+        }
+        // v8：Leader/单机视角合并订阅登记键（family=topic；holders/租约/等待
+        // 恒零值形）。非 Leader 无登记来源，列表如实不含 topic 行——不呈现
+        // 伪零行（与"未知 key 明确未命中"同纪律）。
+        io.github.lamspace.openlatch.server.topic.TopicRegistry topics = topicsVisible();
+        if (topics != null) {
+            for (String tkey : topics.topicKeys()) {
+                if (matches(tkey, prefix)) {
+                    rows.add(AdminKeyInfo.newBuilder()
+                            .setKey(tkey).setFamily("topic")
+                            .setTopicSubscribers(topics.subscriberCount(tkey))
+                            .build());
+                }
             }
         }
         rows.sort(Comparator.comparing(AdminKeyInfo::getKey));
@@ -397,7 +615,13 @@ public final class AdminRequestHandler {
     /**
      * 装配单 key 明细应答：未命中回 {@code NOT_HELD} 形态的完整明细响应
      * （MUST NOT 空壳成功）；等待队列 Leader 权威、follower 置
-     * {@code wait_queue_leader_only}。
+     * {@code wait_queue_leader_only}。v9 条件等待明细与等待队列区段并列：
+     * 单机读条目条件集（集内等待者使条目存活，故 LOCK 行在"持有已随 await
+     * 释放"形态下仍可见、持有读数如实无持有者）；集群读 Leader 本地登记表、
+     * follower 计数与明细恒零/空并随同一 {@code wait_queue_leader_only}
+     * 标注（等待集不入复制态——如实零读）；非 LOCK 家族键两字段恒缺省
+     * 零值/空列表；搬运入队项只在等待队列区段计位次、不在条件区段重复。
+     * 观察 MUST NOT 推进登记、搬运、通知或清扫时序（只读快照）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -408,6 +632,12 @@ public final class AdminRequestHandler {
         if (cluster == null) {
             CoreInspection.KeySnapshot snap = standaloneCore.inspectKey(req.getKey());
             if (snap == null) {
+                // v8：引擎无条目时回查 topic 登记（一 key 一形态的互斥呈现——
+                // topic 键不在 LockTable，明细来自 Leader/单机本地登记表）。
+                var topics = topicsVisible();
+                if (topics != null && topics.subscriberCount(req.getKey()) > 0) {
+                    return topicDetail(msg, topics, req.getKey());
+                }
                 return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(
                         b.setStatus(StatusCode.NOT_HELD)));
             }
@@ -430,6 +660,26 @@ public final class AdminRequestHandler {
                         .setBarrierLastFinal(snap.barrierLastFinal() == null
                                 ? "none" : barrierFinalWord(snap.barrierLastFinal().ordinal()));
             }
+            if (snap.family() == KeyFamily.ATOMIC && snap.atomicKind()
+                    == io.github.lamspace.openlatch.core.LockType.ATOMIC_REFERENCE) {
+                // v6：引用明细——标量初值/值位恒 0（上方已装配），载荷读数走
+                // 大小+截断预览对；初值观察不入载荷字段（定型语义由值态承载）。
+                b.setAtomicPayloadSize(snap.atomicRefValue() == null
+                                ? 0 : snap.atomicRefValue().length)
+                        .setAtomicPayloadPreview(payloadPreview(snap.atomicRefValue()));
+            }
+            if (snap.family() == KeyFamily.QUEUE) {
+                // v7：队列明细——容量/深度/驻留字节/队首到期与首元素截断预览；
+                // 全量元素列表零外发（观察面防放大纪律同 v6 载荷对）。
+                b.setQueueCapacity(snap.queueCapacity())
+                        .setQueueDepth(snap.queueDepth())
+                        .setQueueHeadExpiryMs(snap.queueHeadExpiryMs())
+                        .setQueueTotalPayloadBytes(snap.queueTotalPayloadBytes())
+                        .setQueueHeadPayloadSize(
+                                snap.queueHeadPayload() == null
+                                        ? 0 : snap.queueHeadPayload().length)
+                        .setQueueHeadPayloadPreview(payloadPreview(snap.queueHeadPayload()));
+            }
             for (CoreInspection.HolderSnapshot h : snap.holders()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
                         .setSessionId(h.sessionId()).setThreadId(h.threadId())
@@ -440,11 +690,51 @@ public final class AdminRequestHandler {
                 b.addWaiters(AdminKeyWaiterInfo.newBuilder()
                         .setPosition(++position).setSessionId(w.sessionId())
                         .setRequestId(w.requestId()).setPermits(w.permits())
-                        .setWaitedMs(w.waitedMs()).setNotified(w.notified()).build());
+                        .setWaitedMs(w.waitedMs()).setNotified(w.notified())
+                            // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
+                            .setQueueTrack(w.track()).build());
+            }
+            if (snap.family() == KeyFamily.PHASER) {
+                // v10：phaser 键明细——账簿三计数（复制态）+ 挂起等待明细
+                //（单机=条目等待集，登记到达序；与 waiters 区段并列不并号）
+                // + 配额明细（引擎内部 sid 直读——单机无逻辑 id 折算语义）。
+                b.setPhaserPhase(snap.phaserPhase())
+                        .setPhaserRegistered(snap.phaserRegistered())
+                        .setPhaserArrived(snap.phaserArrived());
+                for (var pv : standaloneCore.phaserParties(req.getKey())) {
+                    b.addPhaserPartiesInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserPartyInfo.newBuilder()
+                            .setSessionId(pv.sessionId()).setParties(pv.parties()).build());
+                }
+                for (var wv : standaloneCore.phaserWaiters(req.getKey())) {
+                    b.addPhaserWaitersInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserWaiterInfo.newBuilder()
+                            .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                            .setExpectedPhase(wv.expectedPhase())
+                            .setRegisteredAtMs(wv.enqueuedAtMs()).build());
+                }
+            }
+            if (snap.family() == KeyFamily.LOCK) {
+                // v9：LOCK 键条件等待明细（条目锁内只读快照，集建立序→
+                // 集内到达序；与等待队列区段并列——已搬运入队项只在上方
+                // waiters 区段呈现，两区互斥计数不重复；非 LOCK 键恒零/空）。
+                for (io.github.lamspace.openlatch.core.lock.LockEntry.ConditionWaiterView cw
+                        : standaloneCore.conditionWaiters(req.getKey())) {
+                    b.addConditionWaitersInfo(conditionWaiterInfo(cw.condition(),
+                            cw.sessionId(), cw.requestId(), cw.threadId(),
+                            cw.registeredAtMs()));
+                }
+                b.setConditionWaiters(standaloneCore.conditionWaiterCount(req.getKey()));
             }
         } else {
             ShadowTable.AdminEntryView v = cluster.core().shadow().adminEntry(req.getKey());
             if (v == null) {
+                // v8：复制态无条目时回查 Leader 本地登记（非 Leader 不可见，
+                // topic 键在其视角如实未命中——MUST NOT 空壳成功）。
+                var topics = topicsVisible();
+                if (topics != null && topics.subscriberCount(req.getKey()) > 0) {
+                    return topicDetail(msg, topics, req.getKey());
+                }
                 return envelope(msg, MessageType.ADMIN_KEY_DETAIL, x -> x.setAdminKeyDetailResponse(
                         b.setStatus(StatusCode.NOT_HELD)));
             }
@@ -459,6 +749,11 @@ public final class AdminRequestHandler {
                     .setAtomicInitial(v.atomicInitial())
                     .setAtomicValue(v.atomicValue())
                     .setAtomicVersion(v.atomicVersion());
+            if (ShadowTable.isReferenceType(v.lockType())) {
+                // v6：引用明细——大小+截断预览对（全量载荷零外发）。
+                b.setAtomicPayloadSize(v.refValue() == null ? 0 : v.refValue().length)
+                        .setAtomicPayloadPreview(payloadPreview(v.refValue()));
+            }
             if (v.lockType() == LockType.LOCK_TYPE_BARRIER_VALUE) {
                 b.setBarrierParties(v.barrierParties())
                         .setBarrierGeneration(v.barrierGeneration())
@@ -466,6 +761,32 @@ public final class AdminRequestHandler {
                         .setBarrierActionPending(v.barrierActionPending())
                         .setBarrierLastFinal(v.barrierCompletedResult() == 0
                                 ? "none" : barrierFinalWord(v.barrierCompletedResult() - 1));
+            }
+            if (ShadowTable.isPhaserType(v.lockType())) {
+                // v10：phaser 明细——账簿三计数与配额行（复制态镜像，各节点
+                // 一致照常呈现——与 topic 键的 Follower 未命中分轨）；挂起等待
+                // 明细为 Leader 本地簿记（下方 leader 分支填充，Follower 随
+                // wait_queue_leader_only 同源标注如实空）。
+                b.setPhaserPhase(v.phaserPhase())
+                        .setPhaserRegistered(v.phaserRegistered())
+                        .setPhaserArrived(v.phaserArrived());
+                for (var pr : v.phaserParties()) {
+                    b.addPhaserPartiesInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserPartyInfo.newBuilder()
+                            .setSessionId(pr.sessionId()).setParties(pr.parties()).build());
+                }
+            }
+            if (ShadowTable.isQueueType(v.lockType())) {
+                // v7：队列明细（复制态镜像读数；首元素到期为条目时刻口径，
+                // 全量元素零外发）。
+                b.setQueueCapacity(v.queueCapacity())
+                        .setQueueDepth(v.queueDepth())
+                        .setQueueHeadExpiryMs(v.queueHeadExpiryMs())
+                        .setQueueTotalPayloadBytes(v.queueTotalPayloadBytes())
+                        .setQueueHeadPayloadSize(
+                                v.queueHeadPayload() == null
+                                        ? 0 : v.queueHeadPayload().length)
+                        .setQueueHeadPayloadPreview(payloadPreview(v.queueHeadPayload()));
             }
             for (Map.Entry<ShadowTable.Holder, Integer> h : v.holders().entrySet()) {
                 b.addHolders(AdminKeyHolderInfo.newBuilder()
@@ -479,7 +800,37 @@ public final class AdminRequestHandler {
                     b.addWaiters(AdminKeyWaiterInfo.newBuilder()
                             .setPosition(w.position()).setSessionId(w.sessionId())
                             .setRequestId(w.requestId()).setPermits(w.permits())
-                            .setWaitedMs(w.waitedMs()).setNotified(w.notified()).build());
+                            .setWaitedMs(w.waitedMs()).setNotified(w.notified())
+                            // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
+                            .setQueueTrack(w.track()).build());
+                }
+                if (ShadowTable.isPhaserType(v.lockType())
+                        && cluster.phaserRegistry() != null) {
+                    // v10：phaser 等待明细（Leader 本地簿记视图，登记到达序；
+                    // 非 Leader 不填——proto 缺省零值/空列表即如实零读，上方
+                    // wait_queue_leader_only 同源标注）。
+                    for (var wv : cluster.phaserRegistry().waiters(req.getKey())) {
+                        b.addPhaserWaitersInfo(io.github.lamspace.openlatch.protocol
+                                .AdminPhaserWaiterInfo.newBuilder()
+                                .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                                .setExpectedPhase(wv.expectedPhase())
+                                .setRegisteredAtMs(wv.enqueuedAtMs()).build());
+                    }
+                }
+                if ("lock".equals(familyNameOfLockType(v.lockType()))) {
+                    // v9：LOCK 键条件等待明细——Leader 本地登记表视图
+                    //（key 建立序→集内到达序）；与等待队列区段并列、
+                    // 搬运入队项不重复计数。非 Leader 分支不填两字段
+                    //（proto 缺省零值/空列表即如实零读，随上方
+                    // wait_queue_leader_only 同源标注）。
+                    io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                            registry = cluster.conditionRegistry();
+                    b.setConditionWaiters(registry.count(req.getKey()));
+                    for (var cv : registry.views(req.getKey())) {
+                        b.addConditionWaitersInfo(conditionWaiterInfo(cv.condition(),
+                                cv.sessionId(), cv.requestId(), cv.threadId(),
+                                cv.registeredAtMs()));
+                    }
                 }
             }
         }
@@ -559,6 +910,8 @@ public final class AdminRequestHandler {
             case LATCH -> "latch";
             case ATOMIC -> "atomic";
             case BARRIER -> "barrier";
+            case QUEUE -> "queue";
+            case PHASER -> "phaser";
         };
     }
 
@@ -575,18 +928,24 @@ public final class AdminRequestHandler {
         if (lockTypeValue == LockType.LOCK_TYPE_LATCH_VALUE) {
             return "latch";
         }
-        if (ShadowTable.isAtomicType(lockTypeValue)) {
+        if (ShadowTable.isAtomicFamily(lockTypeValue)) {
             return "atomic";
         }
         if (lockTypeValue == LockType.LOCK_TYPE_BARRIER_VALUE) {
             return "barrier";
         }
+        if (ShadowTable.isQueueType(lockTypeValue)) {
+            return "queue";
+        }
+        if (ShadowTable.isPhaserType(lockTypeValue)) {
+            return "phaser";
+        }
         return "lock";
     }
 
     /**
-     * 协议形态数值 → 原子形态词表（管理观察面：long/integer/boolean；
-     * 非原子数值回空串——proto3 缺省即"不适用"）。
+     * 协议形态数值 → 原子形态词表（管理观察面：long/integer/boolean/
+     * reference；非原子数值回空串——proto3 缺省即"不适用"）。
      *
      * @param lockTypeValue {@code LockType} 数值
      * @return 形态词或空串
@@ -600,6 +959,9 @@ public final class AdminRequestHandler {
         }
         if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_BOOLEAN_VALUE) {
             return "boolean";
+        }
+        if (lockTypeValue == LockType.LOCK_TYPE_ATOMIC_REFERENCE_VALUE) {
+            return "reference";
         }
         return "";
     }
@@ -618,8 +980,42 @@ public final class AdminRequestHandler {
             case ATOMIC_LONG -> "long";
             case ATOMIC_INTEGER -> "integer";
             case ATOMIC_BOOLEAN -> "boolean";
+            case ATOMIC_REFERENCE -> "reference";
             default -> "";
         };
+    }
+
+    /**
+     * 有值引用载荷的截断转义预览（v6，管理观察面）：至多 64 字节前缀，
+     * 可打印 ASCII（0x20–0x7e）原样、其余 {@code \xHH} 转义；预览长度恒定
+     * （不随 {@code maxValueBytes} 或实际载荷膨胀），超长以 {@code …} 结尾。
+     * {@code null}（null 态）回空串，零长度（空字节串）回 {@code ""}——
+     * 两态在预览上亦可区分。全量载荷 MUST NOT 出现在应答中。
+     *
+     * @param value 载荷字节（可 {@code null}）
+     * @return 预览字符串
+     */
+    private static String payloadPreview(byte[] value) {
+        if (value == null) {
+            return "";
+        }
+        if (value.length == 0) {
+            return "\"\"";
+        }
+        int limit = Math.min(value.length, 64);
+        StringBuilder sb = new StringBuilder(limit + 8);
+        for (int i = 0; i < limit; i++) {
+            int b = value[i] & 0xff;
+            if (b >= 0x20 && b <= 0x7e && b != '\\') {
+                sb.append((char) b);
+            } else {
+                sb.append(String.format("\\x%02x", b));
+            }
+        }
+        if (value.length > limit) {
+            sb.append('…');
+        }
+        return sb.toString();
     }
 
     /**

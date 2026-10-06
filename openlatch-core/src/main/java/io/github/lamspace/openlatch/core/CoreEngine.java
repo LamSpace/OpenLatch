@@ -18,32 +18,46 @@ package io.github.lamspace.openlatch.core;
 
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
+import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
+import io.github.lamspace.openlatch.core.command.ConditionOp;
+import io.github.lamspace.openlatch.core.command.ConditionOpCommand;
 import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
 import io.github.lamspace.openlatch.core.command.LatchAwaitCommand;
 import io.github.lamspace.openlatch.core.command.LatchCountDownCommand;
+import io.github.lamspace.openlatch.core.command.PhaserOpCommand;
+import io.github.lamspace.openlatch.core.command.QueueOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.lease.LeaseManager;
 import io.github.lamspace.openlatch.core.lock.AtomicEntry;
+import io.github.lamspace.openlatch.core.lock.AtomicRefEntry;
 import io.github.lamspace.openlatch.core.lock.BarrierEntry;
 import io.github.lamspace.openlatch.core.lock.KeyEntry;
 import io.github.lamspace.openlatch.core.lock.LatchEntry;
 import io.github.lamspace.openlatch.core.lock.LockEntry;
 import io.github.lamspace.openlatch.core.lock.LockTable;
+import io.github.lamspace.openlatch.core.lock.PhaserEntry;
+import io.github.lamspace.openlatch.core.lock.QueueEntry;
 import io.github.lamspace.openlatch.core.lock.SemaphoreEntry;
 import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.AtomicOpResult;
+import io.github.lamspace.openlatch.core.result.AwaitReleaseResult;
+import io.github.lamspace.openlatch.core.result.ConditionOpResult;
+import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
 import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
 import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
+import io.github.lamspace.openlatch.core.PhaserOpType;
+import io.github.lamspace.openlatch.core.result.PhaserOpResult;
+import io.github.lamspace.openlatch.core.result.QueueOpResult;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
 import io.github.lamspace.openlatch.core.result.RenewResult;
@@ -168,6 +182,39 @@ public final class CoreEngine {
                 lockTable.computeIfAbsent(en.key(), k -> ae);
                 continue;
             }
+            if (en.lockType() == LockType.ATOMIC_REFERENCE) {
+                // 有值引用条目：与标量形态同判例——无租约、无持有者、无常驻
+                // 回收；载荷两态（null/零长度）与去重槽直写快照原值，尺寸不
+                // 复核（钳制属接入层，恢复不重演判定）。
+                CoreStateRestore.AtomicRefState rs = en.atomicRef();
+                AtomicRefEntry re = AtomicRefEntry.restored(en.key(), rs.initial(),
+                        rs.value(), rs.version(), rs.slotSession(), rs.slotOpSeq(),
+                        rs.slotApplied(), rs.slotOldValue(), rs.slotValue(),
+                        rs.slotVersion());
+                lockTable.computeIfAbsent(en.key(), k -> re);
+                continue;
+            }
+            if (en.lockType() == LockType.QUEUE || en.lockType() == LockType.DELAY_QUEUE) {
+                // 队列条目：容量/元素（含到期时刻）/去重槽直写快照原值
+                // （恢复不重演入队出队判定）；双轨挂起为 Leader 本地态恒空，
+                // 尺寸不复核（钳制属接入层，判例引用/原子形态）。
+                CoreStateRestore.QueueState qs = en.queue();
+                QueueEntry qe = QueueEntry.restored(en.key(), en.lockType(), qs.capacity(),
+                        qs.elements(), qs.slots());
+                lockTable.computeIfAbsent(en.key(), k -> qe);
+                continue;
+            }
+            if (en.lockType() == LockType.PHASER) {
+                // 相位器条目：账簿直写（不经迁移规则——恢复不重演注册/
+                // 到场判定）；挂起等待集恒空（Leader 本地态，不入快照，
+                // 客户端重挂补登记——纯谓词等待重挂无损耗）。
+                CoreStateRestore.PhaserState ps = en.phaser();
+                PhaserEntry pe = PhaserEntry.restored(en.key(), ps.phase(), ps.registered(),
+                        ps.arrived(), ps.parties(), ps.arrivals(),
+                        ps.prevPhase(), ps.prevArrivals());
+                lockTable.computeIfAbsent(en.key(), k -> pe);
+                continue;
+            }
             if (en.lockType() == LockType.BARRIER) {
                 // 循环屏障条目：世代复制态直写（不经迁移规则——恢复不重演
                 // 到场判定）；在队等待队列恒空（Leader 本地态，不入快照）。
@@ -268,19 +315,21 @@ public final class CoreEngine {
      * <p>这是断连清理的唯一入口，与 {@link #acquire} 中的会话校验原子互斥：
      * 要么获取请求先登记成功、关闭时一并清理，要么关闭先生效、获取被拒。
      *
-     * <p><b>返回值</b>：本次关闭因"离场即破障"而打破世代的 BARRIER 条目
-     * key 集合（当前世代含该会话到场记录者）——单机路径无需消费（破障
-     * 广播已随 {@code notify} 收集经监听器发出），集群路径由应用点写入
-     * 回执供 Leader 对存活等待者广播。
+     * <p><b>返回值</b>：本次关闭的家族级终态报告 {@link SessionCleanup}——
+     * 因"离场即破障"打破世代的 BARRIER 条目 key 集合（当前世代含该会话
+     * 到场记录者）与因"隐式配额摘除缩小应到集合"推进相位的 PHASER 条目
+     * key 集合。单机路径无需消费（破障/合拢广播已随 {@code notify} 收集
+     * 经监听器发出），集群路径由应用点写入回执供 Leader 对存活等待者广播。
      *
      * @param sessionId 要关闭的会话
-     * @return 被本次关闭打破世代的循环屏障 key 列表（无则空表）
+     * @return 家族终态报告（打破世代的屏障 key 集 + 推进相位的相位器 key 集）
      */
-    public List<String> sessionClosed(long sessionId) {
+    public SessionCleanup sessionClosed(long sessionId) {
         List<String> brokenBarriers = List.of();
+        List<String> advancedPhasers = List.of();
         Set<String> keys = sessions.remove(sessionId);
         if (keys == null) {
-            return brokenBarriers;
+            return new SessionCleanup(brokenBarriers, advancedPhasers);
         }
         long now = clock.nowMs();
         for (String key : keys) {
@@ -290,10 +339,13 @@ public final class CoreEngine {
             }
             List<Waiter> notify = new ArrayList<>();
             boolean broke;
+            boolean phaserTripped;
             synchronized (e) {
                 long genBefore = e instanceof BarrierEntry be ? be.generation() : -1L;
+                long phaseBefore = e instanceof PhaserEntry pe ? pe.phase() : -1L;
                 e.removeSession(sessionId, now, config.headReplyTimeoutMs(), notify);
                 broke = e instanceof BarrierEntry be && be.generation() != genBefore;
+                phaserTripped = e instanceof PhaserEntry pe && pe.phase() != phaseBefore;
                 if (e.isEmpty()) {
                     lockTable.remove(key, e);
                 }
@@ -304,9 +356,27 @@ public final class CoreEngine {
                 }
                 brokenBarriers.add(key);
             }
+            if (phaserTripped) {
+                if (advancedPhasers.isEmpty()) {
+                    advancedPhasers = new ArrayList<>();
+                }
+                advancedPhasers.add(key);
+            }
             fireNotify(notify, key);
         }
-        return brokenBarriers;
+        return new SessionCleanup(brokenBarriers, advancedPhasers);
+    }
+
+    /**
+     * {@link #sessionClosed(long)} 的家族终态报告：会话关闭引发的
+     * "离场即破障"（BARRIER）与"隐式摘除推进"（PHASER）两类跨副本
+     * 需向 Leader 侧等待簿记广播的 key 集合。单机路径仅集群消费，
+     * 单机监听器经 {@code notify} 收集已自行送达。
+     *
+     * @param brokenBarriers 被打破世代的循环屏障 key 列表（无则空表）
+     * @param advancedPhasers 被推进相位的相位器 key 列表（无则空表）
+     */
+    public record SessionCleanup(List<String> brokenBarriers, List<String> advancedPhasers) {
     }
 
     /**
@@ -360,7 +430,17 @@ public final class CoreEngine {
         // LATCH/BARRIER/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
         // 属请求形状错误，协议层门控之后由本守卫兜底。
         if (cmd.lockType() == LockType.LATCH || cmd.lockType() == LockType.BARRIER
-                || familyOf(cmd.lockType()) == KeyFamily.ATOMIC) {
+                || familyOf(cmd.lockType()) == KeyFamily.ATOMIC
+                || familyOf(cmd.lockType()) == KeyFamily.QUEUE
+                || familyOf(cmd.lockType()) == KeyFamily.PHASER) {
+            return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
+        }
+        // v9：await 折叠形状守卫（接入层唯一裁决后的 core 防御兜底）——condition
+        // 仅承载于 REENTRANT/SIMPLE/FAIR 三互斥形态；READ/WRITE 或非 LOCK 家族
+        // 携带 condition 属类型不匹配，条目状态与会话触及集零扰动。
+        if (cmd.condition() != null && (cmd.lockType() == LockType.READ
+                || cmd.lockType() == LockType.WRITE
+                || familyOf(cmd.lockType()) != KeyFamily.LOCK)) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         KeyFamily family = familyOf(cmd.lockType());
@@ -374,6 +454,8 @@ public final class CoreEngine {
 
         while (true) {
             KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant, cmd));
+            AcquireResult result;
+            List<Waiter> notifyToFire = null;
             synchronized (e) {
                 if (lockTable.get(key) != e) {
                     continue; // 条目在等待期间被移除，重试
@@ -389,10 +471,15 @@ public final class CoreEngine {
                     }
                     return new AcquireResult(Outcome.REJECT_SESSION, 0, 0, 0);
                 }
-                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集）。
-                AcquireResult result = switch (e) {
-                    case LockEntry le -> le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
-                            effectiveLeaseMs, config);
+                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集；v9 折叠
+                // 形态走 awaitFold——释放+登记同关键区，队首通知经 notify 收集）。
+                List<Waiter> foldNotify = cmd.condition() == null ? null : new ArrayList<>();
+                result = switch (e) {
+                    case LockEntry le -> cmd.condition() != null
+                            ? le.awaitFold(cmd, now, leaseTokenCounter::getAndIncrement,
+                                    effectiveLeaseMs, config, foldNotify)
+                            : le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
+                                    effectiveLeaseMs, config);
                     case SemaphoreEntry se -> se.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
                             effectiveLeaseMs, config);
                     // 家族判定已保证同族，此处为家族尚无实现条目时的收口分支。
@@ -404,8 +491,12 @@ public final class CoreEngine {
                 if (e.isEmpty()) {
                     lockTable.remove(key, e);
                 }
-                return result;
+                notifyToFire = foldNotify;
             }
+            if (notifyToFire != null && !notifyToFire.isEmpty()) {
+                fireNotify(notifyToFire, key);
+            }
+            return result;
         }
     }
 
@@ -422,8 +513,10 @@ public final class CoreEngine {
             case REENTRANT, SIMPLE, READ, WRITE, FAIR -> KeyFamily.LOCK;
             case SEMAPHORE -> KeyFamily.SEMAPHORE;
             case LATCH -> KeyFamily.LATCH;
-            case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN -> KeyFamily.ATOMIC;
+            case ATOMIC_LONG, ATOMIC_INTEGER, ATOMIC_BOOLEAN, ATOMIC_REFERENCE -> KeyFamily.ATOMIC;
             case BARRIER -> KeyFamily.BARRIER;
+            case QUEUE, DELAY_QUEUE -> KeyFamily.QUEUE;
+            case PHASER -> KeyFamily.PHASER;
         };
     }
 
@@ -456,6 +549,14 @@ public final class CoreEngine {
             // ACQUIRE 携带屏障定型在入口即拒（见 acquire 守卫）。
             case BARRIER -> throw new IllegalStateException(
                     "barrier entries are created only via barrier channels");
+            // 队列条目只能经队列命令通道（queueOp）创建（形态/容量由首次
+            // 写入定型），ACQUIRE 携队列定型在入口即拒（见 acquire 守卫）。
+            case QUEUE -> throw new IllegalStateException(
+                    "queue entries are created only via queue channels");
+            // 相位器条目只能经相位器命令通道（phaserOp 的 REGISTER 建条目
+            // 路径）创建，ACQUIRE 携 phaser 定型在入口即拒（见 acquire 守卫）。
+            case PHASER -> throw new IllegalStateException(
+                    "phaser entries are created only via phaser channels");
         };
     }
 
@@ -684,6 +785,10 @@ public final class CoreEngine {
         if (familyOf(cmd.kind()) != KeyFamily.ATOMIC) {
             throw new IllegalArgumentException("not an atomic kind: " + cmd.kind());
         }
+        if (cmd.kind() == LockType.ATOMIC_REFERENCE) {
+            throw new IllegalArgumentException(
+                    "reference kind requires atomicRefOp channel");
+        }
         if (!sessions.contains(cmd.sessionId())) {
             return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
         }
@@ -709,11 +814,156 @@ public final class CoreEngine {
                 if (e.family() != KeyFamily.ATOMIC) {
                     return AtomicOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
                 }
+                if (!(e instanceof AtomicEntry)) {
+                    // 同 key 已定型为有值引用形态——标量↔引用跨形态互拒（家族同位、
+                    // 条目类型不同，判例同族跨标量形态互拒）。
+                    return AtomicOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
                 if (!sessions.contains(cmd.sessionId())) {
                     return AtomicOpResult.rejected(Outcome.REJECT_SESSION);
                 }
                 return ((AtomicEntry) e).op(cmd);
             }
+        }
+    }
+
+    /**
+     * 有值引用原子操作：ATOMIC 家族引用形态的唯一命令入口（与
+     * {@link #atomicOp} 标量通道平行——无等待、无租约、即时裁决，判定
+     * 顺序与校验口径逐项同构，值域换不透明字节）。
+     *
+     * <p><b>校验顺序</b>（首个不满足者即为结果）：会话预检 → key 形状
+     * 校验 → 条目定位：{@code GET} 对不存在的 key 直接回 {@code (null, 0)}
+     * 且 MUST NOT 建条目；写命令对不存在的 key 以主张载荷懒建引用条目
+     * （竞态良性：他者抢先建条目后按"既有条目断言/形态判定"规则处理）
+     * → 条目锁内家族与形态判定（他家族或已定型标量形态 →
+     * {@link Outcome#REJECT_TYPE_MISMATCH}）、会话权威复校 →
+     * {@link AtomicRefEntry#op} 规则集（ADD 值域外拒绝、初值 presence 断言、
+     * GET 短路、去重重放、操作执行）。
+     *
+     * <p><b>载荷尺寸</b>：本门面与条目 MUST NOT 复核载荷字节数——
+     * 钳制属接入层（超限命令永不入引擎/日志），见
+     * {@link AtomicRefEntry} 类注释。
+     *
+     * @param cmd 引用形态命令（会话须已登记；载荷数组传入后不得再修改）
+     * @return 操作结果：{@link Outcome#GRANTED} 携带载荷应答四元组，
+     *         或会话/key/家族/值域/初值类拒绝
+     */
+    public AtomicRefOpResult atomicRefOp(AtomicRefOpCommand cmd) {
+        if (!sessions.contains(cmd.sessionId())) {
+            return AtomicRefOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return AtomicRefOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.op() == AtomicOp.GET) {
+                    // 读数零迁移：不存在的 key 即 (null, 0)，不建条目。
+                    return new AtomicRefOpResult(Outcome.GRANTED, false, null, null, 0);
+                }
+                e = lockTable.computeIfAbsent(key,
+                        k -> new AtomicRefEntry(k, LockType.ATOMIC_REFERENCE, cmd.initial()));
+            }
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (e.family() != KeyFamily.ATOMIC) {
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!(e instanceof AtomicRefEntry)) {
+                    // 同 key 已定型标量形态——跨形态互拒，零扰动。
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.contains(cmd.sessionId())) {
+                    return AtomicRefOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                return ((AtomicRefEntry) e).op(cmd);
+            }
+        }
+    }
+
+    /**
+     * 队列操作：QUEUE 家族唯一命令入口。判定顺序——会话存在 → key 合法 →
+     * 条目定位（缺条目时分派表决定零迁移读数或定型创建）→ 家族互拒 →
+     * 权威会话校验与触及登记 → 条目内判定。缺条目分派表：PEEK/SIZE/DRAIN
+     * 为零迁移读数（分别回 null/0/空列表，不建条目——判例 ATOMIC GET）；
+     * 非阻塞 TAKE 回 DENIED（poll 空语义，不建条目）；PUT 与阻塞 TAKE 须携
+     * 非零容量主张——主张 ≤0 回 {@link Outcome#REJECT_QUEUE_CAPACITY}
+     * （协调面无无界队列），非零即以该容量与形态定型创建条目（判例
+     * Semaphore 总量主张建条目预检）并紧接执行本操作。触及集登记为
+     * 等待/去重槽的清理路径供给（会话关闭经 removeSession 摘除双轨挂起与
+     * 该会话槽），不构成元素归属表达——元素绑定 key 而非会话。唤醒收集经
+     * {@code fireNotify} 在条目锁外触发（与锁/Latch/Barrier 同机制）；
+     * 队列条目常驻不回收（isEmpty 恒 false，无移除分支）。
+     *
+     * @param cmd 队列命令（形状合法性与尺寸钳制已由接入层受理，条目与
+     *            引擎 MUST NOT 复核载荷尺寸/容量上限/批量预算）
+     * @return 操作结果（择用规则见 {@link QueueOpResult}）
+     * @throws IllegalArgumentException {@code cmd.kind()} 非队列形态
+     * @throws NullPointerException     {@code cmd} 为 null
+     */
+    public QueueOpResult queueOp(QueueOpCommand cmd) {
+        if (familyOf(cmd.kind()) != KeyFamily.QUEUE) {
+            throw new IllegalArgumentException("not a queue kind: " + cmd.kind());
+        }
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return QueueOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return QueueOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                switch (cmd.op()) {
+                    case PEEK -> {
+                        return QueueOpResult.grantedPeek(null, 0);
+                    }
+                    case SIZE -> {
+                        return QueueOpResult.grantedSize(0, 0);
+                    }
+                    case DRAIN -> {
+                        return QueueOpResult.grantedDrain(List.of(), 0);
+                    }
+                    case TAKE -> {
+                        if (!cmd.blocking()) {
+                            return QueueOpResult.rejected(Outcome.DENIED);
+                        }
+                    }
+                    default -> {
+                        // PUT 与阻塞 TAKE 落入下方定型创建。
+                    }
+                }
+                if (cmd.capacity() <= 0) {
+                    return QueueOpResult.rejected(Outcome.REJECT_QUEUE_CAPACITY);
+                }
+                e = lockTable.computeIfAbsent(key,
+                        k -> QueueEntry.created(k, cmd.kind(), cmd.capacity()));
+            }
+            List<Waiter> notify = new ArrayList<>();
+            QueueOpResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (e.family() != KeyFamily.QUEUE || !(e instanceof QueueEntry qe)) {
+                    return QueueOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    return QueueOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                result = qe.op(cmd, now, config, config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, key);
+            return result;
         }
     }
 
@@ -887,6 +1137,185 @@ public final class CoreEngine {
     }
 
     /**
+     * 队列条目的复制态导出（v7，判例 {@link #barrierReplicatedState}）：
+     * 形态/容量/元素列表（队列序）/每会话去重槽表（会话升序）的自包含
+     * 快照，供影子表镜像与快照序列化消费。条目锁内拷贝，弱一致于条目间、
+     * 自洽于条目内。
+     *
+     * @param key 队列键
+     * @return 复制态快照；非队列条目或不存在为 {@code null}
+     */
+    public QueueEntry.ReplicatedState queueReplicatedState(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return e instanceof QueueEntry qe ? qe.replicatedState() : null;
+        }
+    }
+
+    /**
+     * 相位器操作（受理通道）：校验顺序为会话 → key → 条目定位（REGISTER
+     * 无条目即创建，判例 v7 {@code queueOp} 分派表——非 REGISTER 命中不
+     * 存在条目回 {@link Outcome#REJECT_PHASER_NO_ENTRY}，MUST NOT 隐式
+     * 建条目）→ 家族判定 → 会话触及 → 条目规则。配额上限
+     * （{@code max-parties-per-phaser}）的判定在<b>本通道</b>完成（受理点
+     * 唯一裁决，判例"钳制属接入层"——单机形态即本门面、集群形态即 Leader
+     * 受理预检）；条目应用侧（{@link #phaserApply}）不消费该上限。
+     * 等待集登记、唤醒收集与深度护栏（{@code maxQueueDepthPerKey} 合并
+     * 口径）在条目锁内完成，唤醒经事件出口在条目锁外触发。
+     *
+     * @param cmd 相位器命令（形状与尺寸已由接入层受理）
+     * @return 操作结果（三计数为裁决时刻账簿快照）
+     */
+    public PhaserOpResult phaserOp(PhaserOpCommand cmd) {
+        return phaserOp(cmd, true);
+    }
+
+    /**
+     * 相位器操作（复制应用通道）：集群状态机应用点专用——除 MUST NOT
+     * 执行配额上限判定外与 {@link #phaserOp} 逐项同判（已提交条目在任何
+     * 节点配置下照常回放，账簿跨副本确定，判例 v7 队列"容量不复核"纪律）。
+     * {@code ARRIVE_AND_AWAIT} 的等待半程在本通道 MUST NOT 登记条目内
+     * （"集群引擎恒不登记等待项"不变式，判例 acquire 的排队裁决落点与
+     * v9 条件双拓扑）：回执 QUEUED 后由 Leader 侧网关在应用副作用中登记
+     * {@code PhaserRegistry}（等待簿记与推送投递归服务端，账簿归条目）。
+     *
+     * @param cmd 相位器命令
+     * @return 操作结果
+     */
+    public PhaserOpResult phaserApply(PhaserOpCommand cmd) {
+        return phaserOp(cmd, false);
+    }
+
+    /**
+     * 相位器通道实现（受理/应用两路共用，{@code enforceCap} 判别是否
+     * 执行配额上限——唯一分岔点，其余规则严格同源）。
+     *
+     * @param cmd        命令
+     * @param enforceCap 是否受理配额上限判定
+     * @return 操作结果
+     */
+    private PhaserOpResult phaserOp(PhaserOpCommand cmd, boolean enforceCap) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return PhaserOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return PhaserOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.op() != PhaserOpType.REGISTER) {
+                    return PhaserOpResult.rejected(Outcome.REJECT_PHASER_NO_ENTRY);
+                }
+                if (enforceCap && cmd.parties() > config.maxPartiesPerPhaser()) {
+                    return PhaserOpResult.rejected(Outcome.REJECT_PHASER_PARTIES);
+                }
+                e = lockTable.computeIfAbsent(key, PhaserEntry::new);
+            }
+            List<Waiter> notify = new ArrayList<>();
+            PhaserOpResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (!(e instanceof PhaserEntry pe)) {
+                    return PhaserOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    return PhaserOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                if (enforceCap && cmd.op() == PhaserOpType.REGISTER
+                        && (long) pe.registered() + cmd.parties() > config.maxPartiesPerPhaser()) {
+                    return PhaserOpResult.rejected(Outcome.REJECT_PHASER_PARTIES);
+                }
+                result = pe.phaserOp(cmd, now, config, notify, !enforceCap);
+            }
+            fireNotify(notify, key);
+            return result;
+        }
+    }
+
+    /**
+     * 相位器条目复制态导出（影子表镜像与跨副本摘要的权威读口，判例
+     * {@link #barrierReplicatedState}）。条目锁内一次拷贝；不存在或非
+     * PHASER 家族返回 {@code null}。只读，MUST NOT 改变任何状态。
+     *
+     * @param key 相位器键
+     * @return 复制态快照；非 PHASER 条目或不存在为 {@code null}
+     */
+    public PhaserEntry.ReplicatedState phaserReplicatedState(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return e instanceof PhaserEntry pe ? pe.replicatedState() : null;
+        }
+    }
+
+    /**
+     * 单 key 相位器挂起等待明细（Leader 本地视图；无条目或非 PHASER
+     * 家族为空列表，弱一致读数、零扰动）。
+     *
+     * @param key 相位器键
+     * @return 等待项视图列表（登记到达序）
+     */
+    public List<PhaserEntry.WaiterView> phaserWaiters(String key) {
+        KeyEntry e = key == null ? null : lockTable.get(key);
+        return e instanceof PhaserEntry pe ? pe.waitersSnapshot() : List.of();
+    }
+
+    /**
+     * 单 key 相位器注册配额明细（复制态账簿视图；无条目或非 PHASER
+     * 家族为空列表，弱一致读数、零扰动）。
+     *
+     * @param key 相位器键
+     * @return 配额行列表（账簿插入序=注册先后）
+     */
+    public List<PhaserEntry.PartyView> phaserParties(String key) {
+        KeyEntry e = key == null ? null : lockTable.get(key);
+        return e instanceof PhaserEntry pe ? pe.partiesSnapshot() : List.of();
+    }
+
+    /**
+     * 抓取时刻单键注册 party 峰值（{@code phaser.parties.registered.max}
+     * gauge 单机口径；集群形态读 Leader 本地镜像，同"单键峰值、抓取时刻
+     * 采样"语义）。弱一致遍历、纯读零扰动；MUST NOT 用于任何裁决路径。
+     *
+     * @return 各 phaser key 注册总数的最大值；无条目为 0
+     */
+    public int maxPhaserRegistered() {
+        int max = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (e instanceof PhaserEntry pe) {
+                int n = pe.registered();
+                if (n > max) {
+                    max = n;
+                }
+            }
+        }
+        return max;
+    }
+
+    /**
      * key 形状校验的共享出口：空与超长分别回
      * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
      * 合法返回 {@code null}。
@@ -966,9 +1395,16 @@ public final class CoreEngine {
         int maxQueueDepth = 0;
         for (KeyEntry e : lockTable.values()) {
             int waiters;
+            int conditionWaiters = 0;
             boolean held;
             synchronized (e) {
                 waiters = e.waiterCount();
+                // v9 口径：条件等待者是等待者——计入等待总数合计；
+                // maxQueueDepth 保持"等待队列深度"纯口径不抬升（四口径互引，
+                // metrics-observability 能力条款）。
+                if (e instanceof LockEntry le) {
+                    conditionWaiters = le.conditionWaiterCount();
+                }
                 held = e.leaseToken() != 0;
             }
             if (held) {
@@ -976,16 +1412,82 @@ public final class CoreEngine {
                     case LOCK -> heldLocks++;
                     case SEMAPHORE -> heldSemaphores++;
                     default -> {
-                        // LATCH/ATOMIC/BARRIER 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
+                        // LATCH/ATOMIC/BARRIER/QUEUE 无 held 语义（leaseToken 恒 0，此分支不可达，防御占位）
                     }
                 }
             }
-            totalWaiters += waiters;
+            totalWaiters += waiters + conditionWaiters;
             if (waiters > maxQueueDepth) {
                 maxQueueDepth = waiters;
             }
         }
         return new CoreStats(heldLocks, heldSemaphores, totalWaiters, maxQueueDepth, sessions.size());
+    }
+
+    /**
+     * 抓取时刻单键条件等待峰值（单机形态 {@code condition.waiters.max} gauge
+     * 口径；集群形态读 Leader 本地登记表 {@code ConditionRegistry.maxCountCurrent()}，
+     * 两形态同"单键峰值、抓取时刻采样"语义）。弱一致遍历、纯读零扰动。
+     *
+     * @return 各锁 key 条件等待数的最大值；无登记为 0
+     */
+    public int maxConditionWaiters() {
+        int max = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (e instanceof LockEntry le) {
+                int n = le.conditionWaiterCount();
+                if (n > max) {
+                    max = n;
+                }
+            }
+        }
+        return max;
+    }
+
+    /**
+     * 队列元素深度观察读数（v7，{@code elements.depth.max} gauge 单机口径）：
+     * 全部队列 key 的当前元素数最大值（驻留口径，延时形态含未到期项）。
+     * 弱一致遍历（逐条目锁内读深度、条目间无全局原子性），MUST NOT 用于
+     * 任何裁决路径。
+     *
+     * @return 单键最大元素深度；无队列返回 0
+     */
+    public int maxElementsDepth() {
+        int max = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (e instanceof QueueEntry qe) {
+                int d = qe.depth();
+                if (d > max) {
+                    max = d;
+                }
+            }
+        }
+        return max;
+    }
+
+    /**
+     * 队列就绪唤醒（v7，单机形态延时扫描的引擎入口）：逐队列条目在条目
+     * 锁内尝试唤醒 take 轨队首（DELAY 形态要求队首到期不晚于引擎时钟、
+     * QUEUE 形态要求存在可消费元素——谓词收口在条目内），收集的通知经
+     * 事件出口在条目锁外触发。由服务端调度线程周期调用（集群形态由
+     * Leader 侧就绪驱动经影子表判定，不经本方法）。
+     *
+     * @return 本轮唤醒的等待项数
+     */
+    public int wakeQueueReady() {
+        long now = clock.nowMs();
+        int count = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (!(e instanceof QueueEntry qe)) {
+                continue;
+            }
+            List<Waiter> notify = new ArrayList<>();
+            synchronized (qe) {
+                count += qe.wakeReadyHeads(now, config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, e.key());
+        }
+        return count;
     }
 
     /**
@@ -1016,9 +1518,12 @@ public final class CoreEngine {
                     case SemaphoreEntry se -> snapshots.add(se.snapshot(now));
                     case LatchEntry la -> snapshots.add(la.snapshot(now));
                     case AtomicEntry ae -> snapshots.add(ae.snapshot(now));
+                    case AtomicRefEntry re -> snapshots.add(re.snapshot(now));
                     case BarrierEntry be -> snapshots.add(be.snapshot(now));
+                    case QueueEntry qe -> snapshots.add(qe.snapshot(now));
+                    case PhaserEntry pe -> snapshots.add(pe.snapshot(now));
                     default -> {
-                        // 未知实现不入快照（理论不可达：五家族已穷尽）。
+                        // 未知实现不入快照（理论不可达：条目类已穷尽）。
                     }
                 }
             }
@@ -1053,7 +1558,10 @@ public final class CoreEngine {
                 case SemaphoreEntry se -> se.snapshot(now);
                 case LatchEntry la -> la.snapshot(now);
                 case AtomicEntry ae -> ae.snapshot(now);
+                case AtomicRefEntry re -> re.snapshot(now);
                 case BarrierEntry be -> be.snapshot(now);
+                case QueueEntry qe -> qe.snapshot(now);
+                case PhaserEntry pe -> pe.snapshot(now);
                 default -> null;
             };
         }
@@ -1104,6 +1612,148 @@ public final class CoreEngine {
      * 在条目锁之外统一触发收集到的队首通知事件。通知列表由条目内操作
      * （释放、到期、清扫等）在持锁期间填充，本方法负责出锁后逐个回调，
      * 避免回调实现中的任何行为反向影响条目锁的持有。
+     *
+     * 条件 signal 家族操作：condition 家族命令唯一门面（v9）。零复制日志——
+     * 三操作是纯 Leader 本地裁决的搬运/摘除（判例双源："等待不入日志"与 topic
+     * 零日志豁免，类目化为"signal 是事件不是状态"），MUST NOT 进入状态机提交
+     * 路径与提交通道（边界条款由 replicated-state-machine 能力承载；await 的
+     * 释放半程另经折叠 ACQUIRE 条目走既有提交通道，见 {@link #acquire}）。
+     * 判定顺序——会话存在 → key 合法 → 条件名合法（接入层唯一裁决，此处防御
+     * 兜底）→ 条目定位（无条目：LEAVE→OK 幂等无操作；SIGNAL/SIGNAL_ALL→
+     * NOT_HELD）→ 家族判定（非 LOCK→REJECT_TYPE_MISMATCH，LEAVE 同口径统一
+     * 家族门）→ 条目锁内分派 op → 通知列表在条目锁外统一触发。
+     *
+     * @param cmd signal 家族命令（形状已经接入层裁决）
+     * @return 即时回执（OK / NOT_HELD / REJECT_*），恒无挂起形态
+     */
+    public ConditionOpResult conditionOp(ConditionOpCommand cmd) {
+        long now = clock.nowMs();
+        ConditionOpResult.ConditionOpEcho echo = switch (cmd.op()) {
+            case SIGNAL -> ConditionOpResult.ConditionOpEcho.SIGNAL;
+            case SIGNAL_ALL -> ConditionOpResult.ConditionOpEcho.SIGNAL_ALL;
+            case LEAVE -> ConditionOpResult.ConditionOpEcho.LEAVE;
+        };
+        if (!sessions.contains(cmd.sessionId())) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_SESSION, echo);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return ConditionOpResult.rejected(keyBad == Outcome.REJECT_KEY_TOO_LONG
+                    ? ConditionOpResult.Status.REJECT_KEY_TOO_LONG
+                    : ConditionOpResult.Status.REJECT_KEY_EMPTY, echo);
+        }
+        if (cmd.condition() == null || cmd.condition().isEmpty()) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_KEY_EMPTY, echo);
+        }
+        if (cmd.condition().getBytes(StandardCharsets.UTF_8).length > config.maxKeyLength()) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_KEY_TOO_LONG, echo);
+        }
+        KeyEntry e = lockTable.get(cmd.key());
+        if (e == null) {
+            // 无条目即无登记：LEAVE 幂等无操作；signal 家族权限前提（持有归属）不存在。
+            return cmd.op() == ConditionOp.LEAVE
+                    ? ConditionOpResult.ok(echo)
+                    : ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+        }
+        List<Waiter> notify = new ArrayList<>();
+        ConditionOpResult result;
+        synchronized (e) {
+            if (lockTable.get(cmd.key()) != e) {
+                // 条目竞态移除：与"无条目"同口径收束。
+                result = cmd.op() == ConditionOp.LEAVE
+                        ? ConditionOpResult.ok(echo)
+                        : ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+            } else if (e.family() != KeyFamily.LOCK) {
+                result = ConditionOpResult.rejected(
+                        ConditionOpResult.Status.REJECT_TYPE_MISMATCH, echo);
+            } else {
+                LockEntry le = (LockEntry) e;
+                result = switch (cmd.op()) {
+                    case SIGNAL -> le.signal(cmd, now, config, notify);
+                    case SIGNAL_ALL -> le.signalAll(cmd, now, config, notify);
+                    case LEAVE -> le.leave(cmd);
+                };
+            }
+        }
+        if (!notify.isEmpty()) {
+            fireNotify(notify, cmd.key());
+        }
+        return result;
+    }
+
+    /**
+     * await 折叠的释放半程应用（集群形态 LOCK_ACQUIRE_ENTRY 携带 condition 的
+     * 应用点入口，v9）：跨副本确定地执行 {@link LockEntry#awaitFoldRelease}
+     * （持有归属一步清零并清租约+队首通知评估；无条目/非持有零操作幂等），
+     * 叠加会话/key/家族守卫。登记半程 MUST NOT 在此发生——它由 Leader 受理
+     * 预检点的本地结构承载（"登记先于释放可见"不变式，lock-server 能力条款），
+     * 应用面无本地副作用可分岔（digest 守卫由 replicated-state-machine 能力钉定）。
+     *
+     * @param cmd 折叠获取命令（{@code condition} 非空；形状已由接入层裁决）
+     * @return 守卫结果与是否发生释放；拒绝形态含会话失效/家族不匹配
+     */
+    public AwaitReleaseResult awaitFoldRelease(AcquireCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return new AwaitReleaseResult(Outcome.REJECT_SESSION, false);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return new AwaitReleaseResult(keyBad, false);
+        }
+        if (cmd.lockType() == LockType.READ || cmd.lockType() == LockType.WRITE
+                || familyOf(cmd.lockType()) != KeyFamily.LOCK) {
+            return new AwaitReleaseResult(Outcome.REJECT_TYPE_MISMATCH, false);
+        }
+        KeyEntry e = lockTable.get(cmd.key());
+        if (e == null) {
+            return new AwaitReleaseResult(Outcome.GRANTED, false);
+        }
+        List<Waiter> notify = new ArrayList<>();
+        boolean released;
+        synchronized (e) {
+            if (lockTable.get(cmd.key()) != e) {
+                return new AwaitReleaseResult(Outcome.GRANTED, false);
+            }
+            if (e.family() != KeyFamily.LOCK) {
+                return new AwaitReleaseResult(Outcome.REJECT_TYPE_MISMATCH, false);
+            }
+            released = ((LockEntry) e).awaitFoldRelease(cmd.sessionId(), cmd.threadId(),
+                    now, config, notify);
+        }
+        if (!notify.isEmpty()) {
+            fireNotify(notify, cmd.key());
+        }
+        return new AwaitReleaseResult(Outcome.GRANTED, released);
+    }
+
+    /**
+     * 单 key 条件等待者计数观察（管理/指标口径；无条目或非 LOCK 家族为 0，
+     * 弱一致读数）。与等待队列口径（{@link #stats}/{@code waiterCount}）互斥
+     * 不重复——已搬运项属队列口径。
+     *
+     * @param key 锁键
+     * @return 当前条件等待者数
+     */
+    public int conditionWaiterCount(String key) {
+        KeyEntry e = lockTable.get(key);
+        return e instanceof LockEntry le ? le.conditionWaiterCount() : 0;
+    }
+
+    /**
+     * 单 key 条件等待明细只读快照（各集按建立序、集内按到达序；无条目或非
+     * LOCK 家族为空列表，弱一致读数、零扰动）。
+     *
+     * @param key 锁键
+     * @return 条件等待者明细视图列表
+     */
+    public List<LockEntry.ConditionWaiterView> conditionWaiters(String key) {
+        KeyEntry e = lockTable.get(key);
+        return e instanceof LockEntry le ? le.conditionWaiterViews() : List.of();
+    }
+
+    /**
+     * 队首通知统一触发：在条目锁外逐项投递监听器。
      *
      * @param notify 待通知的队首等待者列表
      * @param key    锁键，随事件一并报告

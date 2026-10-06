@@ -21,9 +21,11 @@ import io.github.lamspace.openlatch.core.CoreInspection;
 import io.github.lamspace.openlatch.core.KeyFamily;
 import io.github.lamspace.openlatch.core.LockType;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
+import io.github.lamspace.openlatch.core.command.ConditionOpCommand;
 import io.github.lamspace.openlatch.core.command.ReleaseCommand;
 import io.github.lamspace.openlatch.core.command.RenewCommand;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
+import io.github.lamspace.openlatch.core.result.ConditionOpResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.result.ReleaseResult;
 import io.github.lamspace.openlatch.core.result.ReleaseStatus;
@@ -32,6 +34,8 @@ import io.github.lamspace.openlatch.core.result.RenewResult;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.LongSupplier;
@@ -47,7 +51,15 @@ import java.util.function.LongSupplier;
  *       到期时刻 {@code leaseExpiresAtMs}。整 key 共享单一租约——读锁的多个
  *       读者也共用一个凭证，加入已有读者时复用凭证，避免新 token 使
  *       旧读者的释放失效；</li>
- *   <li>等待队列：{@code waiters}，FIFO；队首可能处于"已通知、待重发"状态。</li>
+ *   <li>等待队列：{@code waiters}，FIFO；队首可能处于"已通知、待重发"状态；</li>
+ *   <li>条件等待集（v9）：{@code conditionSets}——条件名 → 到达序等待队列。
+ *       与 {@code waiters} 同为 <b>Leader 本地易失态</b>（不入日志、不入快照，
+ *       判例 awaiters 家族生命周期）：await 的复制面效果仅为其释放半程（经折叠
+ *       条目表达为持有清零），集合登记为应用点的 Leader-only 副作用，换主清零后
+ *       由客户端 ACQUIRE 车道重挂补登记。SIGNAL/SIGNAL_ALL 把集合项搬运入
+ *       {@code waiters}（"signal 是事件"，零日志），LEAVE/会话死亡/授予侧收口
+ *       三路摘除。权限分轨：SIGNAL 服务端权威（写侧持有归属），await 登记
+ *       服务端宽容（重挂必需）——ghost 登记受合并深度护栏与三路回收钳制。</li>
  * </ul>
  *
  * <p><b>并发模型</b>：条目内所有状态迁移都在
@@ -90,6 +102,48 @@ public final class LockEntry implements KeyEntry {
 
     /** FIFO 等待队列。 */
     private final ArrayDeque<Waiter> waiters = new ArrayDeque<>();
+
+    /**
+     * v9 条件等待集：条件名 → 到达序队列（LinkedHashMap 保持建立序供管理面
+     * 确定性导出；空集随名摘除）。Leader 本地易失态，不入日志不入快照。
+     */
+    private final LinkedHashMap<String, ArrayDeque<ConditionWaiter>> conditionSets =
+            new LinkedHashMap<>();
+
+    /**
+     * 条件集等待项（v9）。身份为 (会话, 请求)，与 {@link Waiter} 的等待队列
+     * 身份同构——SIGNAL 搬运即以此原样转入 {@code waiters}。
+     *
+     * @param sessionId       等待会话
+     * @param threadId        归属线程（折叠 ACQUIRE 的 thread_id）
+     * @param requestId       折叠 ACQUIRE 的请求 id（唤醒通知的 ref 关联键）
+     * @param lockType        折叠请求的锁类型（搬运后进入队首兼容性判定）
+     * @param registeredAtMs  登记时刻（应用点条目时刻，观察值、不参与判定）
+     */
+    private record ConditionWaiter(
+            long sessionId,
+            long threadId,
+            long requestId,
+            LockType lockType,
+            long registeredAtMs) {
+    }
+
+    /**
+     * 条件等待明细只读视图（管理/指标观察的数据载体）。
+     *
+     * @param condition        条件名（命名寻址）
+     * @param sessionId        等待会话（逻辑会话 id）
+     * @param requestId        折叠 ACQUIRE 的请求 id
+     * @param threadId         归属线程
+     * @param registeredAtMs   登记时刻（epoch 毫秒，应用节点时钟）
+     */
+    public record ConditionWaiterView(
+            String condition,
+            long sessionId,
+            long requestId,
+            long threadId,
+            long registeredAtMs) {
+    }
 
     /**
      * 构造锁条目。
@@ -184,6 +238,7 @@ public final class LockEntry implements KeyEntry {
             writeCount++;
             leaseMs = effectiveLeaseMs;
             leaseExpiresAtMs = now + effectiveLeaseMs;
+            purgeConditionRegistrations(owner);
             return new AcquireResult(Outcome.GRANTED, leaseToken, effectiveLeaseMs, 0);
         }
         // 读锁重入 —— readers 计数 +1，租约按本次请求值整段刷新（全体读者共享），同 token。
@@ -193,6 +248,7 @@ public final class LockEntry implements KeyEntry {
                 readers.put(owner, count + 1);
                 leaseMs = effectiveLeaseMs;
                 leaseExpiresAtMs = now + effectiveLeaseMs;
+                purgeConditionRegistrations(owner);
                 return new AcquireResult(Outcome.GRANTED, leaseToken, effectiveLeaseMs, 0);
             }
         }
@@ -207,6 +263,7 @@ public final class LockEntry implements KeyEntry {
                 readers.put(owner, 1);
                 leaseMs = effectiveLeaseMs;
                 leaseExpiresAtMs = now + effectiveLeaseMs;
+                purgeConditionRegistrations(owner);
                 return new AcquireResult(Outcome.GRANTED, leaseToken, effectiveLeaseMs, 0);
             }
             long token = leaseTokenSupplier.getAsLong();
@@ -247,6 +304,317 @@ public final class LockEntry implements KeyEntry {
 
         waiters.addLast(new Waiter(cmd.sessionId(), cmd.requestId(), cmd.lockType(), cmd.threadId(), now, 0));
         return new AcquireResult(Outcome.QUEUED, 0, 0, waiters.size());
+    }
+
+    /**
+     * await 折叠应用（v9）：携带 {@code condition} 的 ACQUIRE 在应用点以同一
+     * 关键区原子执行"释放半程 + 登记半程"——不存在"已释放未登记"的丢唤醒窗
+     * （对偶纪律：SIGNAL 服务端权限使未提交的 await 不可能被第三方合法 signal）。
+     * 判定顺序——① (会话,请求) 恰为队首重发命中且与持有兼容 → 按队首重发语义
+     * 授予（重入自 1 级起、新凭证，{@link #grant} 顺带摘该归属陈旧登记）；
+     * ② 立即式携带 condition 属违例形状，防御拒绝零扰动（入口门已裁决）；
+     * ③ 已在集 → 幂等重挂（不双登记、不重复释放，返回等待项合计口径位次）；
+     * ④ 已在队非队首（搬运后重发在途/越位防御）→ 按在队幂等返回位次；
+     * ⑤ 合并深度护栏（等待队列 + 全部条件集合计）超限拒绝；⑥ 同关键区内
+     * [持有归属则重入一步清零+清租约+队首通知评估，非持有则释放零操作——
+     * 换主重挂/误用宽容面] + 到达序登记。通知收集列表由调用方在条目锁外触发。
+     *
+     * @param cmd                折叠获取命令（{@code condition} 非 null，形状已经入口裁决）
+     * @param now                应用时刻（条目时钟，毫秒）
+     * @param leaseTokenSupplier 租约凭证发生器
+     * @param effectiveLeaseMs   已夹取的实际租约时长（毫秒）
+     * @param cfg                限额配置（合并等待深度护栏、队首响应超时）
+     * @param notify             通知收集列表，持有者分支触发的队首通知由调用方锁外触发
+     * @return {@code QUEUED}=已登记（位次为本 key 等待项合计口径）；{@code GRANTED}=
+     *         队首重发落地；其余为拒绝
+     */
+    public synchronized AcquireResult awaitFold(AcquireCommand cmd, long now,
+            LongSupplier leaseTokenSupplier, long effectiveLeaseMs, CoreConfig cfg,
+            List<Waiter> notify) {
+        Owner owner = new Owner(cmd.sessionId(), cmd.threadId());
+        // ① 队首重发命中（AWAIT_NOTIFY → 原信封重发的幂等落地，规则 7 同型）
+        Waiter head = waiters.peekFirst();
+        if (head != null && head.sessionId() == cmd.sessionId()
+                && head.requestId() == cmd.requestId() && compatibleWithHold(head.lockType())) {
+            waiters.pollFirst();
+            long token = leaseTokenSupplier.getAsLong();
+            grant(owner, head.lockType() == LockType.READ, token, effectiveLeaseMs, now);
+            return new AcquireResult(Outcome.GRANTED, token, effectiveLeaseMs, 0);
+        }
+        // ② 立即式 + condition：入口门已拒的违例形，core 防御兜底零扰动
+        if (!cmd.queueIfBusy()) {
+            return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
+        }
+        // ③ 已在集：幂等重挂（应答丢失重发/车道迁移重挂同请求 id 不双登记）
+        int setIndex = conditionIndexOf(cmd.sessionId(), cmd.requestId());
+        if (setIndex > 0) {
+            return new AcquireResult(Outcome.QUEUED, 0, 0, setIndex);
+        }
+        // ④ 已在队非队首（已搬运未至队首）：在队幂等
+        int pos = 0;
+        for (Waiter w : waiters) {
+            pos++;
+            if (w.sessionId() == cmd.sessionId() && w.requestId() == cmd.requestId()) {
+                return new AcquireResult(Outcome.QUEUED, 0, 0, pos);
+            }
+        }
+        // ⑤ 合并深度护栏：本 key 等待项合计（队列 + 全部条件集）
+        if (waiters.size() + conditionTotal() >= cfg.maxQueueDepthPerKey()) {
+            return new AcquireResult(Outcome.REJECT_QUEUE_FULL, 0, 0, 0);
+        }
+        // ⑥a 释放半程：恰为写侧持有归属则一步清零并清租约（重入无论层数），
+        //     并评估队首通知；非持有（重挂/误用 ghost）释放零操作、登记照常
+        if (writer != null && writer.equals(owner)) {
+            writer = null;
+            writeCount = 0;
+            clearLease();
+            notifyHeadIfPossible(now, cfg.headReplyTimeoutMs(), notify);
+        }
+        // ⑥b 登记半程：到达序入集（登记时刻为观察值，条目时刻注入）
+        conditionSets.computeIfAbsent(cmd.condition(), k -> new ArrayDeque<>())
+                .addLast(new ConditionWaiter(cmd.sessionId(), cmd.threadId(),
+                        cmd.requestId(), cmd.lockType(), now));
+        return new AcquireResult(Outcome.QUEUED, 0, 0, waiters.size() + conditionTotal());
+    }
+
+    /**
+     * SIGNAL：唤醒一人。权限 (会话,线程) 须恰为当前写侧持有归属（服务端权威，
+     * JDK "持锁 signal" 同型；不匹配 {@code NOT_HELD} 三形合并——无写侧/归属
+     * 不符）。搬运对象取该条件名到达序队首，搬入等待队列尾（搬运时刻定序——
+     * FAIR 位次承诺按入队序约束后来者，不承诺优先于搬运前已入队者）。空集/
+     * 无此条件名 = 无操作 OK（signal 是事件，不追溯）。搬运候选人 MUST 排除调用
+     * 归属自身——集群预检登记窗内 awaiter 短暂"持有且在集"，自 signal 防御性
+     * 跳过（JDK 中持有者恒不在集，同款效果）。搬运后同关键区内评估
+     * 队首通知：锁空闲即推（事件驱动、无就绪定时器），锁被持由后续释放接力。
+     *
+     * @param cmd    signal 命令（消费 condition/threadId/sessionId）
+     * @param now    裁决时刻（毫秒）
+     * @param cfg    限额配置（队首响应超时）
+     * @param notify 通知收集列表，由调用方在条目锁外触发
+     * @return OK=搬运生效或空集无操作；NOT_HELD=权限不匹配
+     */
+    public synchronized ConditionOpResult signal(ConditionOpCommand cmd, long now,
+            CoreConfig cfg, List<Waiter> notify) {
+        ConditionOpResult.ConditionOpEcho echo = ConditionOpResult.ConditionOpEcho.SIGNAL;
+        if (writer == null || !writer.equals(new Owner(cmd.sessionId(), cmd.threadId()))) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+        }
+        ArrayDeque<ConditionWaiter> set = conditionSets.get(cmd.condition());
+        if (set == null || set.isEmpty()) {
+            return ConditionOpResult.ok(echo);
+        }
+        ConditionWaiter picked = pickNonCaller(set, cmd.sessionId(), cmd.threadId());
+        if (picked == null) {
+            return ConditionOpResult.ok(echo);
+        }
+        promote(picked, now);
+        if (set.isEmpty()) {
+            conditionSets.remove(cmd.condition());
+        }
+        notifyHeadIfPossible(now, cfg.headReplyTimeoutMs(), notify);
+        return ConditionOpResult.ok(echo);
+    }
+
+    /**
+     * SIGNAL_ALL：唤醒全员。权限检查与 {@link #signal} 同型；该条件名集内全部
+     * 等待项按到达序依次搬入等待队列尾，同样排除调用归属自身（各自的了结经
+     * 队首推进串行兑现——惊群在互斥锁上天然序列化为逐个授予）。空集 = 无操作 OK。
+     *
+     * @param cmd    signal_all 命令
+     * @param now    裁决时刻（毫秒）
+     * @param cfg    限额配置（队首响应超时）
+     * @param notify 通知收集列表，由调用方在条目锁外触发
+     * @return OK=搬运生效或空集无操作；NOT_HELD=权限不匹配
+     */
+    public synchronized ConditionOpResult signalAll(ConditionOpCommand cmd, long now,
+            CoreConfig cfg, List<Waiter> notify) {
+        ConditionOpResult.ConditionOpEcho echo = ConditionOpResult.ConditionOpEcho.SIGNAL_ALL;
+        if (writer == null || !writer.equals(new Owner(cmd.sessionId(), cmd.threadId()))) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+        }
+        ArrayDeque<ConditionWaiter> set = conditionSets.get(cmd.condition());
+        if (set == null || set.isEmpty()) {
+            return ConditionOpResult.ok(echo);
+        }
+        Iterator<ConditionWaiter> it = set.iterator();
+        while (it.hasNext()) {
+            ConditionWaiter w = it.next();
+            if (w.sessionId() == cmd.sessionId() && w.threadId() == cmd.threadId()) {
+                continue;
+            }
+            it.remove();
+            promote(w, now);
+        }
+        if (set.isEmpty()) {
+            conditionSets.remove(cmd.condition());
+        }
+        notifyHeadIfPossible(now, cfg.headReplyTimeoutMs(), notify);
+        return ConditionOpResult.ok(echo);
+    }
+
+    /**
+     * LEAVE：撤登（客户端本地超时/中断路径）。按 (会话, 请求) 摘除该折叠
+     * await 在目标条件集的登记，幂等——不存在即无操作 OK。队侧不做动作：
+     * 已搬运项的 ghost 收敛由"客户端忽略陈旧通知 + 队首超时清扫 + 授予摘除"
+     * 既有链路兜底（LEAVE 与 SIGNAL 竞态的两种收束见 v9 规格）。
+     *
+     * @param cmd leave 命令（消费 condition/sessionId/awaitRequestId）
+     * @return 恒 OK（幂等）
+     */
+    public synchronized ConditionOpResult leave(ConditionOpCommand cmd) {
+        Iterator<Map.Entry<String, ArrayDeque<ConditionWaiter>>> it =
+                conditionSets.entrySet().iterator();
+        while (it.hasNext()) {
+            ArrayDeque<ConditionWaiter> set = it.next().getValue();
+            set.removeIf(w -> w.sessionId() == cmd.sessionId() && w.requestId() == cmd.awaitRequestId());
+            if (set.isEmpty()) {
+                it.remove();
+            }
+        }
+        return ConditionOpResult.ok(ConditionOpResult.ConditionOpEcho.LEAVE);
+    }
+
+    /**
+     * 选取首个非调用归属的等待项并摘除（SIGNAL 搬运候选人，自 signal 防御）；
+     * 集内仅剩调用者自身时返回 null。
+     *
+     * @param set        目标条件集（到达序）
+     * @param sessionId  调用会话
+     * @param threadId   调用线程
+     * @return 被摘除的非调用者等待项，无候选返回 {@code null}
+     */
+    private static ConditionWaiter pickNonCaller(ArrayDeque<ConditionWaiter> set,
+            long sessionId, long threadId) {
+        Iterator<ConditionWaiter> it = set.iterator();
+        while (it.hasNext()) {
+            ConditionWaiter w = it.next();
+            if (w.sessionId() == sessionId && w.threadId() == threadId) {
+                continue;
+            }
+            it.remove();
+            return w;
+        }
+        return null;
+    }
+
+    /**
+     * await 折叠释放半程（v9，集群应用点专用动作）：(会话,线程) 恰为写侧持有
+     * 归属则重入计数一步清零、清除租约并评估队首通知；非持有零操作（重挂/重放
+     * 形态幂等无感）。登记半程 MUST NOT 经本方法——它由受理预检点的 Leader
+     * 本地结构承载（lock-server 能力条款），应用面保持跨副本确定。
+     *
+     * @param sessionId 折叠命令的持有会话
+     * @param threadId  折叠命令的持有线程
+     * @param now       应用时刻（条目时钟，毫秒）
+     * @param cfg       限额配置（队首响应超时）
+     * @param notify    通知收集列表，由调用方在条目锁外触发
+     * @return true=释放半程生效（原持有、已清零）；false=零操作
+     */
+    public synchronized boolean awaitFoldRelease(long sessionId, long threadId, long now,
+            CoreConfig cfg, List<Waiter> notify) {
+        if (writer != null && writer.equals(new Owner(sessionId, threadId))) {
+            writer = null;
+            writeCount = 0;
+            clearLease();
+            notifyHeadIfPossible(now, cfg.headReplyTimeoutMs(), notify);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 搬运单条：条件集等待项以原身份转入等待队列尾，入队时刻取搬运时刻
+     * （等待时长观察自登记起算的语义由 registeredAtMs 在集内承载，转入队列后
+     * 按队列纪律计 waited）。
+     *
+     * @param picked 被搬运的条件等待项
+     * @param now    搬运时刻（毫秒）
+     */
+    private void promote(ConditionWaiter picked, long now) {
+        waiters.addLast(new Waiter(picked.sessionId(), picked.requestId(),
+                picked.lockType(), picked.threadId(), now, 0));
+    }
+
+    /**
+     * 授予侧收口：摘除该归属 (会话,线程) 在全部条件集的陈旧登记（同线程不可能
+     * 既持锁又条件等待——授予即其上一次 await 的终结）。仅在条目锁内调用。
+     *
+     * @param owner 被授予（或重入刷新）的归属
+     */
+    private void purgeConditionRegistrations(Owner owner) {
+        Iterator<Map.Entry<String, ArrayDeque<ConditionWaiter>>> it =
+                conditionSets.entrySet().iterator();
+        while (it.hasNext()) {
+            ArrayDeque<ConditionWaiter> set = it.next().getValue();
+            set.removeIf(w -> w.sessionId() == owner.sessionId()
+                    && w.threadId() == owner.threadId());
+            if (set.isEmpty()) {
+                it.remove();
+            }
+        }
+    }
+
+    /**
+     * 全部条件集人数合计。仅在条目锁内调用。
+     *
+     * @return 条件等待者总数
+     */
+    private int conditionTotal() {
+        int total = 0;
+        for (ArrayDeque<ConditionWaiter> set : conditionSets.values()) {
+            total += set.size();
+        }
+        return total;
+    }
+
+    /**
+     * (会话, 请求) 在条件集中的合计口径位次（等待队列长度 + 集内到达序，
+     * 1 起）；不在集返回 0。仅在条目锁内调用。
+     *
+     * @param sessionId 等待会话
+     * @param requestId 折叠请求 id
+     * @return 合计口径位次，不在集返回 0
+     */
+    private int conditionIndexOf(long sessionId, long requestId) {
+        int idx = waiters.size();
+        for (ArrayDeque<ConditionWaiter> set : conditionSets.values()) {
+            for (ConditionWaiter w : set) {
+                idx++;
+                if (w.sessionId() == sessionId && w.requestId() == requestId) {
+                    return idx;
+                }
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 条件等待集人数读数（v9 观察口径：SUMMARY/等待总数合计消费；与
+     * {@link #waiterCount()} 的等待队列口径互斥不重复——已搬运项属队列口径。
+     * 不入 {@code queue.depth.max} 该口径由 server 聚合点分轨保证）。须在持有
+     * 条目锁或经本方法自带同步调用。
+     *
+     * @return 当前条件等待者数
+     */
+    public synchronized int conditionWaiterCount() {
+        return conditionTotal();
+    }
+
+    /**
+     * 条件等待明细只读快照：各集按建立序、集内按到达序拷贝为不可变视图列表。
+     * 纯观察，MUST NOT 改变登记、搬运或清扫时序。
+     *
+     * @return 条件等待明细（空集无痕迹）
+     */
+    public synchronized List<ConditionWaiterView> conditionWaiterViews() {
+        List<ConditionWaiterView> out = new ArrayList<>();
+        for (Map.Entry<String, ArrayDeque<ConditionWaiter>> en : conditionSets.entrySet()) {
+            for (ConditionWaiter w : en.getValue()) {
+                out.add(new ConditionWaiterView(en.getKey(), w.sessionId(),
+                        w.requestId(), w.threadId(), w.registeredAtMs()));
+            }
+        }
+        return List.copyOf(out);
     }
 
     /**
@@ -405,6 +773,16 @@ public final class LockEntry implements KeyEntry {
         }
         readers.keySet().removeIf(o -> o.sessionId() == sessionId);
         waiters.removeIf(w -> w.sessionId() == sessionId);
+        // v9 死亡不吞锁：条件集仅摘该会话登记，持有/租约/队列逐项不变
+        Iterator<Map.Entry<String, ArrayDeque<ConditionWaiter>>> csIt =
+                conditionSets.entrySet().iterator();
+        while (csIt.hasNext()) {
+            ArrayDeque<ConditionWaiter> set = csIt.next().getValue();
+            set.removeIf(w -> w.sessionId() == sessionId);
+            if (set.isEmpty()) {
+                csIt.remove();
+            }
+        }
         if (writer == null && readers.isEmpty()) {
             clearLease();
         }
@@ -424,6 +802,9 @@ public final class LockEntry implements KeyEntry {
      * @param now              当前时刻（毫秒）
      */
     private void grant(Owner owner, boolean isRead, long token, long effectiveLeaseMs, long now) {
+        // v9 授予侧收口：任一 (会话,线程) 归属被授予即该线程上一次 await 的终结
+        // （同一线程不可能既持锁又条件等待）——顺带摘除其在全部条件集的陈旧登记。
+        purgeConditionRegistrations(owner);
         if (isRead) {
             readers.put(owner, 1);
         } else {
@@ -526,13 +907,15 @@ public final class LockEntry implements KeyEntry {
     }
 
     /**
-     * 是否无持有者且无等待者。须在持有条目锁时调用（CoreEngine 保证）。
+     * 是否无持有者、无等待者且无条件等待者（v9：条件集非空即条目不可回收——
+     * await 已释放的锁 key 必须为睡梦中的等待者存续，signal 才有家可搬）。
+     * 须在持有条目锁时调用（CoreEngine 保证）。
      *
      * @return 条目为空返回 true
      */
     @Override
     public boolean isEmpty() {
-        return writer == null && readers.isEmpty() && waiters.isEmpty();
+        return writer == null && readers.isEmpty() && waiters.isEmpty() && conditionSets.isEmpty();
     }
 
     /**
@@ -570,7 +953,7 @@ public final class LockEntry implements KeyEntry {
         for (Waiter w : waiters) {
             waiterSnaps.add(new CoreInspection.WaiterSnapshot(
                     w.sessionId(), w.requestId(), w.threadId(), w.permits(),
-                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified()));
+                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified(), 0));
         }
         long remaining = leaseToken != 0 ? Math.max(0, leaseExpiresAtMs - now) : 0;
         return new CoreInspection.KeySnapshot(key, KeyFamily.LOCK, reentrant,
@@ -578,6 +961,6 @@ public final class LockEntry implements KeyEntry {
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
                 0, 0, 0, 0, List.of(),
                 null, 0, 0, 0,
-                0, 0, 0, false, null);
+                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null, 0, 0, 0);
     }
 }

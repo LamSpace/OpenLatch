@@ -35,6 +35,7 @@ import io.github.lamspace.openlatch.protocol.LatchCountDownRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.TopicMessage;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.concurrent.EventExecutorGroup;
@@ -55,6 +56,12 @@ import java.util.concurrent.TimeUnit;
  * <p><b>职责</b>：以长连接访问锁服务，对外提供异步获取/释放内核与
  * JUC 风格同步锁包装；对内维护请求多路复用、等待跟踪、看门狗续租与断连重连。
  * 锁语义裁决（是否授予、是否可重入）全部由服务端完成，客户端仅做本地簿记。
+ * v8 起承载广播订阅路由表（{@link OTopic}：(会话, subscription_id) →
+ * 订阅句柄）与重挂保活周期——推送交付在网络线程按表分发、经订阅句柄自有
+ * dispatcher 线程串行回调，不占用 EventLoop。v9 起承载条件变量
+ * （{@link OLock#newCondition(String)}/{@link OCondition}）：await 折叠于
+ * 获取车道的 ACQUIRE（既有等待闭环复用），signal 家族经直发请求-应答
+ * 车道（判例 topic/queue 直发）。
  *
  * <p><b>连接车道</b>：稳态单连接（home 即 Leader，或单机
  * 服务）。集群形态下 home 握手提示或 {@code NOT_LEADER} 重定向驱动改道：
@@ -111,6 +118,13 @@ public final class OpenLatchClient implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicLong(0);
     /** key → 在途写互斥监视器（同 key 写串行保证去重单槽充分性；条目随 key 常驻，量级同 key 基数）。 */
     private final ConcurrentHashMap<String, Object> atomicWriteMonitors = new ConcurrentHashMap<>();
+    /** v8 订阅路由表：受理会话 id → subscription_id → 活跃订阅（推送分发用）。 */
+    private final ConcurrentHashMap<Long, ConcurrentHashMap<Long, RemoteTopic.Subscription>>
+            topicRoutes = new ConcurrentHashMap<>();
+    /** v8 有活跃订阅的句柄集（重挂事件与保活周期遍历对象）。 */
+    private final java.util.Set<RemoteTopic> liveTopics = ConcurrentHashMap.newKeySet();
+    /** v8 订阅保活周期（毫秒）——兜底"同节点换主登记清零而连接未断"的静默断供。 */
+    private static final long TOPIC_KEEPALIVE_MS = 30_000L;
     /**
      * 获取车道（Leader 车道）：{@code null} 即稳态单连接——home 即
      * Leader（或单机）。Leader 改连时按需建/换指向；新获取与等待走此车道，
@@ -203,9 +217,19 @@ public final class OpenLatchClient implements AutoCloseable {
                 awaitTracker.onNotify(n);
             }
         });
+        this.connectionManager.setTopicMessageSink(m -> {
+            // v8：广播交付按 (home 会话, subscription_id) 路由；换会话窗内
+            // 的失配推送直接丢弃（至多一次契约）。
+            SessionContext s = connectionManager.session();
+            if (s != null) {
+                onTopicDelivered(s.sessionId(), m);
+            }
+        });
         this.connectionManager.setActiveListener(this::onHomeActive);
         this.connectionManager.setHelloListener(this::onHomeHello);
         this.multiplexer.setOrphanSink(awaitTracker::onOrphanResponse);
+        // v8：订阅重挂保活周期（共享定时器自续排；无活跃订阅时为空扫）。
+        scheduleTopicKeepAlive();
         // 构建即发起首次连接（异步）：连接失败自动退避重连并轮询种子。
         this.connectionManager.connectAsync();
     }
@@ -252,6 +276,7 @@ public final class OpenLatchClient implements AutoCloseable {
                     awaits.onNotify(n);
                 }
             });
+            this.cm.setTopicMessageSink(m -> onTopicDelivered(sessionId, m));
             this.cm.setActiveListener(this::onActive);
             this.cm.setHelloListener(this::onHello);
             this.mux.setOrphanSink(awaits::onOrphanResponse);
@@ -273,6 +298,8 @@ public final class OpenLatchClient implements AutoCloseable {
                     }
                 }
             }
+            // v8：车道会话更替即触发订阅重挂（幂等覆盖，失败留待保活周期）。
+            rebindAllTopics();
         }
 
         /**
@@ -329,6 +356,8 @@ public final class OpenLatchClient implements AutoCloseable {
                 }
             }
         }
+        // v8：home 会话更替同样触发订阅重挂（无车道时订阅落 home 的情形）。
+        rebindAllTopics();
     }
 
     /**
@@ -795,13 +824,66 @@ public final class OpenLatchClient implements AutoCloseable {
      * 看门狗机制提供。返回的 future 在网络/定时器线程上完成，
      * 链接其上的回调不得阻塞。
      *
+     * <p>{@code spec.condition()} 非 {@code null} 时本获取为折叠 await
+     * 形态（v9，{@link OCondition}）：信封携带 {@code condition} 字段入
+     * 既有等待闭环，唤醒通知到达时由跟踪器换形为无条件信封重发。
+     *
      * @param spec 获取参数
      * @return 授予结果 future
      */
     public CompletableFuture<LockGrant> acquireAsync(AcquireSpec spec) {
+        return submitAcquire(spec).future();
+    }
+
+    /**
+     * 获取提交结果：本次提交占用的请求 id 与授予 future。折叠 await 的
+     * {@code LEAVE} 以 {@code awaitRequestId} 关联原提交（v9）。
+     *
+     * @param awaitRequestId 获取请求 id（快速失败路径为 {@code -1}，
+     *                       表示未建立任何服务端登记、LEAVE 应跳过）
+     * @param future         授予结果 future
+     */
+    record AcquireSubmission(long awaitRequestId, CompletableFuture<LockGrant> future) {
+    }
+
+    /**
+     * {@link #acquireAsync(AcquireSpec)} 的实现体（等待总超时按
+     * {@link AcquireSpec#waitMs()} 推导形态）。
+     *
+     * @param spec 获取参数
+     * @return 提交结果（请求 id + 授予 future）
+     */
+    AcquireSubmission submitAcquire(AcquireSpec spec) {
+        java.util.Objects.requireNonNull(spec, "spec must not be null");
+        long totalTimeoutMs;
+        if (spec.waitMs() == 0) {
+            totalTimeoutMs = 0;
+        } else if (spec.waitMs() > 0) {
+            totalTimeoutMs = spec.waitMs();
+        } else {
+            totalTimeoutMs = config.defaultWaitTimeout().toMillis();
+        }
+        return submitAcquire(spec, totalTimeoutMs);
+    }
+
+    /**
+     * 获取提交的实现体：车道选择、信封装配（含折叠形态
+     * {@code condition} 字段）与跟踪器登记的公共收口。
+     *
+     * <p>等待总超时由调用点显式给定——折叠 await 的不限时形态
+     * （{@link OCondition#await()}）以 {@code -1} 请求真无限预算
+     * （JDK 保真：无 signal 则永睡，异常收束面见接口契约），其余
+     * 形态与 {@link #submitAcquire(AcquireSpec)} 推导一致。
+     *
+     * @param spec           获取参数
+     * @param totalTimeoutMs 等待总超时（毫秒）；非正表示不限时
+     * @return 提交结果（请求 id + 授予 future）
+     */
+    AcquireSubmission submitAcquire(AcquireSpec spec, long totalTimeoutMs) {
         java.util.Objects.requireNonNull(spec, "spec must not be null");
         if (closed) {
-            return failedFuture(new IllegalStateException("client is shut down"));
+            return new AcquireSubmission(-1L,
+                    failedFuture(new IllegalStateException("client is shut down")));
         }
         // 获取车道优先：存在指向 Leader 的车道时新获取以其会话
         // 发出；车道暂不可用（重连窗口）回落 home——home 若非 Leader 会以
@@ -814,35 +896,34 @@ public final class OpenLatchClient implements AutoCloseable {
             session = lane.cm.session();
         }
         if (session == null) {
-            return failedFuture(new ServerUnavailableException("connection is not active"));
+            return new AcquireSubmission(-1L,
+                    failedFuture(new ServerUnavailableException("connection is not active")));
         }
         long requestId = session.nextRequestId();
+        AcquireRequest.Builder acquireBody = AcquireRequest.newBuilder()
+                .setKey(spec.key())
+                .setLockType(spec.lockType().wireType())
+                .setThreadId(spec.threadId())
+                .setLeaseMs(spec.leaseMs())
+                .setWaitMs(spec.waitMs() == 0 ? 0 : -1)
+                // 许可参数：锁家族恒 permits=1 / total=0，
+                // 与服务端缺省归一一致（线路零扰动）。
+                .setPermits(spec.permits())
+                .setPermitsTotal(spec.permitsTotal());
+        if (spec.condition() != null) {
+            // 折叠 await 形态：presence 即 await 语义（受理=一步清零重入
+            // + 清租约 + 入等待集原子完成），等待恒为挂起形态（wait_ms=-1）。
+            acquireBody.setCondition(spec.condition());
+        }
         Envelope envelope = Envelope.newBuilder()
                 .setProtocolVersion(3)
                 .setType(MessageType.LOCK_ACQUIRE)
                 .setRequestId(requestId)
-                .setAcquireRequest(AcquireRequest.newBuilder()
-                        .setKey(spec.key())
-                        .setLockType(spec.lockType().wireType())
-                        .setThreadId(spec.threadId())
-                        .setLeaseMs(spec.leaseMs())
-                        .setWaitMs(spec.waitMs() == 0 ? 0 : -1)
-                        // 许可参数：锁家族恒 permits=1 / total=0，
-                        // 与服务端缺省归一一致（线路零扰动）。
-                        .setPermits(spec.permits())
-                        .setPermitsTotal(spec.permitsTotal()))
+                .setAcquireRequest(acquireBody)
                 .build();
-        long totalTimeoutMs;
-        if (spec.waitMs() == 0) {
-            totalTimeoutMs = 0;
-        } else if (spec.waitMs() > 0) {
-            totalTimeoutMs = spec.waitMs();
-        } else {
-            totalTimeoutMs = config.defaultWaitTimeout().toMillis();
-        }
         CompletableFuture<LockGrant> future = new CompletableFuture<>();
         tracker.startAcquire(requestId, envelope, spec, future, totalTimeoutMs);
-        return future;
+        return new AcquireSubmission(requestId, future);
     }
 
     /**
@@ -1443,6 +1524,153 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程有值引用句柄（v6，无初值主张形态）：条目不存在时首个写
+     * 以 {@code null} 载荷为初值基准建立；语义与载荷边界见
+     * {@link OAtomicReference} 接口注释。
+     *
+     * @param key 有值引用键
+     * @return 有值引用句柄（可多线程共用、可多句柄指向同 key）
+     */
+    public OAtomicReference newAtomicReference(String key) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key), null);
+    }
+
+    /**
+     * 创建跨进程有值引用句柄（初值主张形态）：key 首建时条目初值以
+     * {@code initialValue} 定格（作为后续携带主张请求的一致性断言基准，
+     * 首笔写入的旧值读数即该主张值）；既有条目定型初值与之字节不符时
+     * 本句柄首个操作抛 {@link OpenLatchException}（映射服务端初值断言）。
+     * {@code null} 等价无参形态；零长度数组为空字节串主张（与 null 可区分）。
+     * 主张仅建条目时生效，不构成服务端回收依据（条目常驻）。
+     *
+     * @param key          有值引用键
+     * @param initialValue 初值主张载荷（可为 {@code null}=不主张）
+     * @return 有值引用句柄
+     */
+    public OAtomicReference newAtomicReference(String key, byte[] initialValue) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key), initialValue);
+    }
+
+    /**
+     * 创建跨进程有值引用句柄（UTF-8 字符串初值主张形态），语义同
+     * {@link #newAtomicReference(String, byte[])}。
+     *
+     * @param key          有值引用键
+     * @param initialValue 初值主张字符串（可为 {@code null}=不主张）
+     * @return 有值引用句柄
+     */
+    public OAtomicReference newAtomicReference(String key, String initialValue) {
+        return new RemoteAtomicReference(this, Objects.requireNonNull(key),
+                initialValue == null ? null : initialValue.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 创建跨进程有界阻塞队列句柄（协议 v7）。容量 {@code capacity} 为定型主张，
+     * 随每次写携带：key 首建时以该值定格条目容量（受服务端
+     * {@code max-queue-capacity} 上限钳制），既有条目定型值与之不符时首个写操作
+     * 抛 {@link OpenLatchException}（判例 Semaphore/Latch 非零主张）。同一 key 的
+     * 队列与延时队列形态互斥（{@link #newDelayQueue} 建的 key 上本句柄被拒，
+     * 反之亦然）。句柄线程安全、无租约、无看门狗；元素生命周期契约与语义
+     * 降级/增强清单见 {@link OBlockingQueue} 接口级 Javadoc。
+     *
+     * @param key      队列键（非空）
+     * @param capacity 定型容量主张（{@code >= 1}）
+     * @return 有界队列句柄
+     * @throws IllegalArgumentException key 为空或容量非正
+     */
+    public OBlockingQueue newBlockingQueue(String key, long capacity) {
+        Objects.requireNonNull(key, "key");
+        if (capacity < 1) {
+            throw new IllegalArgumentException("capacity must be >= 1: " + capacity);
+        }
+        return new RemoteBlockingQueue(this, key, capacity,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE);
+    }
+
+    /**
+     * 创建跨进程延时队列句柄（{@link ODelayQueue}，协议 v7）：形态主张
+     * {@code DELAY_QUEUE}，出队按最早到期序、同到期保持到达序；容量定型与
+     * 形态互斥规则同 {@link #newBlockingQueue(String, long)}。延时注入与
+     * 相对 JDK {@code DelayQueue} 的签名差异（{@code offerDelayed} 改名）见
+     * {@link ODelayQueue} 接口级 Javadoc。
+     *
+     * @param key      队列键（非空）
+     * @param capacity 定型容量主张（{@code >= 1}）
+     * @return 延时队列句柄
+     * @throws IllegalArgumentException key 为空或容量非正
+     */
+    public ODelayQueue newDelayQueue(String key, long capacity) {
+        Objects.requireNonNull(key, "key");
+        if (capacity < 1) {
+            throw new IllegalArgumentException("capacity must be >= 1: " + capacity);
+        }
+        return new RemoteBlockingQueue(this, key, capacity,
+                io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE);
+    }
+
+    /**
+     * 创建跨进程广播发布/订阅句柄（{@link OTopic}，协议 v8）。一个 key 即
+     * 一个广播通道：{@code publish} 至多一次地扇出给当时在册的全部订阅者，
+     * 弱背压（drop-newest 两级缓冲）与订阅的会话绑定生命周期（死亡即退订）
+     * 等语义降级/增强清单以 {@link OTopic} 接口级 Javadoc 为唯一权威载体。
+     *
+     * <p>topic 键与锁/Semaphore/Latch/屏障/原子/队列键同名时受理端只读
+     * 探测拒绝（{@code INVALID_REQUEST}，尽力而为）——"一 key 一形态"由
+     * 应用侧维持（判例各复制家族的机制互斥在此降级为契约，防混读声明）。
+     * 发布写车道与原子/队列共享同 key 在途互斥与自动重发纪律。
+     *
+     * @param key topic 键（非空）
+     * @return 广播句柄（线程安全；订阅经 {@link OTopic#subscribe} 建立）
+     * @throws IllegalArgumentException key 为空
+     */
+    public OTopic newTopic(String key) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        return new RemoteTopic(this, key);
+    }
+
+    /**
+     * 创建跨进程相位器句柄（{@link OPhaser}，协议 v10）：动态注册/到场/离席
+     * 的按相位会合原语，参与者会话死亡即时隐式摘除配额且不空转（对照
+     * {@link #newBarrier} 的死亡破障——单死者不炸一锅）。句柄构造零网络，
+     * 无初始注册；participants 随 {@link OPhaser#register()} 显式进入。
+     *
+     * @param key 相位器键（非空）
+     * @return 相位器句柄（线程安全）
+     * @throws IllegalArgumentException key 为空
+     */
+    public OPhaser newPhaser(String key) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        return new RemotePhaser(this, key, 0);
+    }
+
+    /**
+     * 创建携初始注册数的相位器句柄：{@code initialParties} 于本会话首个
+     * 业务操作前同步提交注册（归属本会话；会话重建后按死亡摘除语义重执，
+     * 超调方向保守论证见 {@link RemotePhaser} 类注）。
+     *
+     * @param key            相位器键（非空）
+     * @param initialParties 初始注册数（{@code >= 0}；0 等同 {@link #newPhaser(String)}）
+     * @return 相位器句柄
+     * @throws IllegalArgumentException key 为空或 parties 为负
+     */
+    public OPhaser newPhaser(String key, int initialParties) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        if (initialParties < 0) {
+            throw new IllegalArgumentException("initialParties must be >= 0: " + initialParties);
+        }
+        return new RemotePhaser(this, key, initialParties);
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
@@ -1489,6 +1717,103 @@ public final class OpenLatchClient implements AutoCloseable {
      * @param mux     该会话所属车道的多路复用器
      */
     record LatchRoute(SessionContext session, RequestMultiplexer mux) {
+    }
+
+    // ==================== v8 广播订阅路由（OTopic） ====================
+
+    /**
+     * 登记推送路由（SUBSCRIBE 受理成功后由 {@link RemoteTopic} 调用）。
+     *
+     * @param sessionId 受理会话 id
+     * @param subId     服务端路由键
+     * @param sub       活跃订阅
+     */
+    void attachTopicSubscription(long sessionId, long subId, RemoteTopic.Subscription sub) {
+        topicRoutes.computeIfAbsent(sessionId, k -> new ConcurrentHashMap<>()).put(subId, sub);
+    }
+
+    /**
+     * 摘除推送路由（值甄别：仅摘自己登记的项，防误摘同键后到者）。
+     *
+     * @param sessionId 登记会话 id
+     * @param subId     路由键
+     * @param expected  期望命中的订阅（表值 != expected 时不动）
+     */
+    void detachTopicSubscription(long sessionId, long subId, RemoteTopic.Subscription expected) {
+        ConcurrentHashMap<Long, RemoteTopic.Subscription> bySub = topicRoutes.get(sessionId);
+        if (bySub != null) {
+            bySub.remove(subId, expected);
+            if (bySub.isEmpty()) {
+                topicRoutes.remove(sessionId, bySub);
+            }
+        }
+    }
+
+    /**
+     * {@code TOPIC_MESSAGE} 入站分发（EventLoop 线程，非阻塞）：按
+     * (交付连接会话, subscription_id) 命中订阅后转句柄队列；失配丢弃
+     * （换会话窗/已被替换——至多一次契约面）。
+     *
+     * @param sessionId 交付连接当时的会话 id
+     * @param message   推送载荷
+     */
+    private void onTopicDelivered(long sessionId, TopicMessage message) {
+        ConcurrentHashMap<Long, RemoteTopic.Subscription> bySub = topicRoutes.get(sessionId);
+        if (bySub == null) {
+            return;
+        }
+        RemoteTopic.Subscription sub = bySub.get(message.getSubscriptionId());
+        if (sub != null) {
+            sub.onPush(message);
+        }
+    }
+
+    /**
+     * 将句柄纳入重挂/保活遍历（订阅建立时调用）。
+     *
+     * @param topic 句柄
+     */
+    void trackLiveTopic(RemoteTopic topic) {
+        liveTopics.add(topic);
+    }
+
+    /**
+     * 句柄退出重挂遍历（退订时调用）。
+     *
+     * @param topic 句柄
+     */
+    void untrackLiveTopic(RemoteTopic topic) {
+        liveTopics.remove(topic);
+    }
+
+    /**
+     * 全部活跃订阅经当前路由幂等重登记（连接激活事件与保活周期共用；
+     * 单订阅门闩防并发重挂）。
+     */
+    private void rebindAllTopics() {
+        if (liveTopics.isEmpty()) {
+            return;
+        }
+        for (RemoteTopic topic : liveTopics) {
+            topic.rebindAsync();
+        }
+    }
+
+    /**
+     * 保活周期自续排（共享 {@link HashedWheelTimer}）：关停后不再续排。
+     * 周期职责有二——重挂"同节点换主（连接未断）导致的登记清零"，以及
+     * 事件遗漏兜底（激活事件已即时重挂，本周期为幂等无操作）。
+     */
+    private void scheduleTopicKeepAlive() {
+        timer.newTimeout(t -> {
+            if (!closed) {
+                try {
+                    rebindAllTopics();
+                } finally {
+                    scheduleTopicKeepAlive();
+                }
+            }
+        }, TOPIC_KEEPALIVE_MS, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -1590,6 +1915,65 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setRequestId(requestId)
                 .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
                         .setKey(key).setGeneration(generation))
+                .build();
+    }
+
+    /**
+     * 构造 PHASER_OP 信封（v10，直发车道——变异经提交、等待/撤销/读数 Leader
+     * 本地，形状互斥矩阵由装配点保证：parties 仅 REGISTER 且 &gt;=1；
+     * {@code expectedPhase} 非 null 仅 AWAIT_ADVANCE；await_request_id 仅
+     * CANCEL）。不设信封协议版本（判例 condition 直发，会话门由握手协商承载）。
+     *
+     * @param requestId      请求 id
+     * @param op             相位器操作
+     * @param key            相位器键
+     * @param parties        注册计数（仅 REGISTER）
+     * @param expectedPhase  已见相位号（仅 AWAIT_ADVANCE，其余传 null）
+     * @param awaitRequestId 被撤销等待项请求 id（仅 CANCEL）
+     * @return 信封
+     */
+    static Envelope phaserEnvelope(long requestId,
+            io.github.lamspace.openlatch.protocol.PhaserOp op, String key, int parties,
+            Long expectedPhase, long awaitRequestId) {
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.PhaserOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setParties(parties)
+                        .setAwaitRequestId(awaitRequestId);
+        if (expectedPhase != null) {
+            rb.setExpectedPhase(expectedPhase);
+        }
+        return Envelope.newBuilder()
+                .setType(MessageType.PHASER_OP)
+                .setRequestId(requestId)
+                .setPhaserOpRequest(rb)
+                .build();
+    }
+
+    /**
+     * 构造 CONDITION_OP 信封（v9，signal 家族直发车道与 LEAVE 尽力而为
+     * 共用；判例 topic/queue 直发——不设信封协议版本，会话门由握手
+     * 协商承载）。形状互斥矩阵由装配点保证：SIGNAL/SIGNAL_ALL 携
+     * 非零 {@code threadId} 且 {@code awaitRequestId = 0}；LEAVE 携非零
+     * {@code awaitRequestId} 且 {@code threadId = 0}。
+     *
+     * @param requestId      请求 id（直发车道每次新分配）
+     * @param op             条件操作
+     * @param key            锁键
+     * @param condition      条件名（恒必携非空）
+     * @param threadId       归属线程标识（仅 signal 家族）
+     * @param awaitRequestId 被摘除折叠 ACQUIRE 的请求 id（仅 LEAVE）
+     * @return 信封
+     */
+    static Envelope conditionEnvelope(long requestId,
+            io.github.lamspace.openlatch.protocol.ConditionOp op, String key, String condition,
+            long threadId, long awaitRequestId) {
+        return Envelope.newBuilder()
+                .setType(MessageType.CONDITION_OP)
+                .setRequestId(requestId)
+                .setConditionOpRequest(io.github.lamspace.openlatch.protocol
+                        .ConditionOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setCondition(condition)
+                        .setThreadId(threadId).setAwaitRequestId(awaitRequestId))
                 .build();
     }
 

@@ -19,6 +19,10 @@ package io.github.lamspace.openlatch.server.raft;
 import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserArrival;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserParty;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
 
@@ -94,6 +98,40 @@ public final class ShadowTable {
     public record ArrivalRef(long sessionId, long requestId) { }
 
     /**
+     * v10：phaser 每会话注册配额镜像项（逻辑会话 id → 未离场配额）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param parties   注册配额数（恒 &gt; 0）
+     */
+    /**
+     * v10：phaser 每会话注册配额镜像项（逻辑会话 id → 未离场配额）。
+     *
+     * @param sessionId             逻辑会话 id
+     * @param parties               未离场的注册配额（&gt; 0）
+     * @param lastRegisterRequestId 注册幂等槽：该会话最近一次 REGISTER 请求 id
+     *                              （0=尚无）
+     * @param lastRegisterPhase     该注册的到场相位回显（幂等重发回显源）
+     */
+    public record PartyRef(long sessionId, int parties,
+                           long lastRegisterRequestId, long lastRegisterPhase) { }
+
+    /**
+     * v10：phaser 复制态镜像输入（引擎 {@code PhaserEntry.ReplicatedState}
+     * 经逻辑 id 折算后的形态；列表序即确定性导出序）。
+     *
+     * @param phase        当前相位号
+     * @param registered   注册总数
+     * @param arrived      当前相位到场计数
+     * @param parties      配额表（账簿插入序）
+     * @param arrivals     在场去重槽（插入序）
+     * @param prevPhase    上一推进周期到场相位（-1=无换代窗口）
+     * @param prevArrivals 上一推进周期到场槽（插入序）
+     */
+    public record PhaserMirrorData(long phase, int registered, int arrived,
+                                   List<PartyRef> parties, List<ArrivalRef> arrivals,
+                                   long prevPhase, List<ArrivalRef> prevArrivals) { }
+
+    /**
      * 循环屏障复制态镜像输入（应用点自引擎导出的不可变快照）。
      *
      * @param parties             定型许可数
@@ -138,13 +176,36 @@ public final class ShadowTable {
      * @param barrierActionPending BARRIER 是否动作待决（其余家族 false）
      * @param barrierCompletedResult BARRIER 最近完结世代的了结形态
      *                               （0=无、1=TRIPPED、2=BROKEN；其余家族 0）
+     * @param refInitial ATOMIC 有值引用条目的定型初值载荷（其余家族 {@code null}；
+     *                   该形态下 {@code null}=无主张、零长度=空字节串）
+     * @param refValue ATOMIC 有值引用条目的当前载荷（其余家族 {@code null}；
+     *                 该形态下 {@code null}=null 态、零长度=空字节串。管理应答
+     *                 仅装配大小与截断预览，全量字节不外发）
+     * @param queueCapacity QUEUE 定型容量（其余家族 0）
+     * @param queueDepth QUEUE 当前元素数（驻留口径，延时形态含未到期项；
+     *                   其余家族 0）
+     * @param queueHeadExpiryMs QUEUE 队首元素绝对到期时刻（非 DELAY 形态或
+     *                          空队 0；其余家族 0）
+     * @param queueTotalPayloadBytes QUEUE 元素载荷字节之和（驻留治理读数；
+     *                               其余家族 0）
+     * @param queueHeadPayload QUEUE 队首元素载荷（预览数据源，空队 {@code null}；
+     *                         其余家族 {@code null}）
+     * @param phaserPhase    PHASER 当前相位号（其余家族 0）
+     * @param phaserRegistered PHASER 注册总数（其余家族 0）
+     * @param phaserArrived  PHASER 当前相位到场计数（其余家族 0）
+     * @param phaserParties  PHASER 每会话注册配额（逻辑 id，会话升序；其余家族空）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
                                  long latchTotal, long latchCount, Set<Long> latchParticipants,
                                  long atomicInitial, long atomicValue, long atomicVersion,
                                  long barrierParties, long barrierGeneration, int barrierArrived,
-                                 boolean barrierActionPending, int barrierCompletedResult) { }
+                                 boolean barrierActionPending, int barrierCompletedResult,
+                                 byte[] refInitial, byte[] refValue,
+                                 long queueCapacity, int queueDepth, long queueHeadExpiryMs,
+                                 long queueTotalPayloadBytes, byte[] queueHeadPayload,
+                                 long phaserPhase, int phaserRegistered, int phaserArrived,
+                                 List<PartyRef> phaserParties) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -186,6 +247,30 @@ public final class ShadowTable {
         private long atomicSlotValue;
         /** ATOMIC 条目：槽应答 version（其余家族 0）。 */
         private long atomicSlotVersion;
+        /** ATOMIC 有值引用条目：定型初值载荷（其余家族 {@code null}）。 */
+        private byte[] refInitial;
+        /** ATOMIC 有值引用条目：当前载荷（其余家族 {@code null}）。 */
+        private byte[] refValue;
+        /** ATOMIC 有值引用条目：去重槽应答 oldValue 载荷（其余家族 {@code null}）。 */
+        private byte[] refSlotOldValue;
+        /** ATOMIC 有值引用条目：去重槽应答 value 载荷（其余家族 {@code null}）。 */
+        private byte[] refSlotValue;
+        /** QUEUE 定型容量（其余家族 0）。 */
+        private long queueCapacity;
+        /** QUEUE 当前深度（驻留口径，延时形态含未到期项；其余家族 0）。 */
+        private int queueDepth;
+        /** QUEUE 队首元素绝对到期时刻（条目时刻口径读数；非 DELAY 形态或空队 0）。 */
+        private long queueHeadExpiryMs;
+        /** QUEUE 元素载荷字节之和（驻留治理读数；其余家族 0）。 */
+        private long queueTotalPayloadBytes;
+        /** QUEUE 队首元素载荷（预览数据源；空队/其余家族 {@code null}）。 */
+        private byte[] queueHeadPayload;
+        /** QUEUE 元素全列表（队列序；快照导出与重建的唯一权威镜像形，其余家族空）。 */
+        private List<io.github.lamspace.openlatch.core.lock.QueueEntry.ElementState>
+                queueElements = List.of();
+        /** QUEUE 去重槽表（会话 id 升序；其余家族空）。 */
+        private List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState>
+                queueSlots = List.of();
         /** BARRIER 定型许可数（其余家族 0）。 */
         private long barrierParties;
         /** BARRIER 当前世代号（其余家族 0）。 */
@@ -204,6 +289,20 @@ public final class ShadowTable {
         private List<ArrivalRef> barrierCompletedArrivals = List.of();
         /** BARRIER 完结世代执行者逻辑会话（0=无）。 */
         private long barrierCompletedExecutor;
+        /** PHASER 当前相位号（其余家族 0）。 */
+        private long phaserPhase;
+        /** PHASER 注册总数（其余家族 0）。 */
+        private int phaserRegistered;
+        /** PHASER 当前相位到场计数（其余家族 0）。 */
+        private int phaserArrived;
+        /** PHASER 每会话配额（逻辑 id，会话升序；其余家族空）。 */
+        private List<PartyRef> phaserParties = List.of();
+        /** PHASER 在场去重槽（逻辑 id，插入序；仅参与 digest，不入观察视图）。 */
+        private List<ArrivalRef> phaserArrivals = List.of();
+        /** PHASER 上一推进周期到场相位（-1=无换代窗口；digest 用）。 */
+        private long phaserPrevPhase = -1L;
+        /** PHASER 上一推进周期到场槽（逻辑 id，插入序；digest 用）。 */
+        private List<ArrivalRef> phaserPrevArrivals = List.of();
 
         /**
          * 构造复制态条目。
@@ -343,7 +442,11 @@ public final class ShadowTable {
                 l.latchTotal, l.latchCount, Set.copyOf(l.latchParticipants),
                 l.atomicInitial, l.atomicValue, l.atomicVersion,
                 l.barrierParties, l.barrierGeneration, l.barrierArrivals.size(),
-                l.barrierActionSession != 0, l.barrierCompletedResult);
+                l.barrierActionSession != 0, l.barrierCompletedResult,
+                l.refInitial, l.refValue,
+                l.queueCapacity, l.queueDepth, l.queueHeadExpiryMs,
+                l.queueTotalPayloadBytes, l.queueHeadPayload,
+                l.phaserPhase, l.phaserRegistered, l.phaserArrived, l.phaserParties);
     }
 
     /**
@@ -416,6 +519,30 @@ public final class ShadowTable {
     }
 
     /**
+     * v9 await 折叠全量释放的镜像收口：归属条目整体摘除（重入计数一步清零，
+     * 与引擎 {@code awaitFoldRelease} 的释放半程对偶），条目无持有者时移除 key。
+     * 归属不在持有集时零操作（重放/非持有同形，确定性幂等）。
+     *
+     * @param sessionId 持有归属逻辑会话 id
+     * @param threadId  持有归属线程 id
+     * @param key       锁键
+     */
+    public void releaseFully(long sessionId, long threadId, String key) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            return;
+        }
+        l.holders.remove(new Holder(sessionId, threadId));
+        if (l.holders.isEmpty()) {
+            locks.remove(key);
+            heldIndex.remove(key);
+            adminView.remove(key);
+        } else {
+            adminView.put(key, viewOf(l));
+        }
+    }
+
+    /**
      * 续租登记（RENEW OK 应用点）：刷新到期时刻（凭证不变），同步无锁索引。
      *
      * @param key          锁键
@@ -447,10 +574,11 @@ public final class ShadowTable {
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
             if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
                     || en.getValue().lockType == LockType.LOCK_TYPE_BARRIER_VALUE
-                    || isAtomicType(en.getValue().lockType)) {
-                // 无租约家族（Latch/ATOMIC/BARRIER）到期时刻恒 0——非"已到期"
-                // 信号，永不由到期清扫回收（一次性护栏、常驻值与循环屏障世代
-                // 存续语义各自承载；判例：原子变更对影子表无租约家族到期误扫的修复）。
+                    || isQueueType(en.getValue().lockType)
+                    || isAtomicFamily(en.getValue().lockType)) {
+                // 无租约家族（Latch/ATOMIC/BARRIER/QUEUE）到期时刻恒 0——非"已到期"
+                // 信号，永不由到期清扫回收（一次性护栏、常驻值、循环屏障世代存续与
+                // 队列元素驻留语义各自承载；判例：原子变更对影子表无租约家族到期误扫的修复）。
                 continue;
             }
             if (en.getValue().expiresAtMs <= entryTimeMs) {
@@ -485,9 +613,49 @@ public final class ShadowTable {
                 }
                 continue;
             }
-            if (isAtomicType(l.lockType)) {
-                // 原子条目存续与一切会话无关：值不绑定归属，
-                // 会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
+            if (isAtomicFamily(l.lockType)) {
+                // 原子条目（含 v6 有值引用形态）存续与一切会话无关：值不绑定
+                // 归属，会话关闭不得扰动镜像（含空 holders 的"可回收"误判）。
+                continue;
+            }
+            if (isQueueType(l.lockType)) {
+                // 队列条目存续与一切会话无关：元素绑定 key 不绑定会话（投递者
+                // 死亡不吞元素），会话关闭不得扰动元素镜像；仅摘该会话的去重槽
+                // （引擎侧槽由条目 removeSession 收敛，此处为逻辑 id 镜像）。
+                java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState>
+                        remaining = l.queueSlots.stream()
+                        .filter(s -> s.sessionId() != sessionId).toList();
+                if (remaining.size() != l.queueSlots.size()) {
+                    l.queueSlots = remaining;
+                    adminView.put(en.getKey(), viewOf(l));
+                }
+                continue;
+            }
+            if (isPhaserType(l.lockType)) {
+                // v10：死亡镜像同步——该会话的配额行/槽行摘除与 registered 重算
+                // 与引擎 removeSession 同构（arrived 不回退——"已到场事实不撤销"；
+                // 换代窗槽行同摘，死者内部身份不留存）。相位推进的唤醒传播经
+                // applySessionClose 的 advancedPhasers 镜像刷新另行收口。
+                boolean touched = false;
+                for (PartyRef pr : l.phaserParties) {
+                    if (pr.sessionId() == sessionId) {
+                        l.phaserParties = l.phaserParties.stream()
+                                .filter(x -> x.sessionId() != sessionId).toList();
+                        l.phaserRegistered = Math.max(0, l.phaserRegistered - pr.parties());
+                        touched = true;
+                        break;
+                    }
+                }
+                int before = l.phaserArrivals.size();
+                l.phaserArrivals = l.phaserArrivals.stream()
+                        .filter(a -> a.sessionId() != sessionId).toList();
+                int beforePrev = l.phaserPrevArrivals.size();
+                l.phaserPrevArrivals = l.phaserPrevArrivals.stream()
+                        .filter(a -> a.sessionId() != sessionId).toList();
+                if (touched || l.phaserArrivals.size() != before
+                        || l.phaserPrevArrivals.size() != beforePrev) {
+                    adminView.put(en.getKey(), viewOf(l));
+                }
                 continue;
             }
             if (l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE) {
@@ -608,6 +776,78 @@ public final class ShadowTable {
                     lb.addBarrierCompletedArrivals(SnapshotBarrierArrival.newBuilder()
                             .setSessionId(a.sessionId()).setRequestId(a.requestId()));
                 }
+            } else if (isReferenceType(l.lockType)) {
+                // v6 引用条目：版本戳与去重槽骨架复用既有字段；载荷按显式
+                // presence 写入（null=字段缺省、零长度=EMPTY），标量值字段
+                // 恒缺省——序列化确定性由数组字节内容承载，跨副本可比。
+                lb.setAtomicVersion(l.atomicVersion)
+                        .setAtomicSlotSession(l.atomicSlotSession)
+                        .setAtomicSlotOpSeq(l.atomicSlotOpSeq)
+                        .setAtomicSlotApplied(l.atomicSlotApplied)
+                        .setAtomicSlotVersion(l.atomicSlotVersion);
+                if (l.refInitial != null) {
+                    lb.setAtomicRefInitial(com.google.protobuf.ByteString.copyFrom(l.refInitial));
+                }
+                if (l.refValue != null) {
+                    lb.setAtomicRefValue(com.google.protobuf.ByteString.copyFrom(l.refValue));
+                }
+                if (l.refSlotOldValue != null) {
+                    lb.setAtomicRefSlotOldValue(
+                            com.google.protobuf.ByteString.copyFrom(l.refSlotOldValue));
+                }
+                if (l.refSlotValue != null) {
+                    lb.setAtomicRefSlotValue(
+                            com.google.protobuf.ByteString.copyFrom(l.refSlotValue));
+                }
+            } else if (isQueueType(l.lockType)) {
+                // v7 队列条目：元素序列化序即队列序、槽表按会话升序——
+                // 确定性前提由镜像的导出序承载（与引擎 replicatedState 同序）。
+                lb.setQueueCapacity(l.queueCapacity);
+                for (var element : l.queueElements) {
+                    lb.addQueueElements(SnapshotQueueElement.newBuilder()
+                            .setPayload(com.google.protobuf.ByteString
+                                    .copyFrom(element.payload()))
+                            .setExpiresAtMs(element.expiresAtMs()));
+                }
+                for (var slot : l.queueSlots) {
+                    SnapshotQueueSlot.Builder sb = SnapshotQueueSlot.newBuilder()
+                            .setSessionId(slot.sessionId())
+                            .setOpSeq(slot.opSeq())
+                            .setOp(slot.op().ordinal());
+                    if (slot.element() != null) {
+                        sb.setElementBytes(com.google.protobuf.ByteString
+                                .copyFrom(slot.element()));
+                    }
+                    for (byte[] drainedElement : slot.drained()) {
+                        sb.addDrainedBytes(com.google.protobuf.ByteString
+                                .copyFrom(drainedElement));
+                    }
+                    lb.addQueueDedupSlots(sb);
+                }
+            } else if (isPhaserType(l.lockType)) {
+                // v10 相位器条目：账簿仅呈当前 (phase, registered, arrived,
+                // 配额, 在场槽, 换代窗)——相位历史零驻留（尺寸有界的序列化
+                // 面依据）；列表序即镜像的确定性导出序（与引擎 replicatedState
+                // 同序，digest 跨副本可比）。
+                lb.setPhaserPhase(l.phaserPhase).setPhaserRegistered(l.phaserRegistered)
+                        .setPhaserArrived(l.phaserArrived);
+                for (PartyRef party : l.phaserParties) {
+                    lb.addPhaserParties(SnapshotPhaserParty.newBuilder()
+                            .setSessionId(party.sessionId()).setParties(party.parties())
+                            .setLastRegisterRequestId(party.lastRegisterRequestId())
+                            .setLastRegisterPhase(party.lastRegisterPhase()));
+                }
+                for (ArrivalRef a : l.phaserArrivals) {
+                    lb.addPhaserArrivals(SnapshotPhaserArrival.newBuilder()
+                            .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                }
+                if (l.phaserPrevPhase >= 0) {
+                    lb.setPhaserPrevPhase(l.phaserPrevPhase);
+                    for (ArrivalRef a : l.phaserPrevArrivals) {
+                        lb.addPhaserPrevArrivals(SnapshotPhaserArrival.newBuilder()
+                                .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                    }
+                }
             } else if (isAtomicType(l.lockType)) {
                 // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
                 lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
@@ -654,6 +894,28 @@ public final class ShadowTable {
                 locks.put(l.getKey(), sl);
                 heldIndex.put(l.getKey(), new HeldRef(l.getLeaseToken(), l.getExpiresAtMs(),
                         Set.copyOf(sl.holders.keySet()), l.getLockTypeValue()));
+            } else if (isReferenceType(l.getLockTypeValue())) {
+                // v6 引用条目装载：载荷两态按 presence 还原（缺省=null、
+                // EMPTY=零长度——槽占用与否由 slotOpSeq 骨架判定），常驻条目
+                // 不入 heldIndex。
+                sl.atomicVersion = l.getAtomicVersion();
+                sl.atomicSlotSession = l.getAtomicSlotSession();
+                sl.atomicSlotOpSeq = l.getAtomicSlotOpSeq();
+                sl.atomicSlotApplied = l.getAtomicSlotApplied();
+                sl.atomicSlotVersion = l.getAtomicSlotVersion();
+                if (l.hasAtomicRefInitial()) {
+                    sl.refInitial = l.getAtomicRefInitial().toByteArray();
+                }
+                if (l.hasAtomicRefValue()) {
+                    sl.refValue = l.getAtomicRefValue().toByteArray();
+                }
+                if (l.hasAtomicRefSlotOldValue()) {
+                    sl.refSlotOldValue = l.getAtomicRefSlotOldValue().toByteArray();
+                }
+                if (l.hasAtomicRefSlotValue()) {
+                    sl.refSlotValue = l.getAtomicRefSlotValue().toByteArray();
+                }
+                locks.put(l.getKey(), sl);
             } else if (isAtomicType(l.getLockTypeValue())) {
                 sl.atomicInitial = l.getAtomicInitial();
                 sl.atomicValue = l.getAtomicValue();
@@ -679,6 +941,60 @@ public final class ShadowTable {
                         .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
                 sl.barrierCompletedExecutor = l.getBarrierCompletedExecutor();
                 // 常驻条目：不入 heldIndex（无持有语义），仅入表与观察视图。
+                locks.put(l.getKey(), sl);
+            } else if (isQueueType(l.getLockTypeValue())) {
+                // v7 队列条目装载：元素与槽按快照序原样还原（载荷/到期不解释、
+                // 尺寸不校验——钳制属接入层判例）；常驻条目不入 heldIndex。
+                sl.queueCapacity = l.getQueueCapacity();
+                java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.ElementState>
+                        elements = new java.util.ArrayList<>(l.getQueueElementsCount());
+                for (SnapshotQueueElement element : l.getQueueElementsList()) {
+                    elements.add(new io.github.lamspace.openlatch.core.lock
+                            .QueueEntry.ElementState(element.getPayload().toByteArray(),
+                            element.getExpiresAtMs()));
+                }
+                sl.queueElements = java.util.List.copyOf(elements);
+                java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState>
+                        slots = new java.util.ArrayList<>(l.getQueueDedupSlotsCount());
+                for (SnapshotQueueSlot slot : l.getQueueDedupSlotsList()) {
+                    java.util.List<byte[]> drained =
+                            new java.util.ArrayList<>(slot.getDrainedBytesCount());
+                    for (com.google.protobuf.ByteString drainedBytes : slot.getDrainedBytesList()) {
+                        drained.add(drainedBytes.toByteArray());
+                    }
+                    // 交付语义按 op 判别（1=TAKE 恒有元素，零长度=空串元素；
+                    // 其余形态回 null——element_bytes 为裸 bytes）。
+                    slots.add(new io.github.lamspace.openlatch.core.lock
+                            .QueueEntry.SlotState(slot.getSessionId(), slot.getOpSeq(),
+                            io.github.lamspace.openlatch.core.QueueOpType.values()[slot.getOp()],
+                            slot.getOp() == 1 ? slot.getElementBytes().toByteArray() : null,
+                            drained));
+                }
+                sl.queueSlots = java.util.List.copyOf(slots);
+                sl.queueDepth = sl.queueElements.size();
+                var head = sl.queueElements.isEmpty() ? null : sl.queueElements.get(0);
+                sl.queueHeadExpiryMs = head == null ? 0 : head.expiresAtMs();
+                sl.queueHeadPayload = head == null ? null : head.payload().clone();
+                long sum = 0;
+                for (var element : sl.queueElements) {
+                    sum += element.payload().length;
+                }
+                sl.queueTotalPayloadBytes = sum;
+                locks.put(l.getKey(), sl);
+            } else if (isPhaserType(l.getLockTypeValue())) {
+                // v10 相位器条目装载：账簿原样还原（常驻条目不入 heldIndex）。
+                sl.phaserPhase = l.getPhaserPhase();
+                sl.phaserRegistered = l.getPhaserRegistered();
+                sl.phaserArrived = l.getPhaserArrived();
+                sl.phaserParties = l.getPhaserPartiesList().stream()
+                        .map(pt -> new PartyRef(pt.getSessionId(), pt.getParties(),
+                                pt.getLastRegisterRequestId(), pt.getLastRegisterPhase()))
+                        .toList();
+                sl.phaserArrivals = l.getPhaserArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
+                sl.phaserPrevPhase = l.hasPhaserPrevPhase() ? l.getPhaserPrevPhase() : -1L;
+                sl.phaserPrevArrivals = l.getPhaserPrevArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
                 locks.put(l.getKey(), sl);
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
                 sl.latchTotal = l.getLatchTotal();
@@ -787,10 +1103,240 @@ public final class ShadowTable {
     }
 
     /**
-     * 协议 {@code LockType} 数值是否原子形态（7/8/9，含装载态）。
+     * v10：协议数值是否为 PHASER 家族。
+     *
+     * @param lockTypeValue 协议 {@code LockType} 数值
+     * @return PHASER 家族为 {@code true}
+     */
+    public static boolean isPhaserType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_PHASER_VALUE;
+    }
+
+    /**
+     * v10：指定 key 是否镜像为相位器条目（受理预检家族判定用）。
+     *
+     * @param key 相位器键
+     * @return 镜像存在且为 PHASER 家族为 {@code true}
+     */
+    public boolean isPhaser(String key) {
+        SLock l = locks.get(key);
+        return l != null && isPhaserType(l.lockType);
+    }
+
+    /**
+     * v10：相位器账簿镜像整体刷新（判例 {@link #barrierMirror}——账簿以引擎
+     * {@code replicatedState} 导出为权威形整体重发布，观察读数与换代窗口随
+     * 镜像存续；条目不存在时按镜像建条目（引擎建条目应用点先行于本调用）。
+     * 家族不符零扰动。
+     *
+     * @param key 相位器键
+     * @param d   引擎导出的逻辑 id 镜像数据
+     */
+    public void phaserMirror(String key, PhaserMirrorData d) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            l = new SLock(LockType.LOCK_TYPE_PHASER_VALUE, 0, 0, 0);
+            locks.put(key, l);
+        }
+        if (!isPhaserType(l.lockType)) {
+            return;
+        }
+        l.phaserPhase = d.phase();
+        l.phaserRegistered = d.registered();
+        l.phaserArrived = d.arrived();
+        l.phaserParties = List.copyOf(d.parties());
+        l.phaserArrivals = List.copyOf(d.arrivals());
+        l.phaserPrevPhase = d.prevPhase();
+        l.phaserPrevArrivals = List.copyOf(d.prevArrivals());
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * v10：抓取时刻单键注册 party 峰值（{@code phaser.parties.registered.max}
+     * 集群口径，镜像弱一致遍历、纯读零扰动）。
+     *
+     * @return 各 phaser 条目注册总数的最大值；无条目为 0
+     */
+    public int phaserRegisteredMax() {
+        int max = 0;
+        for (AdminEntryView v : adminView.values()) {
+            if (isPhaserType(v.lockType()) && v.phaserRegistered() > max) {
+                max = v.phaserRegistered();
+            }
+        }
+        return max;
+    }
+
+    /**
+     * key 是否队列家族条目（v7，两形态皆真）。
+     *
+     * @param key 锁键
+     * @return 队列家族为 {@code true}
+     */
+    public boolean isQueue(String key) {
+        SLock l = locks.get(key);
+        return l != null && isQueueType(l.lockType);
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否队列家族形态（12/13）。
+     *
+     * @param lockTypeValue 协议枚举数值
+     * @return 队列家族为 {@code true}
+     */
+    public static boolean isQueueType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_QUEUE_VALUE
+                || lockTypeValue == LockType.LOCK_TYPE_DELAY_QUEUE_VALUE;
+    }
+
+    /**
+     * 队列条目定型容量读数（Leader 预检与观察共用；非队列或缺席回 0）。
+     *
+     * @param key 锁键
+     * @return 容量读数，缺省 0
+     */
+    public long queueCapacity(String key) {
+        SLock l = locks.get(key);
+        return l == null ? 0 : l.queueCapacity;
+    }
+
+    /**
+     * 队列条目当前深度读数（驻留口径；非队列或缺席回 0）。
+     *
+     * @param key 锁键
+     * @return 深度读数，缺省 0
+     */
+    public int queueDepth(String key) {
+        SLock l = locks.get(key);
+        return l == null ? 0 : l.queueDepth;
+    }
+
+    /**
+     * 队列条目队首元素绝对到期时刻读数（条目时刻口径——Leader 预检与
+     * 就绪扫描的比较基准；非 DELAY 形态、空队或缺席回 0）。
+     *
+     * @param key 锁键
+     * @return 到期时刻读数，缺省 0
+     */
+    public long queueHeadExpiryMs(String key) {
+        SLock l = locks.get(key);
+        return l == null ? 0 : l.queueHeadExpiryMs;
+    }
+
+    /**
+     * 队列元素镜像刷新（v7，QUEUE_OP_ENTRY 的 OK 落点）：元素全列表取自
+     * 引擎复制态导出（{@code CoreEngine.queueReplicatedState}），深度/队首
+     * 到期/驻留字节/首元素预览读数由其派生；去重槽表不在此动（引擎侧为
+     * 内部 sid，MUST NOT 出节点——槽以逻辑会话 id 镜像，见
+     * {@link #queueSlotApplied}）。形态不符零扰动（判例 {@link #atomicApplied}
+     * 的定型不符口径）；DENIED/回弹路径 MUST NOT 经本方法（零迁移条目无
+     * 镜像变更）。
+     *
+     * @param key       队列键
+     * @param kindValue 协议形态数值（12/13）
+     * @param capacity  定型容量（引擎读数）
+     * @param elements  元素列表（队列序）
+     */
+    public void queueApplied(String key, int kindValue, long capacity,
+            java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.ElementState> elements) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            l = new SLock(kindValue, 0, 0, 0);
+            locks.put(key, l);
+        }
+        if (!isQueueType(l.lockType) || l.lockType != kindValue) {
+            // 镜像定型与命令形态不符（引擎已回互拒）：零扰动、不重发布。
+            return;
+        }
+        l.queueCapacity = capacity;
+        l.queueElements = List.copyOf(elements);
+        refreshQueueDerived(key, l);
+    }
+
+    /**
+     * 队列去重槽镜像（v7，写类 op 的 OK 落点紧随 {@link #queueApplied}）：
+     * 以<b>逻辑会话 id</b> 记该会话最近一次已应用写及其交付回执（引擎内部
+     * sid 不出节点的纪律，判例 {@code atomicApplied} 的槽会话逻辑 id 口径）；
+     * 同会话覆盖、按会话升序保持确定性导出序。读类 op（PEEK/SIZE）MUST NOT
+     * 经本方法（不参与去重）。
+     *
+     * @param key            队列键
+     * @param slotSession    槽主逻辑会话 id
+     * @param slotOpOrdinal  槽 op 序号（0=PUT/1=TAKE/2=DRAIN）
+     * @param slotOpSeq      槽内写序号
+     * @param slotElement    TAKE 交付字节（其余形态 {@code null}）
+     * @param slotDrained    DRAIN 交付列表（其余形态空表）
+     */
+    public void queueSlotApplied(String key, long slotSession, int slotOpOrdinal,
+            long slotOpSeq, byte[] slotElement, java.util.List<byte[]> slotDrained) {
+        SLock l = locks.get(key);
+        if (l == null || !isQueueType(l.lockType)) {
+            return;
+        }
+        java.util.List<io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState> next =
+                new java.util.ArrayList<>(l.queueSlots.size() + 1);
+        for (var slot : l.queueSlots) {
+            if (slot.sessionId() != slotSession) {
+                next.add(slot);
+            }
+        }
+        next.add(new io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState(
+                slotSession, slotOpSeq,
+                io.github.lamspace.openlatch.core.QueueOpType.values()[slotOpOrdinal],
+                slotElement, slotDrained));
+        next.sort(java.util.Comparator.comparingLong(
+                io.github.lamspace.openlatch.core.lock.QueueEntry.SlotState::sessionId));
+        l.queueSlots = List.copyOf(next);
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 队列派生读数刷新（深度/队首到期/首元素预览/驻留字节）并重发布观察视图。
+     *
+     * @param key 队列键
+     * @param l   队列镜像条目
+     */
+    private void refreshQueueDerived(String key, SLock l) {
+        l.queueDepth = l.queueElements.size();
+        var head = l.queueElements.isEmpty() ? null : l.queueElements.get(0);
+        l.queueHeadExpiryMs = head == null ? 0 : head.expiresAtMs();
+        l.queueHeadPayload = head == null ? null : head.payload().clone();
+        long sum = 0;
+        for (var element : l.queueElements) {
+            sum += element.payload().length;
+        }
+        l.queueTotalPayloadBytes = sum;
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否有值引用形态（11，含装载态）。
      *
      * @param lockTypeValue 协议数值
-     * @return 原子形态为 {@code true}
+     * @return 有值引用形态为 {@code true}
+     */
+    public static boolean isReferenceType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_ATOMIC_REFERENCE_VALUE;
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否 ATOMIC 家族（标量 7/8/9 与有值引用 11，
+     * 含装载态）。家族级判定（无持有语义、会话无关、不入到期清扫）一律
+     * 用本方法；形态级序列化分支仍用 {@link #isAtomicType(int)} 与
+     * {@link #isReferenceType(int)}。
+     *
+     * @param lockTypeValue 协议数值
+     * @return ATOMIC 家族为 {@code true}
+     */
+    public static boolean isAtomicFamily(int lockTypeValue) {
+        return isAtomicType(lockTypeValue) || isReferenceType(lockTypeValue);
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否标量原子形态（7/8/9，含装载态）。
+     *
+     * @param lockTypeValue 协议数值
+     * @return 标量原子形态为 {@code true}
      */
     public static boolean isAtomicType(int lockTypeValue) {
         return lockTypeValue == LockType.LOCK_TYPE_ATOMIC_LONG_VALUE
@@ -841,6 +1387,57 @@ public final class ShadowTable {
             l.atomicSlotApplied = applied;
             l.atomicSlotOldValue = oldValue;
             l.atomicSlotValue = value;
+            l.atomicSlotVersion = version;
+        }
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * 有值引用原子操作应用点镜像（v6，ATOMIC_OP_ENTRY 引用形态的 GRANTED
+     * 落点）：与 {@link #atomicApplied} 同构，值域换载荷——条目不存在且本条
+     * 为写操作时按 {@code initialClaim}（{@code null}=无主张）镜像创建引用
+     * 条目；写操作刷新载荷/版本戳并覆盖去重槽（含 {@code applied=false} 的
+     * CAS 未命中——槽内载荷字节随镜像存续，快照与追赶据此复原）。GET 与
+     * 形态不符（引擎已回互拒）零扰动、不重发布。
+     *
+     * <p><b>载荷所有权</b>：{@code value}/{@code oldValue}/{@code initialClaim}
+     * 数组按引用存储（应用线程内构造、迁移以引用替换），镜像与视图只读；
+     * null 与零长度两态原样保留。
+     *
+     * @param key          有值引用键
+     * @param kindValue    请求携带的协议形态数值（恒 11，建镜像条目定型用）
+     * @param sessionId    逻辑会话 id（槽记录）
+     * @param opSeq        请求 op_seq（0=不参与去重，槽不更新）
+     * @param initialClaim 初值主张载荷（{@code null}=无主张）
+     * @param get          本条是否 GET 条目（零迁移，镜像不创建不刷新）
+     * @param applied      载荷应答四元组 applied
+     * @param oldValue     载荷应答 oldValue（可为 null）
+     * @param value        载荷应答 value（可为 null）
+     * @param version      应答 version
+     */
+    public void atomicRefApplied(String key, int kindValue, long sessionId, long opSeq,
+                                 byte[] initialClaim, boolean get, boolean applied,
+                                 byte[] oldValue, byte[] value, long version) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            if (get) {
+                return; // GET 且条目缺席：引擎未建条目，镜像同样零扰动
+            }
+            l = new SLock(kindValue, 0, 0, 0);
+            l.refInitial = initialClaim;
+            locks.put(key, l);
+        }
+        if (get || l.lockType != kindValue) {
+            return; // GET 零迁移；形态与镜像定型不符——零扰动
+        }
+        l.refValue = value;
+        l.atomicVersion = version;
+        if (opSeq >= 1) {
+            l.atomicSlotSession = sessionId;
+            l.atomicSlotOpSeq = opSeq;
+            l.atomicSlotApplied = applied;
+            l.refSlotOldValue = oldValue;
+            l.refSlotValue = value;
             l.atomicSlotVersion = version;
         }
         adminView.put(key, viewOf(l));
@@ -937,6 +1534,32 @@ public final class ShadowTable {
 
     /**
      * 按家族聚合的持有中条目数（gauge 指标读数）：弱一致遍历无锁
+     * 投影 {@code heldIndex}（并发读取口径与本类线程模型注释一致——结果
+     * 可旧不可错），SEMAPHORE 家族按 {@code lockType} 归组、其余投影条目
+     * 归锁家族；LATCH 无持有语义、恒不入投影，天然排除。
+     *
+     * @return 长度为 2 的数组：{@code [0]} 锁家族条目数、{@code [1]} Semaphore 家族条目数
+     */
+    /**
+     * 队列元素深度观察读数（v7，{@code elements.depth.max} gauge 抓取口径）：
+     * 全部队列 key 的当前元素数最大值（驻留口径，延时形态含未到期项）。
+     * 读整体重发布的 {@code adminView} 投影（跨线程弱一致，"结果可旧不可错"），
+     * MUST NOT 用于任何裁决路径。
+     *
+     * @return 单键最大元素深度；无队列返回 0
+     */
+    public int maxElementsDepth() {
+        int max = 0;
+        for (AdminEntryView v : adminView.values()) {
+            if (isQueueType(v.lockType()) && v.queueDepth() > max) {
+                max = v.queueDepth();
+            }
+        }
+        return max;
+    }
+
+    /**
+     * 持有家族计数（{@code locks.held} gauge 两线读数）：
      * 投影 {@code heldIndex}（并发读取口径与本类线程模型注释一致——结果
      * 可旧不可错），SEMAPHORE 家族按 {@code lockType} 归组、其余投影条目
      * 归锁家族；LATCH 无持有语义、恒不入投影，天然排除。

@@ -15,6 +15,8 @@ enum RaftEntryType
   BARRIER_AWAIT_ENTRY 10
   BARRIER_LEAVE_ENTRY 11
   BARRIER_ACTION_DONE_ENTRY 12
+  QUEUE_OP_ENTRY 13
+  PHASER_OP_ENTRY 14
 enum ApplyStatus
   APPLY_STATUS_UNKNOWN 0
   OK 1
@@ -61,6 +63,14 @@ message BarrierLeavePayload
 message BarrierActionDonePayload
   session_id 1
   request 2
+message QueueOpPayload
+  session_id 1
+  request_id 2
+  request 3
+message PhaserOpPayload
+  session_id 1
+  request_id 2
+  request 3
 message ExpirePayload
   key 1
   lease_token 2
@@ -82,6 +92,15 @@ message ApplyResult
   barrier_parties 15
   barrier_settled 16
   barrier_released_keys 17
+  atomic_old_value_bytes 18
+  atomic_value_bytes 19
+  queue_element_bytes 20
+  queue_drained_bytes 21
+  queue_size 22
+  phaser_phase 23
+  phaser_registered 24
+  phaser_arrived 25
+  phaser_advanced_keys 26
 message SnapshotHolder
   session_id 1
   thread_id 2
@@ -114,6 +133,37 @@ message SnapshotLock
   barrier_completed_result 25
   barrier_completed_arrivals 26
   barrier_completed_executor 27
+  atomic_ref_initial 28
+  atomic_ref_value 29
+  atomic_ref_slot_old_value 30
+  atomic_ref_slot_value 31
+  queue_capacity 32
+  queue_elements 33
+  queue_dedup_slots 34
+  phaser_phase 35
+  phaser_registered 36
+  phaser_arrived 37
+  phaser_parties 38
+  phaser_arrivals 39
+  phaser_prev_phase 40
+  phaser_prev_arrivals 41
+message SnapshotPhaserParty
+  session_id 1
+  parties 2
+  last_register_request_id 3
+  last_register_phase 4
+message SnapshotPhaserArrival
+  session_id 1
+  request_id 2
+message SnapshotQueueElement
+  payload 1
+  expires_at_ms 2
+message SnapshotQueueSlot
+  session_id 1
+  op_seq 2
+  op 3
+  element_bytes 4
+  drained_bytes 5
 message SnapshotBarrierArrival
   session_id 1
   request_id 2

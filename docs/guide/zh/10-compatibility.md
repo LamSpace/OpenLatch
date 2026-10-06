@@ -7,7 +7,7 @@
 | Java 运行时/编译 | **25**（唯一档位） | 全部构件以 `release=25` 编译；17/21 无法加载 |
 | Spring Boot starter | **4.x** | 依赖 Boot 4 独有构件，Boot 3.x 不兼容；Boot 3 工程手动装配 SDK（[03](03-client-sdk.md)） |
 | Spring Framework | 随 Boot 4（Framework 7） | starter 仅面向 Boot 4 应用上下文 |
-| 线路协议 | 服务端接受 **v1 / v2 / v3 / v4 / v5**（HELLO 协商，支持区间 [1,5]） | 区间外拒绝，不做隐式兼容 |
+| 线路协议 | 服务端接受 **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10**（HELLO 协商，支持区间 [1,10]） | 区间外拒绝，不做隐式兼容 |
 | Micrometer | 宿主自备（不传递） | 注入 `MeterRegistry` 即启用客户端指标 |
 | 构件分发 | 客户端 SDK 链路（`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`）发布 Maven Central（1.0.0+）；服务端与控制台可执行 jar 发布于 GitHub Releases | 客户端按坐标直接引入；服务端/控制台从 Releases 下载或本地构建 |
 
@@ -20,9 +20,14 @@
 | v3 | 扩展原语（公平锁/信号量/屏障）、`ADMIN_*` 只读观察、字段形态收紧 |
 | v4 | 原子变量（`OAtomicLong`/`OAtomicInteger`/`OAtomicBoolean`）：`ATOMIC_OP` 消息对、每 key 版本戳与去重槽 |
 | v5 | 循环屏障（`OBarrier`）：`BARRIER_AWAIT`/`BARRIER_LEAVE`/`BARRIER_ACTION_DONE` 消息对、世代账簿复制、离场即破障 |
+| v6 | 有值引用（`OAtomicReference`）：ATOMIC 消息对 `optional bytes` 载荷字段（无新 `MessageType`）、`maxValueBytes` 入口钳制、载荷快照/预览 |
+| v7 | 有界队列（`OBlockingQueue`）与延时队列（`ODelayQueue`）：`QUEUE_OP` 消息对、`LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` 形态、每会话去重槽、双"满"分轨、容量/drain 入口钳制、延时应用点折算、队列快照字段 |
+| v8 | 广播发布/订阅（`OTopic`）：`TOPIC_OP` 消息对与 `TOPIC_MESSAGE` 推送、`REJECT_SUBSCRIBERS` 在带裁决、弱背压 drop-newest 两级缓冲、每会话去重槽（受理点）、**零复制日志/零快照贡献**（首个零持久态原语）、`max-subscribers-per-key`/`max-subscription-buffer` 入口钳制 |
+| v9 | 条件变量（`OCondition`）：`CONDITION_OP` 消息对（SIGNAL/SIGNAL_ALL/LEAVE 三操作，**AWAIT 不在词表内**——await 以 `AcquireRequest` 的 `optional condition` presence 折叠进 ACQUIRE 闭环）、signal 家族零日志/等待集零快照足迹、`StatusCode`/`LockType`/`RaftEntryType` 三词表零新增、等待人数并入 `max-queue-depth-per-key` 合并护栏（零新配置） |
+| v10 | 相位器（`OPhaser`）：`PHASER_OP` 单消息对（REGISTER/ARRIVE/ARRIVE_AND_AWAIT/ARRIVE_AND_DEREGISTER/AWAIT_ADVANCE/CANCEL/QUERY 七操作，到场与等待解耦）、**变异全入日志**（`PHASER_OP_ENTRY=14` 逐条经提交，等待/取消/查询零日志）、换代窗口与每会话注册幂等槽、死亡隐式摘除配额且不撤销已到场事实（不空转）、等待谓词跨换主自愈（对照条件 signal 丢失窗）、三 Non-Goal（onAdvance 钩子/终止态/父子分层派生均不做）、`max-parties-per-phaser`（默认 1024）新增护栏、`StatusCode` 零新增（两超限骑 `OVERLOADED` 以 op 分轨）、相位号 long |
 
 混布规则：**服务端版本 ≥ 客户端版本**。旧客户端（v1/v2）连新服务端完全可用；
-新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 =5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；服务端升级后旧客户端（v≤4）行为逐项不变。
+新客户端连旧服务端在握手即拒（显式失败优先于行为降级）。v4 原子能力要求服务端 ≥4；v5 屏障能力要求服务端 ≥5（v≤4 会话发 `BARRIER_*` 得 `INVALID_REQUEST` 消息级拒绝、不断连）；v6 有值引用要求服务端 ≥6（v≤5 会话发引用形态 `ATOMIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，标量原子不受波及）；v7 队列要求服务端 ≥7（v≤6 会话发 `QUEUE_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；v8 topic 要求服务端 ≥8（v≤7 会话发 `TOPIC_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；v9 条件要求服务端 ≥9（v≤8 会话发 `CONDITION_OP` 或携带 `condition` 字段的 ACQUIRE 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；v10 相位器要求服务端 ≥10（v≤9 会话发 `PHASER_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连，其余原语不受波及）；服务端升级后旧客户端（v≤9）行为逐项不变。
 
 ## 升级与回滚顺序
 
@@ -37,4 +42,4 @@
 ## 数据兼容
 
 Raft 日志与快照格式在 1.x 系列内向后兼容（新二进制可读旧目录）；
-**反向不成立**——一旦产出新快照/截断，旧二进制不可再挂载该 `data-dir`（见 [05 回滚](05-cluster-deployment.md)）；v4 快照含原子条目、v5 快照含循环屏障条目（世代/账簿）后，回滚到旧二进制同样被此规则覆盖（回滚前先确认业务未写入对应 key，或接受屏障世代重置）。
+**反向不成立**——一旦产出新快照/截断，旧二进制不可再挂载该 `data-dir`（见 [05 回滚](05-cluster-deployment.md)）；v4 快照含原子条目、v5 快照含循环屏障条目（世代/账簿）、v6 快照含引用载荷字段（`atomic_ref_*`）后，回滚到旧二进制同样被此规则覆盖（回滚前先确认业务未写入对应 key，或接受屏障世代重置/引用载荷驻留）。**v8 topic 不受此规则约束**：topic 不产出任何日志条目与快照字段（零持久态，有快照零增量与日志零条目双向守卫回归钉死），回滚窗口与 topic 流量无关（见 [05 v8 回滚窗口](05-cluster-deployment.md)）。**v9 条件同样不产生新的持久格式**：等待集为进程易失、快照无条件专属字段（`SnapshotLock` v9 零扩展）、signal 家族零条目，await 仅骑既有 `LOCK_ACQUIRE_ENTRY`——回滚窗口**无 key 可清**，唯一约束是活跃 v9 会话收敛（区间外握手即拒，属既有纪律的显形；与队列"回滚前清 key"、topic"天然干净"三行并列、口径互不混读，见 [05 v9 回滚窗口](05-cluster-deployment.md)）。**v10 相位器受反向规则约束（屏障/队列同型，第四口径）**：账簿逐条入日志并写快照字段（`phaser_*`、条目类型 14 号），降级前确认无在途 phaser 流量或接受 phaser key 在旧二进制不可用；无可"排空"的驻留数据，前置动作仅在途清零（与 topic/condition"天然干净"并列、互不混读，见 [05 v10 回滚窗口](05-cluster-deployment.md)）。

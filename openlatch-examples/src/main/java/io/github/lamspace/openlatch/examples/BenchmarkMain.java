@@ -29,7 +29,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.lamspace.openlatch.client.OAtomicLong;
+import io.github.lamspace.openlatch.client.OAtomicReference;
 import io.github.lamspace.openlatch.client.OBarrier;
+import io.github.lamspace.openlatch.client.OBlockingQueue;
+import io.github.lamspace.openlatch.client.ODelayQueue;
+import io.github.lamspace.openlatch.client.OCondition;
+import io.github.lamspace.openlatch.client.OPhaser;
+import io.github.lamspace.openlatch.client.OLock;
+import io.github.lamspace.openlatch.client.OTopic;
+import io.github.lamspace.openlatch.client.OTopicSubscription;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OpenLatchClient;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
@@ -64,6 +72,15 @@ public final class BenchmarkMain {
     private static final int[] ATOMIC_CAS_LEVELS = {16};
     /** 循环屏障合拢档位（parties = 会合线程数）。 */
     private static final int[] BARRIER_LEVELS = {2, 4};
+
+    /** 队列扇出相的消费者线程数（v7）。 */
+    private static final int QUEUE_FANOUT_CONSUMERS = 8;
+    /** 队列扇出相每轮流水元素数（v7）。 */
+    private static final int QUEUE_FANOUT_ITEMS = 256;
+    /** 队列 drain 相的每轮批量（v7）。 */
+    private static final int QUEUE_DRAIN_BATCH = 32;
+    /** topic 扇出相订阅者连接数（v8，独立会话订阅同键）。 */
+    private static final int TOPIC_FANOUT_SUBSCRIBERS = 8;
 
     /**
      * 私有构造：入口类。
@@ -115,6 +132,64 @@ public final class BenchmarkMain {
             for (int level : ATOMIC_CAS_LEVELS) {
                 runAtomicCasContended(client, level, WARMUP_MS);
             }
+            // 引用相（v6）：小载荷/恰限 4KB 写、读 RTT、版本 CAS 争用——热身。
+            byte[] refSmall = "bench-ref-16B-payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] refExact = new byte[4096];
+            for (int i = 0; i < refExact.length; i++) {
+                refExact[i] = (byte) (i * 7 + 1);
+            }
+            runRefSet(client, refSmall, WARMUP_MS);
+            runRefSet(client, refExact, WARMUP_MS);
+            runRefGet(client, WARMUP_MS);
+            for (int level : ATOMIC_CAS_LEVELS) {
+                runRefCasContended(client, level, WARMUP_MS);
+            }
+            // 队列相（v7）热身：配对交接、8 消费扇出、批量 drain、延时到期。
+            runQueueHandoff(client, WARMUP_MS / 2);
+            runQueueFanout(client, QUEUE_FANOUT_CONSUMERS, QUEUE_FANOUT_ITEMS,
+                    WARMUP_MS / 2);
+            runQueueDrain(client, WARMUP_MS / 2);
+            runQueueDelay(client, WARMUP_MS / 2);
+            // topic 相（v8）热身：发布受理 RTT（零订阅）与 1×8 扇出交付。
+            runTopicPublish(client, WARMUP_MS / 2);
+            runTopicFanout(client, server.port(), TOPIC_FANOUT_SUBSCRIBERS, WARMUP_MS / 2);
+            // 条件相（v9）热身：signal 受理 RTT（空集）与 await/signal 乒乓交接。
+            runConditionSignal(client, WARMUP_MS / 2);
+            runConditionHandoff(client, server.port(), WARMUP_MS / 2);
+            // phaser 相（v10）热身：单发到场与两方按相位会合。
+            runPhaserArrive(client, WARMUP_MS / 2);
+            runPhaserTrip(client, server.port(), WARMUP_MS / 2);
+            List<long[]> queueHandoffThroughput = new ArrayList<>();
+            List<double[]> queueHandoffLatencies = new ArrayList<>();
+            List<long[]> queueFanoutThroughput = new ArrayList<>();
+            List<double[]> queueFanoutLatencies = new ArrayList<>();
+            List<long[]> queueDrainThroughput = new ArrayList<>();
+            List<double[]> queueDrainLatencies = new ArrayList<>();
+            List<double[]> queueDelayOvershoot = new ArrayList<>();
+            List<long[]> topicPublishThroughput = new ArrayList<>();
+            List<double[]> topicPublishLatencies = new ArrayList<>();
+            List<long[]> topicFanoutThroughput = new ArrayList<>();
+            List<double[]> topicFanoutLatencies = new ArrayList<>();
+            List<long[]> conditionSignalThroughput = new ArrayList<>();
+            List<double[]> conditionSignalLatencies = new ArrayList<>();
+            List<long[]> conditionHandoffThroughput = new ArrayList<>();
+            List<double[]> conditionHandoffLatencies = new ArrayList<>();
+            List<long[]> phaserArriveThroughput = new ArrayList<>();
+            List<double[]> phaserArriveLatencies = new ArrayList<>();
+            List<long[]> phaserTripThroughput = new ArrayList<>();
+            List<double[]> phaserTripLatencies = new ArrayList<>();
+            List<long[]> refSmallThroughput = new ArrayList<>();
+            List<double[]> refSmallLatencies = new ArrayList<>();
+            List<long[]> refBigThroughput = new ArrayList<>();
+            List<double[]> refBigLatencies = new ArrayList<>();
+            List<long[]> refGetThroughput = new ArrayList<>();
+            List<double[]> refGetLatencies = new ArrayList<>();
+            List<List<long[]>> refCasThroughput = new ArrayList<>();
+            List<List<double[]>> refCasLatencies = new ArrayList<>();
+            for (int level : ATOMIC_CAS_LEVELS) {
+                refCasThroughput.add(new ArrayList<>());
+                refCasLatencies.add(new ArrayList<>());
+            }
             List<long[]> addThroughput = new ArrayList<>();
             List<double[]> addLatencies = new ArrayList<>();
             List<long[]> getThroughput = new ArrayList<>();
@@ -161,11 +236,70 @@ public final class BenchmarkMain {
                         "bench:barrier:act:" + b, SAMPLE_MS);
                 actionThroughput.add(new long[] {ba.opsPerSec});
                 actionLatencies.add(ba.latencies);
+                // 引用相采样：小/恰限写、读、版本 CAS 争用。
+                Result rs = runRefSet(client, refSmall, SAMPLE_MS);
+                refSmallThroughput.add(new long[] {rs.opsPerSec});
+                refSmallLatencies.add(rs.latencies);
+                Result rb = runRefSet(client, refExact, SAMPLE_MS);
+                refBigThroughput.add(new long[] {rb.opsPerSec});
+                refBigLatencies.add(rb.latencies);
+                Result rg = runRefGet(client, SAMPLE_MS);
+                refGetThroughput.add(new long[] {rg.opsPerSec});
+                refGetLatencies.add(rg.latencies);
+                for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+                    Result rr = runRefCasContended(client, ATOMIC_CAS_LEVELS[i], SAMPLE_MS);
+                    refCasThroughput.get(i).add(new long[] {rr.opsPerSec});
+                    refCasLatencies.get(i).add(rr.latencies);
+                }
+                // 队列相采样（v7）。
+                Result qh = runQueueHandoff(client, SAMPLE_MS);
+                queueHandoffThroughput.add(new long[] {qh.opsPerSec});
+                queueHandoffLatencies.add(qh.latencies);
+                Result qf = runQueueFanout(client, QUEUE_FANOUT_CONSUMERS,
+                        QUEUE_FANOUT_ITEMS, SAMPLE_MS);
+                queueFanoutThroughput.add(new long[] {qf.opsPerSec});
+                queueFanoutLatencies.add(qf.latencies);
+                Result qd = runQueueDrain(client, SAMPLE_MS);
+                queueDrainThroughput.add(new long[] {qd.opsPerSec});
+                queueDrainLatencies.add(qd.latencies);
+                Result qy = runQueueDelay(client, SAMPLE_MS);
+                queueDelayOvershoot.add(qy.latencies);
+                Result tp = runTopicPublish(client, SAMPLE_MS);
+                topicPublishThroughput.add(new long[] {tp.opsPerSec});
+                topicPublishLatencies.add(tp.latencies);
+                Result tf = runTopicFanout(client, server.port(),
+                        TOPIC_FANOUT_SUBSCRIBERS, SAMPLE_MS);
+                topicFanoutThroughput.add(new long[] {tf.opsPerSec});
+                topicFanoutLatencies.add(tf.latencies);
+                Result cs = runConditionSignal(client, SAMPLE_MS);
+                conditionSignalThroughput.add(new long[] {cs.opsPerSec});
+                conditionSignalLatencies.add(cs.latencies);
+                Result ch = runConditionHandoff(client, server.port(), SAMPLE_MS);
+                conditionHandoffThroughput.add(new long[] {ch.opsPerSec});
+                conditionHandoffLatencies.add(ch.latencies);
+                Result pa = runPhaserArrive(client, SAMPLE_MS);
+                phaserArriveThroughput.add(new long[] {pa.opsPerSec});
+                phaserArriveLatencies.add(pa.latencies);
+                Result pt = runPhaserTrip(client, server.port(), SAMPLE_MS);
+                phaserTripThroughput.add(new long[] {pt.opsPerSec});
+                phaserTripLatencies.add(pt.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
                     getThroughput, getLatencies, casThroughput, casLatencies,
-                    barrierThroughput, barrierLatencies, actionThroughput, actionLatencies);
+                    barrierThroughput, barrierLatencies, actionThroughput, actionLatencies,
+                    refSmallThroughput, refSmallLatencies, refBigThroughput, refBigLatencies,
+                    refGetThroughput, refGetLatencies, refCasThroughput, refCasLatencies);
+            report = report + renderQueueSection(queueHandoffThroughput, queueHandoffLatencies,
+                    queueFanoutThroughput, queueFanoutLatencies, queueDrainThroughput,
+                    queueDrainLatencies, queueDelayOvershoot);
+            report = report + renderTopicSection(topicPublishThroughput, topicPublishLatencies,
+                    topicFanoutThroughput, topicFanoutLatencies);
+            report = report + renderConditionSection(conditionSignalThroughput,
+                    conditionSignalLatencies, conditionHandoffThroughput,
+                    conditionHandoffLatencies);
+            report = report + renderPhaserSection(phaserArriveThroughput,
+                    phaserArriveLatencies, phaserTripThroughput, phaserTripLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -403,6 +537,139 @@ public final class BenchmarkMain {
     }
 
     /**
+     * 有值引用写往返（v6）：单线程 {@code getAndSet} 固定载荷循环——度量
+     * 载荷写入通道的提交+应答全成本；载荷长度入 key（16B 小载荷与 4KB
+     * 恰限对照，写同一载荷内容，条目常驻不回收由 key 隔离批次）。
+     *
+     * @param client  客户端
+     * @param payload 固定载荷字节
+     * @param millis  采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runRefSet(OpenLatchClient client, byte[] payload, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:set:" + payload.length);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ref.getAndSet(payload);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 有值引用读往返：单线程 {@code get()} 循环（经 Raft 的线性一致读数，
+     * 与 {@link #runAtomicGet} 同判例）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runRefGet(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:get");
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ref.get();
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 有值引用版本 CAS 争用：N 线程对同 key（64B 载荷）循环
+     * "读 stamped → 值+版本双符 CAS 递增计数"，直至落值成功——延迟列为
+     * 单次成功的完整耗时（含重试轮次），吞吐为跨线程合并的成功计数，
+     * 度量载荷通道上的争用放大（对照标量 CAS 相）。
+     *
+     * @param client  客户端
+     * @param threads 并发线程数
+     * @param millis  采样时长
+     * @return 结果（合并样本）
+     * @throws InterruptedException 等待被打断
+     */
+    private static Result runRefCasContended(OpenLatchClient client, int threads, long millis)
+            throws InterruptedException {
+        OAtomicReference ref = client.newAtomicReference("bench:ref:cas:" + threads);
+        AtomicLong ops = new AtomicLong();
+        Reservoir[] reservoirs = new Reservoir[threads];
+        for (int i = 0; i < threads; i++) {
+            reservoirs[i] = new Reservoir();
+        }
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            futures.add(pool.submit(() -> {
+                ready.countDown();
+                try {
+                    go.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                long deadline2 = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+                long localOps = 0;
+                while (System.nanoTime() < deadline2) {
+                    long start = System.nanoTime();
+                    try {
+                        while (true) {
+                            OAtomicReference.Stamped cur = ref.getStamped();
+                            long next = cur.value() == null ? 1
+                                    : Long.parseLong(new String(cur.value(),
+                                    java.nio.charset.StandardCharsets.UTF_8)) + 1;
+                            // 读后加一：值与版本双符才落（服务端裁决）。
+                            if (ref.compareAndSetStamped(cur.value(), cur.version(),
+                                    Long.toString(next).getBytes(
+                                            java.nio.charset.StandardCharsets.UTF_8))) {
+                                break;
+                            }
+                            if (System.nanoTime() >= deadline2) {
+                                break;
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    reservoirs[idx].record(System.nanoTime() - start);
+                    localOps++;
+                }
+                ops.addAndGet(localOps);
+            }));
+        }
+        ready.await(10, TimeUnit.SECONDS);
+        go.countDown();
+        pool.shutdown();
+        if (!pool.awaitTermination(120, TimeUnit.SECONDS)) {
+            pool.shutdownNow();
+        }
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(1, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new IllegalStateException("atomic reference bench worker failed", e);
+            }
+        }
+        double[] merged = mergeSorted(reservoirs);
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis), merged);
+    }
+
+    /**
      * 循环屏障合拢往返：parties 个线程对同一 barrier key 反复会合（世代
      * 回卷复用直至采样窗耗尽）——吞吐为<b>完成世代数/秒</b>（跨线程合并
      * 计数除以 parties 向下取整），延迟列为单次 {@code await} 耗时（含等待
@@ -499,6 +766,583 @@ public final class BenchmarkMain {
         }
         Arrays.sort(merged);
         return merged;
+    }
+
+    /**
+     * 队列配对交接相（v7）：单线程 {@code put}+{@code take} 交替（队列恒空，
+     * 无等待路径），延迟为一次配对往返、ops 计两操作。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runQueueHandoff(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OBlockingQueue queue = client.newBlockingQueue("bench:queue:handoff", 16);
+        byte[] element = "bench-queue-element".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            queue.put(element);
+            queue.take();
+            reservoir.record(System.nanoTime() - start);
+            ops.addAndGet(2);
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 队列扇出争用相（v7）：每轮单生产者 {@value #QUEUE_FANOUT_ITEMS} 条阻塞
+     * put 与 {@value #QUEUE_FANOUT_CONSUMERS} 线程阻塞 take 竞速清空管道；take
+     * 延迟含生产节奏等待（争用面基线，非纯 RTT），ops 计每次 put/take。
+     *
+     * @param client    客户端
+     * @param consumers 消费者线程数
+     * @param items     每轮流水元素数
+     * @param millis    采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runQueueFanout(OpenLatchClient client, int consumers, int items,
+            long millis) throws InterruptedException {
+        OBlockingQueue queue = client.newBlockingQueue("bench:queue:fanout",
+                QUEUE_FANOUT_ITEMS * 4);
+        AtomicLong ops = new AtomicLong();
+        Reservoir[] reservoirs = new Reservoir[consumers];
+        for (int i = 0; i < consumers; i++) {
+            reservoirs[i] = new Reservoir();
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(consumers);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        int round = 0;
+        while (System.nanoTime() < deadline) {
+            java.util.concurrent.atomic.AtomicInteger remaining =
+                    new java.util.concurrent.atomic.AtomicInteger(items);
+            CountDownLatch done = new CountDownLatch(consumers);
+            final int r = round++;
+            for (int c = 0; c < consumers; c++) {
+                final int idx = c;
+                pool.submit(() -> {
+                    try {
+                        while (remaining.getAndDecrement() > 0) {
+                            long start = System.nanoTime();
+                            queue.take();
+                            reservoirs[idx].record(System.nanoTime() - start);
+                            ops.incrementAndGet();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            byte[] element = ("bench-queue-fanout-" + (r & 0xff))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            try {
+                for (int i = 0; i < items; i++) {
+                    queue.put(element);
+                    ops.incrementAndGet();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (!done.await(60, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("queue fanout round stuck");
+            }
+        }
+        pool.shutdown();
+        if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+            pool.shutdownNow();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                mergeSorted(reservoirs));
+    }
+
+    /**
+     * 队列 drain 摊薄相（v7）：每轮 {@value #QUEUE_DRAIN_BATCH} 次 put 后一次
+     * {@code drainTo} 摘回——一次提交摊薄批量搬运，ops 计每次元素搬运
+     * （put 与 drain 交付各一）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runQueueDrain(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OBlockingQueue queue = client.newBlockingQueue("bench:queue:drain", 512);
+        java.util.List<byte[]> sink = new ArrayList<>();
+        byte[] element = "bench-queue-drain".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AtomicLong moved = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            for (int i = 0; i < QUEUE_DRAIN_BATCH; i++) {
+                queue.put(element);
+            }
+            moved.addAndGet(QUEUE_DRAIN_BATCH);
+            sink.clear();
+            int drained = queue.drainTo(sink, QUEUE_DRAIN_BATCH);
+            moved.addAndGet(drained);
+            reservoir.record(System.nanoTime() - start);
+        }
+        return new Result(Math.round(moved.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 队列延时到期相（v7）：单线程 {@code offerDelayed(100ms)} 后立即 {@code take}
+     * ——吞吐为流水化双操作，延迟样本为<b>超出 100ms 基线的唤醒尾延</b>
+     * （tick 精度基线：P50≈tick/2、P99≈tick 量级，判例就绪扫描语义）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果（{@code latencies} 为尾延毫秒样本）
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runQueueDelay(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        ODelayQueue queue = client.newDelayQueue("bench:queue:delay", 512);
+        byte[] element = "bench-queue-delay".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        long baseNs = TimeUnit.MILLISECONDS.toNanos(100);
+        AtomicLong ops = new AtomicLong();
+        Reservoir overshoot = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            queue.offerDelayed(element, 100, TimeUnit.MILLISECONDS);
+            long start = System.nanoTime();
+            queue.take();
+            overshoot.record(Math.max(0, System.nanoTime() - start - baseNs));
+            ops.addAndGet(2);
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                overshoot.sortedSamples());
+    }
+
+    /**
+     * topic 发布受理相（v8）：零订阅 hot loop 下 publish 的受理路径 RTT 与
+     * 吞吐（fan-out 面为空的纯提交开销基线，含去重槽写与 seq 分配）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果（ops=publish 次数，延迟为单发布 RTT）
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runTopicPublish(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OTopic topic = client.newTopic("bench:topic:pub");
+        byte[] message = "bench-topic-message".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            topic.publish(message);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * topic 扇出交付相（v8）：主连接持续 publish，{@code subscribers} 条独立
+     * 连接订阅同键；吞吐计受理 publish 数（广播 ops 放大为 ops×subscribers），
+     * 延迟取发布→订阅 0 收到首份交付的跨线程时延（订阅侧本地缓冲丢弃不影响
+     * 本相断言——至多一次基线本就允许丢）。
+     *
+     * @param client      发布端客户端
+     * @param port        服务端端口（订阅端另建连接）
+     * @param subscribers 订阅端连接数
+     * @param millis      采样时长
+     * @return 结果
+     * @throws InterruptedException 建连/采样被打断
+     * @throws java.util.concurrent.ExecutionException 订阅端建连失败
+     * @throws java.util.concurrent.TimeoutException 订阅端建连超时
+     */
+    private static Result runTopicFanout(OpenLatchClient client, int port, int subscribers,
+            long millis) throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        OTopic publisher = client.newTopic("bench:topic:fanout");
+        byte[] message = "bench-topic-fanout".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        java.util.concurrent.ConcurrentHashMap<Long, Long> inflight =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        java.util.List<OpenLatchClient> subClients = new ArrayList<>();
+        java.util.List<OTopicSubscription> subs = new ArrayList<>();
+        try {
+            for (int i = 0; i < subscribers; i++) {
+                OpenLatchClient subClient = OpenLatchClient.builder()
+                        .address("127.0.0.1:" + port)
+                        .defaultWaitTimeout(Duration.ofSeconds(60))
+                        .build();
+                subClient.connectAsync().get(10, TimeUnit.SECONDS);
+                subClients.add(subClient);
+                final boolean first = i == 0;
+                subs.add(subClient.newTopic("bench:topic:fanout").subscribe(m -> {
+                    if (first) {
+                        Long start = inflight.remove(m.topicSeq());
+                        if (start != null) {
+                            reservoir.record(System.nanoTime() - start);
+                        }
+                    }
+                }));
+            }
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                long start = System.nanoTime();
+                long seq = publisher.publish(message);
+                ops.incrementAndGet();
+                if (inflight.size() > 8_192) {
+                    inflight.clear(); // 慢订阅滞后窗：丢弃最旧基线（本相只测交付能力）
+                }
+                inflight.put(seq, start);
+            }
+        } finally {
+            for (OTopicSubscription sub : subs) {
+                sub.close();
+            }
+            for (OpenLatchClient subClient : subClients) {
+                subClient.shutdown();
+            }
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 渲染 topic 相小节（v8），追加至统一基线报告。
+     *
+     * @param publishThroughput 发布受理吞吐批
+     * @param publishLatencies  发布 RTT 延迟批
+     * @param fanoutThroughput  扇出受理吞吐批
+     * @param fanoutLatencies   扇出交付时延批（订阅 0 视角）
+     * @return Markdown 小节
+     */
+    private static String renderTopicSection(List<long[]> publishThroughput,
+            List<double[]> publishLatencies, List<long[]> fanoutThroughput,
+            List<double[]> fanoutLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## topic 相（v8）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| 零订阅发布受理（RTT 基线） | ").append(medianOps(publishThroughput))
+                .append(" | ").append(fmt(medianQuantile(publishLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(publishLatencies, 0.99))).append(" |\n");
+        sb.append("| 1×8 扇出交付（发布→首订阅时延） | ")
+                .append(medianOps(fanoutThroughput))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.99))).append(" |\n");
+        return sb.toString();
+    }
+
+    /**
+     * signal 受理相（v9）：持有者对空集条件的 signal hot loop——纯 Leader 本地
+     * 无操作裁决的 CONDITION_OP 往返 RTT 基线（零搬运、零日志贡献的入口面）。
+     *
+     * @param client 客户端（单连接持锁）
+     * @param millis 采样时长
+     * @return 结果（ops=signal 次数，延迟为单帧 RTT）
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runConditionSignal(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OLock lock = client.newReentrantLock("bench:cond:signal");
+        OCondition cond = lock.newCondition("tick");
+        lock.lock();
+        try {
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                long start = System.nanoTime();
+                cond.signal();
+                reservoir.record(System.nanoTime() - start);
+                ops.incrementAndGet();
+            }
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * await/signal 乒乓交接相（v9）：主连接（生产侧）与独立连接（消费侧）经
+     * 同 key 同条件 {@code "turn"} 交替持锁交接——每轮测"signal 发出→对侧从
+     * await 携锁返回"的唤醒全链路时延（折叠登记、搬运、释放接力通知、原 id
+     * 重发授予四段合计），吞吐为完成轮数。守卫循环用带预算 await 形态
+     * （guard loop 标准惯用法即用户面真实路径）。
+     *
+     * @param client 生产侧客户端
+     * @param port   服务端端口（消费侧另建连接）
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 建连/采样被打断
+     * @throws java.util.concurrent.ExecutionException 消费端建连失败
+     * @throws java.util.concurrent.TimeoutException 消费端建连超时
+     */
+    private static Result runConditionHandoff(OpenLatchClient client, int port, long millis)
+            throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        OLock pLock = client.newReentrantLock("bench:cond:ping");
+        OCondition pCond = pLock.newCondition("turn");
+        OpenLatchClient subClient = OpenLatchClient.builder()
+                .address("127.0.0.1:" + port)
+                .defaultWaitTimeout(Duration.ofSeconds(60))
+                .build();
+        subClient.connectAsync().get(10, TimeUnit.SECONDS);
+        try {
+            OLock cLock = subClient.newReentrantLock("bench:cond:ping");
+            OCondition cCond = cLock.newCondition("turn");
+            java.util.concurrent.atomic.AtomicInteger state =
+                    new java.util.concurrent.atomic.AtomicInteger();   // 0=生产轮 1=消费轮
+            java.util.concurrent.atomic.AtomicBoolean ended =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicLong signalTs =
+                    new java.util.concurrent.atomic.AtomicLong();
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            Thread consumer = new Thread(() -> {
+                try {
+                    while (!ended.get()) {
+                        cLock.lock();
+                        try {
+                            while (state.get() != 1 && !ended.get()) {
+                                cCond.await(1, TimeUnit.SECONDS);
+                            }
+                            if (ended.get()) {
+                                return;
+                            }
+                            reservoir.record(System.nanoTime() - signalTs.get());
+                            state.set(0);
+                            cCond.signal();
+                        } finally {
+                            cLock.unlock();
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "bench-cond-consumer");
+            consumer.setDaemon(true);
+            consumer.start();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                pLock.lock();
+                try {
+                    while (state.get() != 0) {
+                        pCond.await(1, TimeUnit.SECONDS);
+                    }
+                    state.set(1);
+                    signalTs.set(System.nanoTime());
+                    pCond.signal();
+                } finally {
+                    pLock.unlock();
+                }
+                ops.incrementAndGet();
+            }
+            // 收工唤醒：终结哨兵经消费侧守卫循环的 ended 分支生效，不留悬挂等待。
+            ended.set(true);
+            cLock.lock();
+            try {
+                state.set(1);
+                cCond.signal();
+            } finally {
+                cLock.unlock();
+            }
+            consumer.join(10_000);
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            subClient.shutdown();
+        }
+    }
+
+    /**
+     * 相位器单发到场相（v10）：单方注册自合拢循环——每发即一条变异日志条目，
+     * 度量到场受理吞吐与 RTT（条目率基线，供 W14 观察口径引用）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果（ops=到场次数）
+     */
+    private static Result runPhaserArrive(OpenLatchClient client, long millis) {
+        OPhaser ph = client.newPhaser("bench:phaser:arrive", 1);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ph.arrive(); // 应到 1：每发即合拢换代
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 相位器两方会合相（v10）：主连接与子连接各持一方配额循环
+     * {@code arriveAndAwaitAdvance}——每相位两次到场（1 条主 RTT+1 条子
+     * 提交+唤醒推送），ops=完成相位数，延迟取主侧单次会合全程。
+     *
+     * @param client 主客户端
+     * @param port   服务端端口（子连接）
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样或收工join被打断
+     * @throws java.util.concurrent.ExecutionException 子连接建连失败
+     * @throws java.util.concurrent.TimeoutException 子连接建连超时
+     */
+    private static Result runPhaserTrip(OpenLatchClient client, int port, long millis)
+            throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        // 每次调用用独立键：注册可重复累加（JDK 同判），热身与采样窗不可共享账簿。
+        String key = "bench:phaser:trip:" + System.nanoTime();
+        OPhaser a = client.newPhaser(key);
+        OpenLatchClient subClient = OpenLatchClient.builder()
+                .address("127.0.0.1:" + port)
+                .defaultWaitTimeout(Duration.ofSeconds(60))
+                .build();
+        subClient.connectAsync().get(10, TimeUnit.SECONDS);
+        try {
+            OPhaser c = subClient.newPhaser(key);
+            a.register(); // 应到 2
+            c.register();
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            java.util.concurrent.atomic.AtomicBoolean ended =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicLong lastTrip =
+                    new java.util.concurrent.atomic.AtomicLong();
+            // 等待者（peer）量"到场→被唤醒"的会合全程；驱动侧以纯 arrive 推进
+            // 相位（与 IT 已验证的驱动形态一致）。
+            Thread peer = new Thread(() -> {
+                try {
+                    while (!ended.get()) {
+                        lastTrip.set(System.nanoTime());
+                        c.arriveAndAwaitAdvance();
+                        reservoir.record(System.nanoTime() - lastTrip.get());
+                        ops.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (RuntimeException e) {
+                    System.err.println("[bench-phaser-peer] " + e);
+                }
+            }, "bench-phaser-peer");
+            peer.setDaemon(true);
+            peer.start();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                a.arrive(); // 每发补齐 2/2 → 合拢并唤醒 peer
+            }
+            ended.set(true);
+            peer.interrupt();
+            peer.join(5_000);
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            subClient.shutdown();
+        }
+    }
+
+    /**
+     * 渲染 phaser 小节（v10），追加至统一基线报告。
+     *
+     * @param arriveThroughput 单发到场吞吐批
+     * @param arriveLatencies  单发到场 RTT 批
+     * @param tripThroughput   两方会合相位吞吐批
+     * @param tripLatencies    两方会合全程延迟批
+     * @return Markdown 小节
+     */
+    private static String renderPhaserSection(List<long[]> arriveThroughput,
+            List<double[]> arriveLatencies, List<long[]> tripThroughput,
+            List<double[]> tripLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## phaser 相（v10）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| 单发到场（每发一变异条目，自合拢） | ")
+                .append(medianOps(arriveThroughput))
+                .append(" | ").append(fmt(medianQuantile(arriveLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(arriveLatencies, 0.99))).append(" |\n");
+        sb.append("| 两方按相位会合（arriveAndAwaitAdvance 全程） | ")
+                .append(medianOps(tripThroughput))
+                .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.99))).append(" |\n");
+        return sb.toString();
+    }
+
+    /**
+     * 渲染条件相小节（v9），追加至统一基线报告。
+     *
+     * @param signalThroughput  signal 受理吞吐批
+     * @param signalLatencies   signal 受理 RTT 批
+     * @param handoffThroughput 乒乓交接吞吐批
+     * @param handoffLatencies  唤醒全链路时延批
+     * @return Markdown 小节
+     */
+    private static String renderConditionSection(List<long[]> signalThroughput,
+            List<double[]> signalLatencies, List<long[]> handoffThroughput,
+            List<double[]> handoffLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## 条件相（v9）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| signal 受理（空集 RTT 基线） | ").append(medianOps(signalThroughput))
+                .append(" | ").append(fmt(medianQuantile(signalLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(signalLatencies, 0.99))).append(" |\n");
+        sb.append("| await/signal 乒乓交接（唤醒全链路） | ")
+                .append(medianOps(handoffThroughput))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.99))).append(" |\n");
+        return sb.toString();
+    }
+
+    /**
+     * 渲染队列相小节（v7），追加至统一基线报告。
+     *
+     * @param handoffThroughput 配对交接吞吐批
+     * @param handoffLatencies  配对交接延迟批
+     * @param fanoutThroughput  扇出吞吐批
+     * @param fanoutLatencies   扇出 take 延迟批（含等待）
+     * @param drainThroughput   drain 搬运吞吐批
+     * @param drainLatencies    drain 整轮（32 put + 1 drain）耗时批
+     * @param delayOvershoot    延时尾延样本批
+     * @return Markdown 小节
+     */
+    private static String renderQueueSection(List<long[]> handoffThroughput,
+            List<double[]> handoffLatencies, List<long[]> fanoutThroughput,
+            List<double[]> fanoutLatencies, List<long[]> drainThroughput,
+            List<double[]> drainLatencies, List<double[]> delayOvershoot) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## 队列相（v7）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| put+take 配对交接（2 ops/轮） | ").append(medianOps(handoffThroughput))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.99))).append(" |\n");
+        sb.append("| 1×8 扇出争用（take 含等待） | ").append(medianOps(fanoutThroughput))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.99))).append(" |\n");
+        sb.append("| 32-put + 1-drain 摊薄（元素搬运计；延迟为整轮） | ")
+                .append(medianOps(drainThroughput))
+                .append(" | ").append(fmt(medianQuantile(drainLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(drainLatencies, 0.99))).append(" |\n");
+        sb.append("| 延时到期尾延（100ms 基线之外的 tick 超调，ms） | —")
+                .append(" | ").append(fmt(medianQuantile(delayOvershoot, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(delayOvershoot, 0.99))).append(" |\n");
+        return sb.toString();
     }
 
     /**
@@ -634,6 +1478,14 @@ public final class BenchmarkMain {
      * @param barrierLatencies  循环屏障各档位到场等待延迟样本批次
      * @param actionThroughput  携 barrierAction 世代的吞吐各批
      * @param actionLatencies   携 barrierAction 世代的延迟各批样本
+     * @param refSmallThroughput 有值引用 16B 载荷写各批吞吐
+     * @param refSmallLatencies  有值引用 16B 载荷写各批延迟样本
+     * @param refBigThroughput   有值引用 4KB 恰限载荷写各批吞吐
+     * @param refBigLatencies    有值引用 4KB 恰限载荷写各批延迟样本
+     * @param refGetThroughput   有值引用读各批吞吐
+     * @param refGetLatencies    有值引用读各批延迟样本
+     * @param refCasThroughput   引用版本 CAS 争用各档各批吞吐
+     * @param refCasLatencies    引用版本 CAS 争用各档各批延迟样本
      * @return Markdown 文本
      */
     private static String renderReport(List<long[]> uncThroughput,
@@ -649,7 +1501,15 @@ public final class BenchmarkMain {
                                        List<List<long[]>> barrierThroughput,
                                        List<List<double[]>> barrierLatencies,
                                        List<long[]> actionThroughput,
-                                       List<double[]> actionLatencies) {
+                                       List<double[]> actionLatencies,
+                                       List<long[]> refSmallThroughput,
+                                       List<double[]> refSmallLatencies,
+                                       List<long[]> refBigThroughput,
+                                       List<double[]> refBigLatencies,
+                                       List<long[]> refGetThroughput,
+                                       List<double[]> refGetLatencies,
+                                       List<List<long[]>> refCasThroughput,
+                                       List<List<double[]>> refCasLatencies) {
         StringBuilder sb = new StringBuilder();
         sb.append("# OpenLatch 基准基线\n\n");
         sb.append("生成：").append(java.time.LocalDate.now())
@@ -691,6 +1551,23 @@ public final class BenchmarkMain {
                     .append(" 线程争用 CAS 加一 | ").append(medianOps(casThroughput.get(i)))
                     .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.5)))
                     .append(" | ").append(fmt(medianQuantile(casLatencies.get(i), 0.99)))
+                    .append(" |\n");
+        }
+        sb.append("| 有值引用 getAndSet（16B 载荷写 RTT） | ").append(medianOps(refSmallThroughput))
+                .append(" | ").append(fmt(medianQuantile(refSmallLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refSmallLatencies, 0.99))).append(" |\n");
+        sb.append("| 有值引用 getAndSet（4KB 恰限载荷写 RTT） | ")
+                .append(medianOps(refBigThroughput))
+                .append(" | ").append(fmt(medianQuantile(refBigLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refBigLatencies, 0.99))).append(" |\n");
+        sb.append("| 有值引用 get（读 RTT，经 Raft） | ").append(medianOps(refGetThroughput))
+                .append(" | ").append(fmt(medianQuantile(refGetLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(refGetLatencies, 0.99))).append(" |\n");
+        for (int i = 0; i < ATOMIC_CAS_LEVELS.length; i++) {
+            sb.append("| ").append(ATOMIC_CAS_LEVELS[i])
+                    .append(" 线程争用引用版本 CAS | ").append(medianOps(refCasThroughput.get(i)))
+                    .append(" | ").append(fmt(medianQuantile(refCasLatencies.get(i), 0.5)))
+                    .append(" | ").append(fmt(medianQuantile(refCasLatencies.get(i), 0.99)))
                     .append(" |\n");
         }
         for (int i = 0; i < BARRIER_LEVELS.length; i++) {

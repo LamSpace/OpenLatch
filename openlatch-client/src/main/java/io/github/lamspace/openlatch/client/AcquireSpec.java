@@ -38,13 +38,19 @@ import java.util.Objects;
  *                 锁类型请求携带 {@code 1} 与缺省等价）
  * @param permitsTotal Semaphore 许可总量断言：{@code > 0} 建条目定型/既有条目
  *                 校验匹配；{@code 0} 为纯加入不主张；锁类型请求 MUST 为 {@code 0}
+ * @param condition 条件等待折叠名（v9）：非 {@code null} 即本获取为
+ *                 {@link OCondition} 的折叠 await 形态（ACQUIRE 携带
+ *                 {@code condition} 字段）；{@code null} 为既有普通获取。
+ *                 仅互斥形态（REENTRANT/FAIR/SIMPLE）与非负等待
+ *                 （{@code waitMs != 0}）允许携带
  */
 public record AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs,
-        int permits, int permitsTotal) {
+        int permits, int permitsTotal, String condition) {
 
     /**
      * 锁家族便捷构造：许可参数取缺省
-     * （{@code permits = 1}、{@code permitsTotal = 0}）。
+     * （{@code permits = 1}、{@code permitsTotal = 0}），非折叠形态
+     * （{@code condition = null}）。
      *
      * @param key      锁键
      * @param lockType 锁类型
@@ -53,13 +59,44 @@ public record AcquireSpec(String key, LockType lockType, long threadId, long lea
      * @param waitMs   等待模式（毫秒）
      */
     public AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs) {
-        this(key, lockType, threadId, leaseMs, waitMs, 1, 0);
+        this(key, lockType, threadId, leaseMs, waitMs, 1, 0, null);
+    }
+
+    /**
+     * 许可家族构造（Semaphore 消费）：非折叠形态（{@code condition = null}）。
+     *
+     * @param key          锁键
+     * @param lockType     锁类型
+     * @param threadId     申请线程标识
+     * @param leaseMs      期望租约（毫秒）
+     * @param waitMs       等待模式（毫秒）
+     * @param permits      请求许可数
+     * @param permitsTotal 许可总量断言
+     */
+    public AcquireSpec(String key, LockType lockType, long threadId, long leaseMs, long waitMs,
+            int permits, int permitsTotal) {
+        this(key, lockType, threadId, leaseMs, waitMs, permits, permitsTotal, null);
+    }
+
+    /**
+     * 折叠 await 派生：返回携带本条件名的等价参数（其余字段逐项保留）。
+     *
+     * @param condition 条件名，非空
+     * @return 折叠形态参数
+     * @throws NullPointerException  condition 为 {@code null}
+     */
+    public AcquireSpec withCondition(String condition) {
+        return new AcquireSpec(key, lockType, threadId, leaseMs, waitMs, permits, permitsTotal,
+                Objects.requireNonNull(condition, "condition must not be null"));
     }
 
     /**
      * 紧凑构造器：校验锁键非空、锁类型非空、租约非负、等待模式不小于 -1
      * （{@code -1} 合法，表示排队式）；许可数非负、总量断言非负
-     * （{@code permits == 0} 按 {@code 1} 归一）。
+     * （{@code permits == 0} 按 {@code 1} 归一）。折叠形态（{@code condition}
+     * 非 {@code null}）额外守门形状纪律：条件名非空串、等待模式非立即式
+     * （{@code waitMs != 0}，折叠 await 恒为挂起形态）、锁类型限互斥三形态
+     * （REENTRANT/FAIR/SIMPLE）——违例在进入线路前本地拒绝。
      */
     public AcquireSpec {
         Objects.requireNonNull(key, "key must not be null");
@@ -75,6 +112,20 @@ public record AcquireSpec(String key, LockType lockType, long threadId, long lea
         }
         if (permits == 0) {
             permits = 1;
+        }
+        if (condition != null) {
+            if (condition.isEmpty()) {
+                throw new IllegalArgumentException("condition must not be empty");
+            }
+            if (waitMs == 0) {
+                throw new IllegalArgumentException(
+                        "folded await must not use immediate mode (waitMs = 0)");
+            }
+            if (lockType != LockType.REENTRANT && lockType != LockType.FAIR
+                    && lockType != LockType.SIMPLE) {
+                throw new IllegalArgumentException(
+                        "folded await supports only REENTRANT/FAIR/SIMPLE, got " + lockType);
+            }
         }
     }
 }

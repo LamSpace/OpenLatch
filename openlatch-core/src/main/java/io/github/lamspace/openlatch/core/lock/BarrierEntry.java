@@ -657,7 +657,7 @@ public final class BarrierEntry implements KeyEntry {
         for (Waiter w : awaiters) {
             waiterSnaps.add(new CoreInspection.WaiterSnapshot(
                     w.sessionId(), w.requestId(), w.threadId(), w.permits(),
-                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified()));
+                    w.enqueuedAtMs(), Math.max(0, now - w.enqueuedAtMs()), w.notified(), 0));
         }
         return new CoreInspection.KeySnapshot(key, KeyFamily.BARRIER, false,
                 0, 0, 0, 0,
@@ -665,7 +665,7 @@ public final class BarrierEntry implements KeyEntry {
                 0, 0, 0, 0, List.of(),
                 null, 0, 0, 0,
                 parties, generation, arrivals.size(), actionPending != null,
-                completed == null ? null : completed.result());
+                completed == null ? null : completed.result(), null, null, 0L, 0, 0L, 0L, null, 0, 0, 0);
     }
 
     /**

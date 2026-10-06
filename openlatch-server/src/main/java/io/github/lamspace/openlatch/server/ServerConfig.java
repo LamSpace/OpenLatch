@@ -41,6 +41,32 @@ import java.util.Properties;
  * @param maxKeyLength             锁键长度上限（UTF-8 字节）
  * @param maxQueueDepthPerKey      单 key 等待队列深度上限
  * @param maxInflightPerConnection 单连接在途请求上限
+ * @param maxValueBytes            有值引用载荷字节上限（v6 小载荷钳制，默认
+ *                                 4096；判定仅在接入层执行，节点本地配置
+ *                                 MUST NOT 参与 apply 判定，见快照/复制规格）
+ * @param maxQueueCapacity         队列定型容量上限（v7，默认 1024；PUT 容量
+ *                                 主张的入口钳制上限，配合每元素
+ *                                 {@code maxValueBytes} 构成单 key 驻留上界；
+ *                                 同样仅在接入层判定）
+ * @param maxDrainBytes            drainTo 应答字节预算（v7，默认 256KiB；
+ *                                 DRAIN 提取上限派生基准——钳定后的 N 随条目
+ *                                 入日志，apply 不读本地配置）
+ * @param queueReadyTickMs         队列就绪扫描周期（v7，默认 200ms；延时形态
+ *                                 的唤醒精度，仅 Leader/单机调度消费，
+ *                                 MUST NOT 参与任何状态判定）
+ * @param maxSubscribersPerKey     单 key 订阅数上限（v8，默认 64；SUBSCRIBE
+ *                                 的入口裁决上限，钳广播 fan-out 放大面；
+ *                                 达上限新增订阅回 {@code REJECT_SUBSCRIBERS}，
+ *                                 既有订阅零扰动；仅接入层判定）
+ * @param maxSubscriptionBuffer    每订阅在途缓冲条数上限（v8，默认 256；
+ *                                 服务端侧弱背压缓冲深度——满则 drop-newest
+ *                                 丢最新一条并计数，MUST NOT 阻塞 Publisher
+ *                                 或断开订阅；仅接入层/登记表判定）
+ * @param maxPartiesPerPhaser      单相位器注册总数上限（v10，默认 1024；
+ *                                 {@code REGISTER} 加计超限在带拒绝
+ *                                 {@code OVERLOADED}、既有参与者零扰动，
+ *                                 仅接入层/受理点判定——条目应用侧不复核，
+ *                                 配置漂移不撕裂账簿，判例 maxQueueCapacity）
  */
 public record ServerConfig(
         int port,
@@ -53,7 +79,14 @@ public record ServerConfig(
         long headReplyTimeoutMs,
         int maxKeyLength,
         int maxQueueDepthPerKey,
-        int maxInflightPerConnection) {
+        int maxInflightPerConnection,
+        int maxValueBytes,
+        int maxQueueCapacity,
+        long maxDrainBytes,
+        long queueReadyTickMs,
+        int maxSubscribersPerKey,
+        int maxSubscriptionBuffer,
+        int maxPartiesPerPhaser) {
 
     /** 指定配置文件路径的系统属性键。 */
     public static final String CONFIG_PATH_PROPERTY = "openlatch.config";
@@ -78,6 +111,96 @@ public record ServerConfig(
     public static final int DEFAULT_MAX_QUEUE_DEPTH_PER_KEY = 4096;
     /** 默认单连接在途请求上限。 */
     public static final int DEFAULT_MAX_INFLIGHT_PER_CONNECTION = 1024;
+    /** 默认有值引用载荷字节上限（2026-09 定位裁决：每 key 限额默认 4KB）。 */
+    public static final int DEFAULT_MAX_VALUE_BYTES = 4096;
+
+    /** 队列定型容量上限默认值（v7）。 */
+    public static final int DEFAULT_MAX_QUEUE_CAPACITY = 1024;
+    /** 队列定型容量上限的配置顶格（v7，单 key 驻留治理边界）。 */
+    public static final int MAX_QUEUE_CAPACITY_CEILING = 65_536;
+    /** drainTo 应答字节预算默认值（v7，256KiB——默认 4KB 元素下派生 64 项上限）。 */
+    public static final long DEFAULT_MAX_DRAIN_BYTES = 256L * 1024L;
+    /** drainTo 应答字节预算的配置顶格（v7，与 {@code maxValueBytes} 同界）。 */
+    public static final long MAX_DRAIN_BYTES_CEILING = 512L * 1024L;
+    /** 队列就绪扫描周期默认值（v7，毫秒）。 */
+    public static final long DEFAULT_QUEUE_READY_TICK_MS = 200L;
+    /** 队列就绪扫描周期下限（v7，毫秒）。 */
+    public static final long MIN_QUEUE_READY_TICK_MS = 10L;
+    /** 单 key 订阅数上限默认值（v8）。 */
+    public static final int DEFAULT_MAX_SUBSCRIBERS_PER_KEY = 64;
+    /** 单 key 订阅数上限的配置顶格（v8，fan-out 放大面治理边界）。 */
+    public static final int MAX_SUBSCRIBERS_PER_KEY_CEILING = 1_024;
+    /** 每订阅在途缓冲条数默认值（v8，drop-newest 缓冲深度）。 */
+    public static final int DEFAULT_MAX_SUBSCRIPTION_BUFFER = 256;
+    /** 每订阅在途缓冲条数的配置顶格（v8，与 {@code maxQueueCapacity} 同界）。 */
+    public static final int MAX_SUBSCRIPTION_BUFFER_CEILING = 65_536;
+    /** 单相位器注册总数上限默认值（v10）。 */
+    public static final int DEFAULT_MAX_PARTIES_PER_PHASER = 1024;
+    /** 单相位器注册总数上限的配置顶格（v10，单 key 驻留治理边界，与 {@code maxQueueCapacity} 同界）。 */
+    public static final int MAX_PARTIES_PER_PHASER_CEILING = 65_536;
+    /** 有值引用载荷字节上限的可配置上界（512KiB，为 1MiB 帧上限留信封编解码边际）。 */
+    public static final int MAX_VALUE_BYTES_CEILING = 512 * 1024;
+
+    /**
+     * v6 之前的十一参形态：载荷上限取内置默认 4096（既有构造调用点与测试
+     * 夹具零改动，需要自定义钳制值的用例走全参构造）。
+     *
+     * @param port                     监听端口
+     * @param workerThreads            worker 线程数
+     * @param idleTimeoutMs            空闲超时
+     * @param defaultLeaseMs           默认租约
+     * @param minLeaseMs               租约下限
+     * @param maxLeaseMs               租约上限
+     * @param leaseTickIntervalMs      扫描周期
+     * @param headReplyTimeoutMs       队首响应超时
+     * @param maxKeyLength             键长上限
+     * @param maxQueueDepthPerKey      队列深度上限
+     * @param maxInflightPerConnection 在途上限
+     */
+    public ServerConfig(int port, int workerThreads, long idleTimeoutMs, long defaultLeaseMs,
+            long minLeaseMs, long maxLeaseMs, long leaseTickIntervalMs, long headReplyTimeoutMs,
+            int maxKeyLength, int maxQueueDepthPerKey, int maxInflightPerConnection) {
+        this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
+                leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
+                maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES,
+                DEFAULT_MAX_QUEUE_CAPACITY, DEFAULT_MAX_DRAIN_BYTES, DEFAULT_QUEUE_READY_TICK_MS,
+                DEFAULT_MAX_SUBSCRIBERS_PER_KEY, DEFAULT_MAX_SUBSCRIPTION_BUFFER,
+                DEFAULT_MAX_PARTIES_PER_PHASER);
+    }
+
+    /**
+     * v10 之前的十七参形态：相位器配额上限取内置默认 1024（既有全参构造
+     * 调用点与测试夹具零改动，需自定义上限的用例走全参构造）。
+     *
+     * @param port                     监听端口
+     * @param workerThreads            worker 线程数
+     * @param idleTimeoutMs            空闲超时
+     * @param defaultLeaseMs           默认租约
+     * @param minLeaseMs               租约下限
+     * @param maxLeaseMs               租约上限
+     * @param leaseTickIntervalMs      扫描周期
+     * @param headReplyTimeoutMs       队首响应超时
+     * @param maxKeyLength             键长上限
+     * @param maxQueueDepthPerKey      队列深度上限
+     * @param maxInflightPerConnection 在途上限
+     * @param maxValueBytes            载荷字节上限
+     * @param maxQueueCapacity         队列定型容量上限
+     * @param maxDrainBytes            drainTo 应答字节预算
+     * @param queueReadyTickMs         队列就绪扫描周期
+     * @param maxSubscribersPerKey     单 key 订阅数上限
+     * @param maxSubscriptionBuffer    每订阅在途缓冲条数上限
+     */
+    public ServerConfig(int port, int workerThreads, long idleTimeoutMs, long defaultLeaseMs,
+            long minLeaseMs, long maxLeaseMs, long leaseTickIntervalMs, long headReplyTimeoutMs,
+            int maxKeyLength, int maxQueueDepthPerKey, int maxInflightPerConnection,
+            int maxValueBytes, int maxQueueCapacity, long maxDrainBytes, long queueReadyTickMs,
+            int maxSubscribersPerKey, int maxSubscriptionBuffer) {
+        this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
+                leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
+                maxInflightPerConnection, maxValueBytes, maxQueueCapacity, maxDrainBytes,
+                queueReadyTickMs, maxSubscribersPerKey, maxSubscriptionBuffer,
+                DEFAULT_MAX_PARTIES_PER_PHASER);
+    }
 
     /**
      * 全默认配置（worker 线程数取 2 × CPU）。
@@ -96,7 +219,14 @@ public record ServerConfig(
                 DEFAULT_HEAD_REPLY_TIMEOUT_MS,
                 DEFAULT_MAX_KEY_LENGTH,
                 DEFAULT_MAX_QUEUE_DEPTH_PER_KEY,
-                DEFAULT_MAX_INFLIGHT_PER_CONNECTION);
+                DEFAULT_MAX_INFLIGHT_PER_CONNECTION,
+                DEFAULT_MAX_VALUE_BYTES,
+                DEFAULT_MAX_QUEUE_CAPACITY,
+                DEFAULT_MAX_DRAIN_BYTES,
+                DEFAULT_QUEUE_READY_TICK_MS,
+                DEFAULT_MAX_SUBSCRIBERS_PER_KEY,
+                DEFAULT_MAX_SUBSCRIPTION_BUFFER,
+                DEFAULT_MAX_PARTIES_PER_PHASER);
     }
 
     /**
@@ -131,7 +261,17 @@ public record ServerConfig(
                 longOf(props, "openlatch.server.queue.head-reply-timeout-ms", base.headReplyTimeoutMs()),
                 intOf(props, "openlatch.server.limit.max-key-length", base.maxKeyLength()),
                 intOf(props, "openlatch.server.limit.max-queue-depth-per-key", base.maxQueueDepthPerKey()),
-                intOf(props, "openlatch.server.limit.max-inflight-per-connection", base.maxInflightPerConnection()));
+                intOf(props, "openlatch.server.limit.max-inflight-per-connection", base.maxInflightPerConnection()),
+                intOf(props, "openlatch.server.limit.max-value-bytes", base.maxValueBytes()),
+                intOf(props, "openlatch.server.limit.max-queue-capacity", base.maxQueueCapacity()),
+                longOf(props, "openlatch.server.limit.max-drain-bytes", base.maxDrainBytes()),
+                longOf(props, "openlatch.server.queue.ready-tick-ms", base.queueReadyTickMs()),
+                intOf(props, "openlatch.server.limit.max-subscribers-per-key",
+                        base.maxSubscribersPerKey()),
+                intOf(props, "openlatch.server.limit.max-subscription-buffer",
+                        base.maxSubscriptionBuffer()),
+                intOf(props, "openlatch.server.limit.max-parties-per-phaser",
+                        base.maxPartiesPerPhaser()));
         cfg.validate();
         return cfg;
     }
@@ -144,7 +284,8 @@ public record ServerConfig(
     public CoreConfig toCoreConfig() {
         return new CoreConfig(
                 defaultLeaseMs, minLeaseMs, maxLeaseMs,
-                headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey);
+                headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
+                maxPartiesPerPhaser);
     }
 
     /**
@@ -254,6 +395,43 @@ public record ServerConfig(
             throw new IllegalArgumentException(
                     "配置项 openlatch.server.limit.max-inflight-per-connection 非法（应 >= 1）: "
                             + maxInflightPerConnection);
+        }
+        if (maxValueBytes < 1 || maxValueBytes > MAX_VALUE_BYTES_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-value-bytes 非法（应为 1–"
+                            + MAX_VALUE_BYTES_CEILING + "）: " + maxValueBytes);
+        }
+        if (maxQueueCapacity < 1 || maxQueueCapacity > MAX_QUEUE_CAPACITY_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-queue-capacity 非法（应为 1–"
+                            + MAX_QUEUE_CAPACITY_CEILING + "）: " + maxQueueCapacity);
+        }
+        if (maxDrainBytes < 1 || maxDrainBytes > MAX_DRAIN_BYTES_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-drain-bytes 非法（应为 1–"
+                            + MAX_DRAIN_BYTES_CEILING + "）: " + maxDrainBytes);
+        }
+        if (queueReadyTickMs < MIN_QUEUE_READY_TICK_MS) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.queue.ready-tick-ms 非法（应 >= "
+                            + MIN_QUEUE_READY_TICK_MS + "）: " + queueReadyTickMs);
+        }
+        if (maxSubscribersPerKey < 1 || maxSubscribersPerKey > MAX_SUBSCRIBERS_PER_KEY_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-subscribers-per-key 非法（应为 1–"
+                            + MAX_SUBSCRIBERS_PER_KEY_CEILING + "）: " + maxSubscribersPerKey);
+        }
+        if (maxSubscriptionBuffer < 1
+                || maxSubscriptionBuffer > MAX_SUBSCRIPTION_BUFFER_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-subscription-buffer 非法（应为 1–"
+                            + MAX_SUBSCRIPTION_BUFFER_CEILING + "）: " + maxSubscriptionBuffer);
+        }
+        if (maxPartiesPerPhaser < 1
+                || maxPartiesPerPhaser > MAX_PARTIES_PER_PHASER_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.limit.max-parties-per-phaser 非法（应为 1–"
+                            + MAX_PARTIES_PER_PHASER_CEILING + "）: " + maxPartiesPerPhaser);
         }
     }
 }

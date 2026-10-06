@@ -318,6 +318,64 @@ class AwaitTrackerTest {
         multiplexer.setOrphanSink(tracker::onOrphanResponse);
     }
 
+    /** 折叠 await：唤醒通知换发无条件清 {@code condition} 的信封、同 id 重发并授予。 */
+    @Test
+    void foldedNotifyResendsConditionClearedEnvelope() throws Exception {
+        CompletableFuture<LockGrant> future = startFoldedAcquire(30_000);
+        Envelope out = channel.readOutbound();
+        long requestId = out.getRequestId();
+        assertThat(out.getAcquireRequest().hasCondition()).isTrue();
+
+        multiplexer.onResponse(acquireResponse(requestId, StatusCode.QUEUED, 0, 0));
+        tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
+        Envelope resend = channel.readOutbound();
+        // 唤醒终结 await 阶段：同 request_id、condition 字段已清除。
+        assertThat(resend.getRequestId()).isEqualTo(requestId);
+        assertThat(resend.getAcquireRequest().hasCondition()).isFalse();
+        assertThat(resend.getAcquireRequest().getKey()).isEqualTo(KEY);
+
+        multiplexer.onResponse(acquireResponse(requestId, StatusCode.OK, 99, 30_000));
+        assertThat(future.get(1, TimeUnit.SECONDS).leaseToken()).isEqualTo(99);
+    }
+
+    /** 折叠 await：换形后二次通知复用无条件信封（重复通知不回带 condition）。 */
+    @Test
+    void foldedWakeEnvelopePersistsAcrossSecondNotify() throws Exception {
+        CompletableFuture<LockGrant> future = startFoldedAcquire(30_000);
+        Envelope out = channel.readOutbound();
+        long requestId = out.getRequestId();
+        multiplexer.onResponse(acquireResponse(requestId, StatusCode.QUEUED, 0, 0));
+
+        tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
+        Envelope first = channel.readOutbound();
+        multiplexer.onResponse(acquireResponse(requestId, StatusCode.QUEUED, 0, 0));
+
+        tracker.onNotify(AwaitNotify.newBuilder().setKey(KEY).setRequestIdRef(requestId).build());
+        Envelope second = channel.readOutbound();
+        assertThat(first.getAcquireRequest().hasCondition()).isFalse();
+        assertThat(second.getAcquireRequest().hasCondition()).isFalse();
+        assertThat(second.getRequestId()).isEqualTo(requestId);
+        future.completeExceptionally(new IllegalStateException("cleanup"));
+    }
+
+    /** 折叠 await：未获通知的 NOT_LEADER 接管保持原折叠信封（幂等重登记）。 */
+    @Test
+    void foldedNotLeaderHandoverKeepsFoldedEnvelope() {
+        AtomicReference<Envelope> captured = new AtomicReference<>();
+        tracker.setNotLeaderHandler(req -> {
+            captured.set(req.envelope());
+            return true;
+        });
+        CompletableFuture<LockGrant> future = startFoldedAcquire(30_000);
+        Envelope out = channel.readOutbound();
+
+        multiplexer.onResponse(acquireResponse(out.getRequestId(), StatusCode.NOT_LEADER, 0, 0));
+
+        assertThat(captured.get()).isNotNull();
+        assertThat(captured.get().getAcquireRequest().hasCondition()).isTrue();
+        assertThat(future).isNotDone(); // 接管：future 由重放链延续
+    }
+
     /**
      * 发起一次排队式获取。
      *
@@ -331,6 +389,26 @@ class AwaitTrackerTest {
                 .setType(MessageType.LOCK_ACQUIRE)
                 .setRequestId(100)
                 .setAcquireRequest(AcquireRequest.newBuilder().setKey(KEY))
+                .build();
+        CompletableFuture<LockGrant> future = new CompletableFuture<>();
+        tracker.startAcquire(100, envelope, spec, future, totalTimeoutMs);
+        return future;
+    }
+
+    /**
+     * 发起一次折叠 await 形态的排队式获取（信封携带 {@code condition}）。
+     *
+     * @param totalTimeoutMs 等待总超时（毫秒）
+     * @return 用户 future
+     */
+    private CompletableFuture<LockGrant> startFoldedAcquire(long totalTimeoutMs) {
+        AcquireSpec spec = new AcquireSpec(KEY, LockType.REENTRANT, THREAD_ID, 0, -1)
+                .withCondition("stage");
+        Envelope envelope = Envelope.newBuilder()
+                .setProtocolVersion(1)
+                .setType(MessageType.LOCK_ACQUIRE)
+                .setRequestId(100)
+                .setAcquireRequest(AcquireRequest.newBuilder().setKey(KEY).setCondition("stage"))
                 .build();
         CompletableFuture<LockGrant> future = new CompletableFuture<>();
         tracker.startAcquire(100, envelope, spec, future, totalTimeoutMs);

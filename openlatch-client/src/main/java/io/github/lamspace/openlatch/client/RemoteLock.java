@@ -19,6 +19,7 @@ package io.github.lamspace.openlatch.client;
 import io.github.lamspace.openlatch.client.internal.HeldLockRegistry;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -213,6 +214,29 @@ final class RemoteLock implements OLock {
             }
             throw new OpenLatchException("tryLockAsync of '" + key + "' failed", cause);
         });
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>实现：互斥三形态（REENTRANT/FAIR/SIMPLE）返回绑定本锁键的
+     * {@link RemoteCondition} 句柄；读/写形态（{@code OReadWriteLock}
+     * 所得句柄）本地裁决抛 {@link UnsupportedOperationException}，
+     * 不产生任何请求（v1 支持面，v9 条件变量）。
+     */
+    @Override
+    public OCondition newCondition(String name) {
+        Objects.requireNonNull(name, "name must not be null");
+        if (name.isEmpty()) {
+            throw new IllegalArgumentException("name must not be empty");
+        }
+        if (lockType != LockType.REENTRANT && lockType != LockType.FAIR
+                && lockType != LockType.SIMPLE) {
+            throw new UnsupportedOperationException(
+                    "conditions are supported only on REENTRANT/FAIR/SIMPLE locks, got "
+                            + lockType);
+        }
+        return new RemoteCondition(client, key, lockType, name);
     }
 
     /**

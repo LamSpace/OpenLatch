@@ -58,6 +58,12 @@ import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LeaseRenewRequest;
 import io.github.lamspace.openlatch.protocol.LeaseRenewResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.QueueOp;
+import io.github.lamspace.openlatch.protocol.QueueOpRequest;
+import io.github.lamspace.openlatch.protocol.QueueOpResponse;
+import io.github.lamspace.openlatch.protocol.TopicOp;
+import io.github.lamspace.openlatch.protocol.TopicOpRequest;
+import io.github.lamspace.openlatch.protocol.TopicOpResponse;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.LatchCountDownResponse;
@@ -89,9 +95,26 @@ public final class RequestDispatcher {
     private final CoreEngine core;
     /** 指标词表门面；{@code null} 表示不埋点（测试夹具形态）。 */
     private final ServerMetrics metrics;
+    /**
+     * 有值引用载荷字节上限（单机分发入口钳制判定用；引擎/条目侧不复核，
+     * 钳制点唯一在接入层）。
+     */
+    private final int maxValueBytes;
 
     /**
-     * 构造分发器（不埋点，既有测试夹具形态）。
+     * v7 队列定型容量上限（单机分发入口钳制；引擎/条目侧不复核，钳制点
+     * 唯一在接入层，判例 {@code maxValueBytes}）。
+     */
+    private final int maxQueueCapacity;
+
+    /**
+     * v7 drainTo 应答字节预算（单机分发入口钳制，钳定后的 DRAIN 上限
+     * 随命令入引擎）。
+     */
+    private final long maxDrainBytes;
+
+    /**
+     * 构造分发器（不埋点，既有测试夹具形态；载荷上限取内置默认 4096）。
      *
      * @param core 锁语义核心
      */
@@ -100,14 +123,101 @@ public final class RequestDispatcher {
     }
 
     /**
-     * 构造分发器（生产形态：应答经 {@code metrics} 记入服务端指标词表）。
+     * 构造分发器（生产形态：应答经 {@code metrics} 记入服务端指标词表；
+     * 载荷上限取内置默认 4096）。
      *
      * @param core    锁语义核心
      * @param metrics 指标门面，可为 {@code null}（不埋点）
      */
     public RequestDispatcher(CoreEngine core, ServerMetrics metrics) {
+        this(core, metrics, io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_VALUE_BYTES);
+    }
+
+    /**
+     * 构造分发器（v6 三参形态：队列限额取内置默认，既有装配与测试夹具
+     * 兼容）。
+     *
+     * @param core          锁语义核心
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes 有值引用载荷字节上限（{@code >= 1}）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes) {
+        this(core, metrics, maxValueBytes,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_QUEUE_CAPACITY,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_DRAIN_BYTES);
+    }
+
+    /**
+     * 构造分发器（全参形态：单机分发按 {@code maxValueBytes} 对有值引用载荷
+     * 与队列元素做入口钳制、按 {@code maxQueueCapacity}/{@code maxDrainBytes}
+     * 对队列容量主张与 drain 上限做入口钳制——钳制点唯一在接入层，
+     * 引擎/条目侧不复核）。
+     *
+     * @param core             锁语义核心
+     * @param metrics          指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes    有值引用载荷/队列元素字节上限（{@code >= 1}）
+     * @param maxQueueCapacity 队列定型容量上限（{@code >= 1}）
+     * @param maxDrainBytes    drainTo 应答字节预算（{@code >= 1}）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes,
+            int maxQueueCapacity, long maxDrainBytes) {
+        this(core, metrics, maxValueBytes, maxQueueCapacity, maxDrainBytes,
+                io.github.lamspace.openlatch.server.ServerConfig.DEFAULT_MAX_KEY_LENGTH, null);
+    }
+
+    /**
+     * v8 topic 登记表；{@code null}=装配不含 topic 面（既有夹具形态，
+     * TOPIC_OP 抵达时回 {@code INTERNAL_ERROR} 并记 WARN）。
+     */
+    private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
+    /** 锁键长度上限（UTF-8 字节；topic 路径不经引擎，键校验在本层执行）。 */
+    private final int maxKeyLength;
+
+    /**
+     * 构造分发器（v8 全参形态）：追加 topic 登记表与键长上限——
+     * TOPIC_OP 单机路径由本层完成门控、形状、键长与 {@code maxValueBytes}
+     * 钳制后交 {@code topics}（零日志：不经引擎、不进状态机）。
+     *
+     * @param core             锁语义核心
+     * @param metrics          指标门面，可为 {@code null}（不埋点）
+     * @param maxValueBytes    有值引用载荷/队列元素/topic 消息体字节上限（{@code >= 1}）
+     * @param maxQueueCapacity 队列定型容量上限（{@code >= 1}）
+     * @param maxDrainBytes    drainTo 应答字节预算（{@code >= 1}）
+     * @param maxKeyLength     锁键长度上限（{@code >= 1}，topic 键校验用）
+     * @param topics           topic 登记表，可为 {@code null}（夹具无 topic 面）
+     */
+    public RequestDispatcher(CoreEngine core, ServerMetrics metrics, int maxValueBytes,
+            int maxQueueCapacity, long maxDrainBytes, int maxKeyLength,
+            io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
         this.core = Objects.requireNonNull(core);
         this.metrics = metrics;
+        this.maxValueBytes = maxValueBytes;
+        this.maxQueueCapacity = maxQueueCapacity;
+        this.maxDrainBytes = maxDrainBytes;
+        this.maxKeyLength = maxKeyLength;
+        this.topics = topics;
+    }
+
+    /**
+     * topic 登记表只读口（装配与测试观察）；夹具形态为 {@code null}。
+     *
+     * @return 登记表或 {@code null}
+     */
+    public io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry() {
+        return topics;
+    }
+
+    /**
+     * 单机路径会话关闭钩子：摘除该会话的 topic 登记、缓冲与去重槽
+     * （死亡即退订）。由接入层断连清理在 {@code core.sessionClosed} 之后
+     * 调用；{@code topics} 为 {@code null} 时为空操作。
+     *
+     * @param sessionId 关闭的会话 id
+     */
+    public void onSessionClosedTopics(long sessionId) {
+        if (topics != null) {
+            topics.removeSession(sessionId);
+        }
     }
 
     /**
@@ -148,6 +258,18 @@ public final class RequestDispatcher {
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest()
                     ? dispatchBarrierActionDone(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case QUEUE_OP -> msg.hasQueueOpRequest()
+                    ? dispatchQueueOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case TOPIC_OP -> msg.hasTopicOpRequest()
+                    ? dispatchTopicOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case CONDITION_OP -> msg.hasConditionOpRequest()
+                    ? dispatchConditionOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case PHASER_OP -> msg.hasPhaserOpRequest()
+                    ? dispatchPhaserOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
@@ -233,6 +355,13 @@ public final class RequestDispatcher {
             // v5：parties 断言与动作回报不被受理同属形状非法；破障是在带裁决。
             case REJECT_BARRIER_PARTIES -> StatusCode.INVALID_REQUEST;
             case REJECT_BARRIER_ACTION -> StatusCode.INVALID_REQUEST;
+            // v7：队列容量断言不成立同属形状非法（非零主张判例）。
+            case REJECT_QUEUE_CAPACITY -> StatusCode.INVALID_REQUEST;
+            // v10：phaser 配额上限/离场透支/无条目——上限骑资源护栏码，其余
+            // 形状非法（判例 toPhaserStatus 同映射，两超限以线路 op 分轨）。
+            case REJECT_PHASER_PARTIES -> StatusCode.OVERLOADED;
+            case REJECT_PHASER_QUOTA -> StatusCode.INVALID_REQUEST;
+            case REJECT_PHASER_NO_ENTRY -> StatusCode.INVALID_REQUEST;
             case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
         };
     }
@@ -253,9 +382,29 @@ public final class RequestDispatcher {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
         }
         AtomicOpRequest req = msg.getAtomicOpRequest();
+        if (req.getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE
+                && session.protocolVersion() < 6) {
+            // v6 专属语义：低版本会话引用形态消息级拒绝、不断连（判例各门）。
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         StatusCode shapeBad = validateAtomicRequest(req);
+        if (shapeBad == null) {
+            shapeBad = validateRefPayloadClamp(req, maxValueBytes);
+        }
         if (shapeBad != null) {
             return errorResponse(msg, shapeBad);
+        }
+        if (req.getLockType()
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE) {
+            io.github.lamspace.openlatch.core.result.AtomicRefOpResult refResult =
+                    core.atomicRefOp(toAtomicRefCommand(session.sessionId(),
+                            msg.getRequestId(), req));
+            if (metrics != null) {
+                metrics.recordAtomic(req.getLockType(), req.getOp(),
+                        toLatchStatus(refResult.outcome()));
+            }
+            return toAtomicRefOpResponse(msg, refResult);
         }
         AtomicOpResult result = core.atomicOp(toAtomicCommand(session.sessionId(),
                 msg.getRequestId(), req));
@@ -278,7 +427,9 @@ public final class RequestDispatcher {
      */
     public static StatusCode validateAtomicRequest(AtomicOpRequest req) {
         io.github.lamspace.openlatch.protocol.LockType kind = req.getLockType();
-        if (kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG
+        boolean reference = kind
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE;
+        if (!reference && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_LONG
                 && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_INTEGER
                 && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
             return StatusCode.INVALID_REQUEST;
@@ -293,7 +444,23 @@ public final class RequestDispatcher {
         if (op == AtomicOp.GET && req.getOpSeq() != 0) {
             return StatusCode.INVALID_REQUEST;
         }
-        if (req.getExpectedVersion() < 0 || req.getInitialValue() < 0) {
+        if (req.getExpectedVersion() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (reference) {
+            // 有值引用形态：ADD 值域外（字节串无加法，判例布尔 ADD）；
+            // 标量槽位 MUST 为 0（操作数全走 optional bytes 通道）。
+            if (op == AtomicOp.ADD || req.getOperand() != 0 || req.getExpected() != 0
+                    || req.getInitialValue() != 0) {
+                return StatusCode.INVALID_REQUEST;
+            }
+            return null;
+        }
+        if (req.getInitialValue() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        // 标量形态 MUST NOT 携带引用载荷字段（presence 即形状违例）。
+        if (req.hasOperandBytes() || req.hasExpectedBytes() || req.hasInitialBytes()) {
             return StatusCode.INVALID_REQUEST;
         }
         if (kind == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_BOOLEAN) {
@@ -306,6 +473,178 @@ public final class RequestDispatcher {
             }
         }
         return null;
+    }
+
+    /**
+     * 有值引用载荷入口钳制（v6，尺寸判定唯一发生在接入层——超限命令
+     * MUST NOT 入日志/触引擎）：引用形态请求任一 {@code optional bytes}
+     * 字段（operand/expected/initial）字节长度超过 {@code maxValueBytes}
+     * 时回 {@code INVALID_REQUEST}；非引用形态恒合法（其载荷 presence
+     * 属形状违例，由 {@link #validateAtomicRequest} 拦截）。
+     *
+     * @param req           原子操作请求（形状已先行校验）
+     * @param maxValueBytes 本节点载荷上限
+     * @return 超限时的状态码；合法为 {@code null}
+     */
+    public static StatusCode validateRefPayloadClamp(AtomicOpRequest req, int maxValueBytes) {
+        if (req.getLockType()
+                != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_ATOMIC_REFERENCE) {
+            return null;
+        }
+        if ((req.hasOperandBytes() && req.getOperandBytes().size() > maxValueBytes)
+                || (req.hasExpectedBytes() && req.getExpectedBytes().size() > maxValueBytes)
+                || (req.hasInitialBytes() && req.getInitialBytes().size() > maxValueBytes)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return null;
+    }
+
+    /**
+     * 队列请求形状校验（v7，配置无关的形状矩阵，单机分发与集群 Leader
+     * 入口共用——违例以 {@code INVALID_REQUEST} 消息级拒绝、不断连、零扰动）：
+     * {@code lock_type} MUST 为队列双形态之一；元素仅 PUT 携带且 PUT MUST
+     * 携带（元素不可为 null——缺省 presence 即违例，与引用形态的 null
+     * 语义刻意不同）；{@code delay_ms} 仅 DELAY_QUEUE 形态的 PUT 可携非零
+     * （负值违例）；{@code max_elements} 仅 DRAIN 可携非零；{@code blocking}
+     * 仅 PUT/TAKE 可携 {@code true}；写类 op {@code op_seq ≥ 1}、读类
+     * （PEEK/SIZE）{@code op_seq} MUST 为 0；容量断言 MUST 非负。
+     * 尺寸钳制（元素字节/容量上限/drain 预算）经 {@link #clampQueueRequest}
+     * 另行执行，不含在本矩阵内。
+     *
+     * @param req 队列请求
+     * @return 非法时 {@code INVALID_REQUEST}；合法为 {@code null}
+     */
+    public static StatusCode validateQueueShape(QueueOpRequest req) {
+        io.github.lamspace.openlatch.protocol.LockType kind = req.getLockType();
+        if (kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_QUEUE
+                && kind != io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        QueueOp op = req.getOp();
+        if (op == QueueOp.UNRECOGNIZED) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        boolean put = op == QueueOp.QUEUE_OP_PUT;
+        boolean take = op == QueueOp.QUEUE_OP_TAKE;
+        boolean drain = op == QueueOp.QUEUE_OP_DRAIN;
+        boolean read = op == QueueOp.QUEUE_OP_PEEK || op == QueueOp.QUEUE_OP_SIZE;
+        if (put != req.hasElementBytes()) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getBlocking() && !(put || take)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getCapacity() < 0 || req.getDelayMs() < 0 || req.getMaxElements() < 0) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getDelayMs() > 0 && !(put && kind
+                == io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_DELAY_QUEUE)) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (req.getMaxElements() > 0 && !drain) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        if (read ? req.getOpSeq() != 0 : req.getOpSeq() < 1) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return null;
+    }
+
+    /**
+     * 队列入口钳制结果（v7）：拒绝时 {@code error} 非空、{@code request}
+     * 为 {@code null}；放行时 {@code request} 为钳定后的最终请求——DRAIN
+     * 提取上限折算为正值随条目入日志（全副本应用一致，apply 不读本地
+     * 配置，判例 v6 钳制唯一在接入层）。
+     *
+     * @param error   入口拒绝状态码（{@code null}=放行）
+     * @param request 钳定后的请求
+     */
+    public record QueueClamp(StatusCode error, QueueOpRequest request) {
+    }
+
+    /**
+     * 队列入口钳制（v7）：PUT 元素字节数超 {@code maxValueBytes} 拒；容量
+     * 主张超 {@code maxQueueCapacity} 拒；DRAIN 提取上限钳定到
+     * {@code min(主张值(0=取派生上限), maxQueueCapacity, floor(maxDrainBytes /
+     * maxValueBytes))}（下限 1）回写请求。超限 MUST 入口拒绝且零日志/零
+     * 引擎调用；钳制下调不追溯存量元素（既有大元素照常可读可消费）。
+     *
+     * @param req              队列请求（已经 {@link #validateQueueShape} 放行）
+     * @param maxValueBytes    单元素载荷上限
+     * @param maxQueueCapacity 容量主张上限
+     * @param maxDrainBytes    drain 应答字节预算
+     * @return 钳制结果
+     */
+    public static QueueClamp clampQueueRequest(QueueOpRequest req, int maxValueBytes,
+            long maxQueueCapacity, long maxDrainBytes) {
+        if (req.hasElementBytes() && req.getElementBytes().size() > maxValueBytes) {
+            return new QueueClamp(StatusCode.INVALID_REQUEST, null);
+        }
+        if (req.getCapacity() > maxQueueCapacity) {
+            return new QueueClamp(StatusCode.INVALID_REQUEST, null);
+        }
+        QueueOpRequest out = req;
+        if (req.getOp() == QueueOp.QUEUE_OP_DRAIN) {
+            long derived = Math.max(1L, Math.min(Math.max(1L, maxDrainBytes)
+                            / Math.max(1, maxValueBytes),
+                    Math.max(1L, maxQueueCapacity)));
+            int limit = req.getMaxElements();
+            if (limit <= 0 || limit > derived) {
+                out = req.toBuilder()
+                        .setMaxElements((int) Math.min(derived, Integer.MAX_VALUE))
+                        .build();
+            }
+        }
+        return new QueueClamp(null, out);
+    }
+
+    /**
+     * 协议队列请求 → core 命令（形态与操作映射；{@code blocking} 位原样
+     * 承载——单机路径由条目裁决挂起，集群 apply 侧固定立即式）。
+     *
+     * @param sessionId 引擎内部或单机会话 id
+     * @param requestId 信封请求 id
+     * @param req       队列请求（已过形状与钳制）
+     * @return core 命令
+     */
+    public static io.github.lamspace.openlatch.core.command.QueueOpCommand toQueueCommand(
+            long sessionId, long requestId, QueueOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.QueueOpCommand(
+                sessionId, requestId, req.getKey(),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCoreQueueKind(req.getLockType().getNumber()),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCoreQueueOp(req.getOp()),
+                req.getBlocking(), req.getCapacity(),
+                req.hasElementBytes() ? req.getElementBytes().toByteArray() : null,
+                req.getDelayMs(), req.getMaxElements(), req.getOpSeq());
+    }
+
+    /**
+     * core 队列结果 → 协议应答（v7）：GRANTED 择用交付字段（TAKE/PEEK 显式
+     * presence——空队/未到期回缺省；DRAIN 空列表为合法结果；SIZE 读数），
+     * QUEUED 携位次，拒绝态交付字段全缺省；{@code capacity} 恒回显条目
+     * 定型值（key 尚不存在为 0）。
+     *
+     * @param msg 原请求信封
+     * @param r   core 结果
+     * @return 应答信封
+     */
+    public static Envelope toQueueOpResponse(Envelope msg,
+            io.github.lamspace.openlatch.core.result.QueueOpResult r) {
+        QueueOpResponse.Builder b = QueueOpResponse.newBuilder()
+                .setStatus(toLatchStatus(r.outcome()))
+                .setOp(msg.getQueueOpRequest().getOp())
+                .setQueuePosition(r.queuePosition())
+                .setSize(r.size())
+                .setCapacity(r.capacity());
+        if (r.element() != null) {
+            b.setElementBytes(com.google.protobuf.ByteString.copyFrom(r.element()));
+        }
+        for (byte[] element : r.drained()) {
+            b.addDrainedBytes(com.google.protobuf.ByteString.copyFrom(element));
+        }
+        return envelope(msg, MessageType.QUEUE_OP, x -> x.setQueueOpResponse(b));
     }
 
     /**
@@ -322,6 +661,54 @@ public final class RequestDispatcher {
                 toCoreAtomicKind(req.getLockType().getNumber()),
                 toCoreAtomicOp(req.getOp()), req.getOperand(), req.getExpected(),
                 req.getExpectedVersion(), req.getInitialValue(), req.getOpSeq());
+    }
+
+    /**
+     * 协议原子请求（引用形态）→ core 引用命令。{@code optional bytes}
+     * 按显式 presence 还原：缺省={@code null}、零长度=空字节串。仅在
+     * {@link #validateAtomicRequest} 与 {@link #validateRefPayloadClamp}
+     * 通过后调用。
+     *
+     * @param sessionId 会话 id
+     * @param requestId 连接内请求 id
+     * @param req       协议请求（引用形态）
+     * @return core 引用命令
+     */
+    static io.github.lamspace.openlatch.core.command.AtomicRefOpCommand toAtomicRefCommand(
+            long sessionId, long requestId, AtomicOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.AtomicRefOpCommand(
+                sessionId, requestId, req.getKey(), toCoreAtomicOp(req.getOp()),
+                req.hasOperandBytes() ? req.getOperandBytes().toByteArray() : null,
+                req.hasExpectedBytes() ? req.getExpectedBytes().toByteArray() : null,
+                req.getExpectedVersion(),
+                req.hasInitialBytes() ? req.getInitialBytes().toByteArray() : null,
+                req.getOpSeq());
+    }
+
+    /**
+     * core 引用结果 → 协议应答（v6）：{@code GRANTED} 携带载荷应答四元组
+     * （null 态=bytes 字段缺省、零长度=EMPTY）与 op 回显，标量值位恒 0；
+     * 拒绝态四元组留零值形（bytes 全缺省）。
+     *
+     * @param msg    原请求信封
+     * @param result core 引用结果
+     * @return 应答信封
+     */
+    static Envelope toAtomicRefOpResponse(Envelope msg,
+            io.github.lamspace.openlatch.core.result.AtomicRefOpResult result) {
+        AtomicOpResponse.Builder resp = AtomicOpResponse.newBuilder()
+                .setStatus(toLatchStatus(result.outcome()))
+                .setOp(msg.getAtomicOpRequest().getOp());
+        if (result.outcome() == Outcome.GRANTED) {
+            resp.setApplied(result.applied()).setVersion(result.version());
+            if (result.oldValue() != null) {
+                resp.setOldValueBytes(com.google.protobuf.ByteString.copyFrom(result.oldValue()));
+            }
+            if (result.value() != null) {
+                resp.setValueBytes(com.google.protobuf.ByteString.copyFrom(result.value()));
+            }
+        }
+        return envelope(msg, MessageType.ATOMIC_OP, b -> b.setAtomicOpResponse(resp));
     }
 
     /**
@@ -435,6 +822,149 @@ public final class RequestDispatcher {
     }
 
     /**
+     * 分发队列操作（v7）：v7 门控与形状校验、入口钳制先于核心调用——
+     * 非法请求零入核、消息级拒绝不断连（判例各门与原子通道钳制）。
+     * 单机路径的挂起由条目双轨承载（引擎条目内 awaiters，判例 Latch
+     * 单机形态），唤醒经引擎事件出口推送、延时到期由本机调度周期扫描
+     * 驱动。应答构造见 {@link #toQueueOpResponse}。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code queue_op_request} 分支）
+     * @return 应答信封
+     */
+    private Envelope dispatchQueueOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 7) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        QueueOpRequest req = msg.getQueueOpRequest();
+        StatusCode shapeBad = validateQueueShape(req);
+        QueueClamp clamp = shapeBad == null
+                ? clampQueueRequest(req, maxValueBytes, maxQueueCapacity, maxDrainBytes)
+                : new QueueClamp(shapeBad, null);
+        if (clamp.error() != null) {
+            return errorResponse(msg, clamp.error());
+        }
+        io.github.lamspace.openlatch.core.result.QueueOpResult r =
+                core.queueOp(toQueueCommand(session.sessionId(), msg.getRequestId(),
+                        clamp.request()));
+        if (metrics != null) {
+            metrics.recordQueue(clamp.request().getOp(), toLatchStatus(r.outcome()));
+        }
+        return toQueueOpResponse(msg, r);
+    }
+
+    /**
+     * topic 请求形状互斥矩阵（v8，两路共用）：PUBLISH 必携 {@code
+     * payload_bytes}（缺省即违例，判例 v7 元素纪律）且 {@code op_seq >= 1}；
+     * SUBSCRIBE/UNSUBSCRIBE 不携带载荷且 {@code op_seq == 0}；
+     * {@code UNRECOGNIZED} 拒绝。判定唯一在接入层，登记表不复核。
+     *
+     * @param req topic 请求
+     * @return 非法时 {@code INVALID_REQUEST}；合法为 {@code null}
+     */
+    public static StatusCode validateTopicShape(TopicOpRequest req) {
+        TopicOp op = req.getOp();
+        if (op == TopicOp.UNRECOGNIZED) {
+            return StatusCode.INVALID_REQUEST;
+        }
+        return switch (op) {
+            case TOPIC_OP_PUBLISH -> req.hasPayloadBytes() && req.getOpSeq() >= 1
+                    ? null : StatusCode.INVALID_REQUEST;
+            case TOPIC_OP_SUBSCRIBE, TOPIC_OP_UNSUBSCRIBE ->
+                    !req.hasPayloadBytes() && req.getOpSeq() == 0
+                    ? null : StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INVALID_REQUEST;
+        };
+    }
+
+    /**
+     * topic 键校验（v8，两路共用）：空键回 {@code KEY_EMPTY}、超长按
+     * {@code KEY_TOO_LONG}——与引擎 acquire 的键纪律同码形（topic 不经引擎，
+     * 校验上收到接入层）。
+     *
+     * @param key          topic 键
+     * @param maxKeyLength 键长上限（UTF-8 字节）
+     * @return 非法状态码；合法为 {@code null}
+     */
+    public static StatusCode validateTopicKey(String key, int maxKeyLength) {
+        if (key.isEmpty()) {
+            return StatusCode.KEY_EMPTY;
+        }
+        if (key.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > maxKeyLength) {
+            return StatusCode.KEY_TOO_LONG;
+        }
+        return null;
+    }
+
+    /**
+     * 分发 topic 操作（v8，单机路径）：v8 门、形状互斥、键校验、载荷
+     * {@code maxValueBytes} 钳制、撞 key 只读探测（引擎条目在场即拒，
+     * 内部裁决 {@code REJECT_TYPE_MISMATCH}、线路送达 {@code INVALID_REQUEST}，
+     * 判例引擎形状拒绝映射）先于登记表调用——全部拒绝态零登记、零扇出。
+     * 受理成功后按操作分派：SUBSCRIBE 幂等登记（达上限回
+     * {@code REJECT_SUBSCRIBERS}）、UNSUBSCRIBE 幂等摘除、PUBLISH 经去重槽
+     * 受理并入 fan-out（至多一次：{@code OK} 不承诺交付）。计数线在
+     * 受理点记录（形状非法不计数，杜绝维度伪造，判例 atomic/queue）。
+     *
+     * @param session 已握手会话（握手门闩保证会话在场）
+     * @param msg     请求信封（{@code topic_op_request} 分支）
+     * @return 应答信封（同型 topic_op_response）
+     */
+    private Envelope dispatchTopicOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 8) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        if (topics == null) {
+            java.util.logging.Logger.getLogger(RequestDispatcher.class.getName())
+                    .warning("TOPIC_OP dispatched without topic registry assembly");
+            return errorResponse(msg, StatusCode.INTERNAL_ERROR);
+        }
+        TopicOpRequest req = msg.getTopicOpRequest();
+        StatusCode shapeBad = validateTopicShape(req);
+        if (shapeBad != null) {
+            return errorResponse(msg, shapeBad);
+        }
+        StatusCode keyBad = validateTopicKey(req.getKey(), maxKeyLength);
+        if (keyBad != null) {
+            return errorResponse(msg, keyBad);
+        }
+        if (req.hasPayloadBytes() && req.getPayloadBytes().size() > maxValueBytes) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        long nowMs = System.currentTimeMillis();
+        String key = req.getKey();
+        TopicOpResponse.Builder out = TopicOpResponse.newBuilder().setOp(req.getOp());
+        switch (req.getOp()) {
+            case TOPIC_OP_SUBSCRIBE -> {
+                if (core.inspectKey(key) != null) {
+                    return errorResponse(msg, StatusCode.INVALID_REQUEST);
+                }
+                var r = topics.subscribe(session.sessionId(), key, nowMs);
+                out.setStatus(r.status()).setSubscriptionId(r.subscriptionId());
+            }
+            case TOPIC_OP_UNSUBSCRIBE -> {
+                topics.unsubscribe(session.sessionId(), key);
+                out.setStatus(StatusCode.OK);
+            }
+            case TOPIC_OP_PUBLISH -> {
+                if (core.inspectKey(key) != null) {
+                    return errorResponse(msg, StatusCode.INVALID_REQUEST);
+                }
+                var r = topics.publish(session.sessionId(), key, req.getOpSeq(),
+                        req.getPayloadBytes().toByteArray(), nowMs);
+                out.setStatus(StatusCode.OK).setTopicSeq(r.topicSeq());
+            }
+            default -> {
+                return errorResponse(msg, StatusCode.INVALID_REQUEST);
+            }
+        }
+        if (metrics != null) {
+            metrics.recordTopic(req.getOp(), out.getStatus());
+        }
+        return envelope(msg, MessageType.TOPIC_OP, b -> b.setTopicOpResponse(out));
+    }
+
+    /**
      * 协议形态数值 → core 原子形态（枚举序对齐 7/8/9）；其余回 {@code null}。
      *
      * @param number 协议 {@code LockType} 数值
@@ -445,6 +975,7 @@ public final class RequestDispatcher {
             case 7 -> LockType.ATOMIC_LONG;
             case 8 -> LockType.ATOMIC_INTEGER;
             case 9 -> LockType.ATOMIC_BOOLEAN;
+            case 11 -> LockType.ATOMIC_REFERENCE;
             default -> null;
         };
     }
@@ -486,6 +1017,22 @@ public final class RequestDispatcher {
         if (session.protocolVersion() < 3 && isV3OnlyLockType(req.getLockType())) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
         }
+        // v9 门控：ACQUIRE 携带 condition 字段仅对 v9 会话开放（v≤8 消息级拒绝、
+        // 不断连，判例 v3-v8 门；唤醒后的重发信封按协议纪律清除该字段，走普通获取）。
+        if (req.hasCondition() && session.protocolVersion() < 9) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        // v9 折叠形状唯一裁决（判定在接入层，判例 validateAcquirePermits）：
+        // 立即式携带 condition 违例；lock_type 限互斥三型；condition 名须非空
+        // 且 UTF-8 字节数 ≤ maxKeyLength（空串/超长同型拒绝、零扰动——与集群
+        // ClusterRequestHandler.handleAcquireFold 的接入层裁决逐字对称，core
+        // 折叠路径对条件名不做二次裁决）。
+        if (req.hasCondition() && (!acquireFoldShapeValid(req)
+                || req.getCondition().isEmpty()
+                || req.getCondition().getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                        .length > maxKeyLength)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         StatusCode permitBad = validateAcquirePermits(req);
         if (permitBad != null) {
             return errorResponse(msg, permitBad);
@@ -503,9 +1050,236 @@ public final class RequestDispatcher {
                 req.getLeaseMs(),
                 req.getWaitMs() != 0,   // wait_ms == 0 立即式；-1 与 >0 均可排队
                 normalizedPermits(req.getPermits()),
-                req.getPermitsTotal());
+                req.getPermitsTotal(),
+                req.hasCondition() ? req.getCondition() : null);   // v9 折叠形态
         AcquireResult result = core.acquire(cmd);
         return toAcquireResponse(msg, result, System.currentTimeMillis());
+    }
+
+    /**
+     * v9 await 折叠形状合法性（判定唯一在接入层，判例 {@link #validateAcquirePermits}）：
+     * {@code wait_ms == 0}（立即式）携带 condition 违例——await 恒为挂起形态，
+     * {@code >0} 的本地计时窗与 {@code -1} 对服务端同判；{@code lock_type} 限
+     * REENTRANT/SIMPLE/FAIR 三互斥形态（v1 支持面，读写形态与其余家族携带属违例）。
+     * 条件名非空与长度上限（UTF-8 字节数 ≤ {@code maxKeyLength}）由本类
+     * {@code dispatchAcquire} 门与集群 {@code ClusterRequestHandler.handleAcquireFold}
+     * 同点裁决（空串/超长同型 {@code INVALID_REQUEST}、零扰动；core 折叠路径
+     * 对条件名不再二次裁决——判定唯一在接入层）。
+     *
+     * @param req 获取请求（已确认 {@code hasCondition()}）
+     * @return 形状合法返回 true
+     */
+    public static boolean acquireFoldShapeValid(AcquireRequest req) {
+        if (req.getWaitMs() == 0) {
+            return false;
+        }
+        return switch (req.getLockType()) {
+            case LOCK_TYPE_REENTRANT, LOCK_TYPE_SIMPLE, LOCK_TYPE_FAIR -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * 分发条件 signal 家族操作（v9，单机形态=常驻权威）：门控与 op×字段携带矩阵
+     * 唯一裁决在接入层（违例同型 {@code INVALID_REQUEST}、等待集零扰动）；裁决后
+     * 交 core 门面即时回执（AWAIT 不经本通道——它是 ACQUIRE 携带 condition 的
+     * 折叠形态）。唤醒通知经既有队首监听器出口推送。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封（已确认携带 {@code ConditionOpRequest}）
+     * @return 协议响应信封（status + op 回显）
+     */
+    private Envelope dispatchConditionOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 9) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        var req = msg.getConditionOpRequest();
+        if (conditionOpShapeInvalid(req)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.core.result.ConditionOpResult result =
+                core.conditionOp(new io.github.lamspace.openlatch.core.command.ConditionOpCommand(
+                        session.sessionId(), req.getThreadId(), req.getKey(),
+                        req.getCondition(), toCoreConditionOp(req.getOp()),
+                        req.getAwaitRequestId()));
+        StatusCode status = toConditionStatus(result.status());
+        if (metrics != null) {
+            metrics.recordCondition(req.getOp(), status);
+        }
+        return envelope(msg, MessageType.CONDITION_OP, b -> b.setConditionOpResponse(
+                io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp())));
+    }
+
+    /**
+     * v9 signal 家族 op×字段携带矩阵违例判定（接入层唯一裁决，判例 topic 形状矩阵）：
+     * SIGNAL/SIGNAL_ALL 携非零 {@code await_request_id} 违例；LEAVE 必携非零
+     * {@code await_request_id} 且 {@code thread_id} 为 0、条件名非空；
+     * 矩阵外组合一律违例。
+     *
+     * @param req 条件操作请求
+     * @return 违例返回 true
+     */
+    public static boolean conditionOpShapeInvalid(
+            io.github.lamspace.openlatch.protocol.ConditionOpRequest req) {
+        return switch (req.getOp()) {
+            case CONDITION_OP_SIGNAL, CONDITION_OP_SIGNAL_ALL -> req.getAwaitRequestId() != 0;
+            case CONDITION_OP_LEAVE -> req.getAwaitRequestId() == 0 || req.getThreadId() != 0
+                    || req.getCondition().isEmpty();
+            default -> true;
+        };
+    }
+
+    /**
+     * 协议条件操作词 → core 词表。
+     *
+     * @param op 协议操作词
+     * @return core 操作词
+     */
+    static io.github.lamspace.openlatch.core.command.ConditionOp toCoreConditionOp(
+            io.github.lamspace.openlatch.protocol.ConditionOp op) {
+        return switch (op) {
+            case CONDITION_OP_SIGNAL -> io.github.lamspace.openlatch.core.command.ConditionOp.SIGNAL;
+            case CONDITION_OP_SIGNAL_ALL ->
+                    io.github.lamspace.openlatch.core.command.ConditionOp.SIGNAL_ALL;
+            case CONDITION_OP_LEAVE -> io.github.lamspace.openlatch.core.command.ConditionOp.LEAVE;
+            default -> throw new IllegalArgumentException("unknown condition op: " + op);
+        };
+    }
+
+    /**
+     * core 条件裁决状态 → 协议状态码（既有词表承载、零新增，判例
+     * {@code toLatchStatus} 的映射纪律）：key/条件名/家族违例统一
+     * {@code INVALID_REQUEST}，会话失效 {@code SESSION_EXPIRED}，
+     * signal 权限 {@code NOT_HELD} 原词送达。
+     *
+     * @param status core 裁决状态
+     * @return 协议状态码
+     */
+    /**
+     * 分发相位器操作（v10 单机路径）：v10 门 → 形状互斥矩阵 →
+     * {@code core.phaserOp}（受理通道——配额上限与合并等待深度在引擎
+     * 门面判定，唤醒随条目锁外经监听器推送，判例 {@code dispatchQueueOp}
+     * 的受理即裁决形态；单机恒"登记等待项于条目"——集群双拓扑见
+     * {@code ClusterRequestHandler.handlePhaserOp}）。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchPhaserOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 10) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest req = msg.getPhaserOpRequest();
+        if (phaserShapeInvalid(req)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.core.result.PhaserOpResult r =
+                core.phaserOp(toPhaserCommand(session.sessionId(), msg.getRequestId(), req));
+        StatusCode status = toPhaserStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordPhaser(req.getOp(), status);
+        }
+        return envelope(msg, MessageType.PHASER_OP, b -> b.setPhaserOpResponse(
+                io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp())
+                        .setPhase(r.phase())
+                        .setRegistered(r.registered())
+                        .setArrived(r.arrived())));
+    }
+
+    /**
+     * 协议 phaser 请求 → core 命令（两车道共用；形状已由
+     * {@link #phaserShapeInvalid} 放行，{@code expected_phase} presence
+     * 按主张透传）。
+     *
+     * @param sessionId 会话 id（单机引擎内部 sid）
+     * @param requestId 信封请求 id
+     * @param req       协议请求
+     * @return core 命令
+     */
+    public static io.github.lamspace.openlatch.core.command.PhaserOpCommand toPhaserCommand(
+            long sessionId, long requestId,
+            io.github.lamspace.openlatch.protocol.PhaserOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.PhaserOpCommand(sessionId,
+                requestId, req.getKey(),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCorePhaserOp(req.getOp()),
+                req.getParties(),
+                req.hasExpectedPhase() ? req.getExpectedPhase() : null,
+                req.getAwaitRequestId());
+    }
+
+    /**
+     * phaser 请求形状互斥矩阵（接入层唯一裁决，判例
+     * {@code validateQueueShape}/{@code conditionOpShapeInvalid}，集群路径
+     * 复用本静态）：{@code parties} 仅 REGISTER 且 ≥1；
+     * {@code expected_phase} 仅 AWAIT_ADVANCE 且 ≥0（presence 必携）；
+     * {@code await_request_id} 仅 CANCEL 且 >0。矩阵外组合回
+     * {@code true}（违例）。
+     *
+     * @param req 协议请求
+     * @return 形状违例为 {@code true}
+     */
+    public static boolean phaserShapeInvalid(
+            io.github.lamspace.openlatch.protocol.PhaserOpRequest req) {
+        boolean hasExpected = req.hasExpectedPhase();
+        return switch (req.getOp()) {
+            case PHASER_OP_REGISTER -> req.getParties() < 1 || hasExpected
+                    || req.getAwaitRequestId() != 0;
+            case PHASER_OP_ARRIVE, PHASER_OP_ARRIVE_AND_AWAIT,
+                    PHASER_OP_ARRIVE_AND_DEREGISTER -> req.getParties() != 0
+                    || hasExpected || req.getAwaitRequestId() != 0;
+            case PHASER_OP_AWAIT_ADVANCE -> req.getParties() != 0 || !hasExpected
+                    || req.getExpectedPhase() < 0 || req.getAwaitRequestId() != 0;
+            case PHASER_OP_CANCEL -> req.getParties() != 0 || hasExpected
+                    || req.getAwaitRequestId() <= 0;
+            case PHASER_OP_QUERY -> req.getParties() != 0 || hasExpected
+                    || req.getAwaitRequestId() != 0;
+            default -> true;
+        };
+    }
+
+    /**
+     * core phaser 裁决 → 协议状态码（两超限同落 {@code OVERLOADED}、以线路
+     * op 回显分轨；配额透支与无条目两拒绝共 {@code INVALID_REQUEST}——
+     * 判例 {@code toQueueStatus} 的映射纪律）。
+     *
+     * @param outcome core 裁决
+     * @return 协议状态码
+     */
+    static StatusCode toPhaserStatus(io.github.lamspace.openlatch.core.result.Outcome outcome) {
+        return switch (outcome) {
+            case GRANTED -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_KEY_EMPTY -> StatusCode.KEY_EMPTY;
+            case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
+            case REJECT_QUEUE_FULL, REJECT_PHASER_PARTIES -> StatusCode.OVERLOADED;
+            case REJECT_PHASER_QUOTA, REJECT_PHASER_NO_ENTRY, REJECT_TYPE_MISMATCH ->
+                    StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+    }
+
+    /**
+     * 条件裁决 → 协议状态码（signal 权限 {@code NOT_HELD} 原词送达）。
+     *
+     * @param status core 条件裁决状态
+     * @return 协议状态码
+     */
+    static StatusCode toConditionStatus(
+            io.github.lamspace.openlatch.core.result.ConditionOpResult.Status status) {
+        return switch (status) {
+            case OK -> StatusCode.OK;
+            case NOT_HELD -> StatusCode.NOT_HELD;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG, REJECT_TYPE_MISMATCH ->
+                    StatusCode.INVALID_REQUEST;
+        };
     }
 
     /**
@@ -757,6 +1531,27 @@ public final class RequestDispatcher {
             // v4：ATOMIC 消息同规则——拒绝状态码在线路可见（客户端裁决依赖）。
             case ATOMIC_OP -> b.setAtomicOpResponse(
                     AtomicOpResponse.newBuilder().setStatus(status));
+            // v7：QUEUE_OP 同规则——门控/形状/钳制拒绝的状态码在线路可见
+            // （SDK 的"不可重试→显式异常"分类依赖应答码形）。
+            case QUEUE_OP -> b.setQueueOpResponse(
+                    QueueOpResponse.newBuilder().setStatus(status));
+            // v8：TOPIC_OP 同规则——门控/形状/钳制/撞 key 拒绝的状态码在线路
+            // 可见且 op 回显（判例 QUEUE_OP；默认实例形态的 OK 伪成功违例）。
+            case TOPIC_OP -> b.setTopicOpResponse(TopicOpResponse.newBuilder()
+                    .setStatus(status)
+                    .setOp(request.getTopicOpRequest().getOp()));
+            // v9：CONDITION_OP 同规则——门控/形状/权限拒绝的状态码在线路可见且
+            // op 回显（判例 TOPIC_OP/QUEUE_OP；默认实例形态的 OK 伪成功违例）。
+            case CONDITION_OP -> b.setConditionOpResponse(
+                    io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
+                            .setStatus(status)
+                            .setOp(request.getConditionOpRequest().getOp()));
+            // v10：PHASER_OP 同规则——门控/形状/家族/无条目拒绝的状态码在线路
+            // 可见且 op 回显（判例 CONDITION_OP；默认实例形态的 OK 伪成功违例）。
+            case PHASER_OP -> b.setPhaserOpResponse(
+                    io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
+                            .setStatus(status)
+                            .setOp(request.getPhaserOpRequest().getOp()));
             default -> {
             }
         }

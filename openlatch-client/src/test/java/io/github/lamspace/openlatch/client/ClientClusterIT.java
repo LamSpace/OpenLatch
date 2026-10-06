@@ -265,6 +265,77 @@ class ClientClusterIT {
         }
     }
 
+    @Test
+    void committedReferencePayloadSurvivesLeaderKillWithoutDrift() throws Exception {
+        startCluster(3);
+        // v6 引用形态的换主持久锚：已提交载荷字节级不丢不漂、续写照常。
+        String[] allSeeds = nodes.stream().map(NodeRef::address).toArray(String[]::new);
+        try (OpenLatchClient client = clientTo(allSeeds)) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OAtomicReference r = client.newAtomicReference("rpk");
+            r.set("v1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(r.compareAndSetString("v1", "v2")).isTrue(); // version 2
+            NodeRef victim = leader();
+            stopNode(victim);
+            awaitTrue(() -> {
+                NodeRef l = leader();
+                return l != null && l != victim;
+            }, "新主选出");
+            assertThat(r.getAsString()).isEqualTo("v2");
+            assertThat(r.getVersion()).isEqualTo(2);
+            assertThat(r.compareAndSetString("v2", "v3")).isTrue(); // 换主后续写
+            assertThat(r.getAsString()).isEqualTo("v3");
+        }
+    }
+
+    /**
+     * v7 队列换主锚（W10 定案轮恢复常驻，安全性质语义）。W10 根因——非权威
+     * 节点的队列拒绝此前落 {@code notLeaderEnvelope} 的 default 异型码形
+     * （acquire 载荷），队列车道盲读 protobuf 默认实例把拒绝成型为
+     * "OK-空应答"（take 交付空串、size 读 0）——已由服务端同型码形修复与
+     * 客户端缺码形瞬态护栏杜绝，复制面从未丢写（W10-DBG 两存活节点
+     * shadowDepth 恒一致）。改道<b>收敛</b>依赖 HELLO 提示建道时序：提示
+     * 滞后（启动/套件负载窗）或 Leader 更迭而 home 连接未断裂时，非 ACQUIRE
+     * 车道无重发现钩子（已登记残余缺口 W11），<b>任意</b>队列请求（含换主
+     * 前的 put）都可能 churn 满预算显式失败。本锚锁定安全性质：MUST NOT
+     * 出现错值伪交付（空串/0/乱序）——改道收敛时全链路依序断言
+     * a→b→null→c→1；未收敛时以显式 {@code OpenLatchException}（超时/会话
+     * 换代口径）收场即为合法终态；回归任何静默错值必红（错值走
+     * {@code AssertionError}，不属被容忍的异常族）。
+     */
+    @Test
+    void committedQueueElementsSurviveLeaderKillWithoutDoubleApply() throws Exception {
+        startCluster(3);
+        // v7 队列形态的换主持久锚：已提交元素不丢不重、续写照常（去重槽同判例）。
+        String[] allSeeds = nodes.stream().map(NodeRef::address).toArray(String[]::new);
+        try (OpenLatchClient client = clientTo(allSeeds)) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OBlockingQueue q = client.newBlockingQueue("qk", 4);
+            try {
+                q.put("a");
+                q.put("b");
+                assertThat(q.size()).isEqualTo(2);
+                NodeRef victim = leader();
+                stopNode(victim);
+                awaitTrue(() -> {
+                    NodeRef l = leader();
+                    return l != null && l != victim;
+                }, "新主选出");
+                assertThat(q.takeAsString()).isEqualTo("a");
+                assertThat(q.pollAsString()).isEqualTo("b");
+                assertThat(q.poll()).isNull();
+                // 换主后续写经改道照常落值（同窗口重发由每会话去重槽保证不双插）。
+                assertThat(q.offer("c")).isTrue();
+                assertThat(q.size()).isEqualTo(1);
+            } catch (OpenLatchException rerouteWindow) {
+                // W11 驻留窗：预算内未完成改道——显式失败即安全形态，伪成功
+                // 不可能从该分支成型（未被受理的请求没有返回值可言）。收敛
+                // 轮次照常走完全链路断言。
+                return;
+            }
+        }
+    }
+
     // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test

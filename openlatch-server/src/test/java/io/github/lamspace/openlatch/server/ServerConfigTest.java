@@ -73,6 +73,13 @@ class ServerConfigTest {
                 openlatch.server.limit.max-key-length = 64
                 openlatch.server.limit.max-queue-depth-per-key = 16
                 openlatch.server.limit.max-inflight-per-connection = 8
+                openlatch.server.limit.max-value-bytes = 2048
+                openlatch.server.limit.max-queue-capacity = 512
+                openlatch.server.limit.max-drain-bytes = 65536
+                openlatch.server.queue.ready-tick-ms = 100
+                openlatch.server.limit.max-subscribers-per-key = 32
+                openlatch.server.limit.max-subscription-buffer = 128
+                openlatch.server.limit.max-parties-per-phaser = 2048
                 """);
 
         ServerConfig cfg = ServerConfig.load(file.toString());
@@ -88,6 +95,80 @@ class ServerConfigTest {
         assertThat(cfg.maxKeyLength()).isEqualTo(64);
         assertThat(cfg.maxQueueDepthPerKey()).isEqualTo(16);
         assertThat(cfg.maxInflightPerConnection()).isEqualTo(8);
+        assertThat(cfg.maxValueBytes()).isEqualTo(2048);
+        assertThat(cfg.maxQueueCapacity()).isEqualTo(512);
+        assertThat(cfg.maxDrainBytes()).isEqualTo(65_536L);
+        assertThat(cfg.queueReadyTickMs()).isEqualTo(100L);
+        assertThat(cfg.maxSubscribersPerKey()).isEqualTo(32);
+        assertThat(cfg.maxSubscriptionBuffer()).isEqualTo(128);
+        assertThat(cfg.maxPartiesPerPhaser()).isEqualTo(2048);
+        // v8 默认值钉定（64 订阅 / 256 条缓冲）。
+        ServerConfig def = ServerConfig.defaults();
+        assertThat(def.maxSubscribersPerKey())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIBERS_PER_KEY).isEqualTo(64);
+        assertThat(def.maxPartiesPerPhaser())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_PARTIES_PER_PHASER);
+        assertThat(def.maxSubscriptionBuffer())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIPTION_BUFFER).isEqualTo(256);
+    }
+
+    @Test
+    void v8_topic_limits_out_of_range_fail_fast() throws IOException {
+        // 逐界：订阅数 0/顶格上、缓冲条数 0/顶格上。
+        for (String line : new String[] {
+                "openlatch.server.limit.max-subscribers-per-key = 0",
+                "openlatch.server.limit.max-subscribers-per-key = 1025",
+                "openlatch.server.limit.max-subscription-buffer = 0",
+                "openlatch.server.limit.max-subscription-buffer = 65537",
+                "openlatch.server.limit.max-parties-per-phaser = 0",
+                "openlatch.server.limit.max-parties-per-phaser = 65537",
+        }) {
+            Path file = tempDir.resolve("bad-topic-limit.properties");
+            Files.writeString(file, line + "\n");
+            String key = line.substring(0, line.indexOf(' '));
+            assertThatThrownBy(() -> ServerConfig.load(file.toString()))
+                    .as("越界值应拒绝: %s", line)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(key);
+        }
+    }
+
+    /**
+     * v9 条件变量零新配置行（复用裁决的机械防线）：await 折叠进 ACQUIRE 车道、
+     * 登记计入既有 {@code max-queue-depth-per-key} 合并护栏，signal 家族恒即时
+     * 零日志零定时器——配置表面上 MUST NOT 出现任何 {@code condition} 专属的
+     * 容量/时刻参数（如后续立 change 评估分轨限额，届时随新键同步改写本断言）。
+     */
+    @Test
+    void v9_condition_introduces_no_config_keys() {
+        assertThat(java.util.Arrays.stream(ServerConfig.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .filter(n -> n.toLowerCase().contains("condition")))
+                .as("v9 零新配置：ServerConfig 不得携带 condition 专属参数")
+                .isEmpty();
+        // 合并护栏沿用既有常量（等待队列 + 条件集同限额钳制，判例队列等待满分轨）。
+        assertThat(ServerConfig.defaults().maxQueueDepthPerKey())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_QUEUE_DEPTH_PER_KEY);
+    }
+
+    @Test
+    void v7_queue_limits_out_of_range_fail_fast() throws IOException {
+        // 逐界：容量 0/顶格上、drain 预算 0/顶格上、ready-tick 下限。
+        for (String line : new String[] {
+                "openlatch.server.limit.max-queue-capacity = 0",
+                "openlatch.server.limit.max-queue-capacity = 65537",
+                "openlatch.server.limit.max-drain-bytes = 0",
+                "openlatch.server.limit.max-drain-bytes = 524289",
+                "openlatch.server.queue.ready-tick-ms = 9",
+        }) {
+            Path file = tempDir.resolve("bad-queue-limit.properties");
+            Files.writeString(file, line + "\n");
+            String key = line.substring(0, line.indexOf(' '));
+            assertThatThrownBy(() -> ServerConfig.load(file.toString()))
+                    .as("越界值应拒绝: %s", line)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(key);
+        }
     }
 
     @Test

@@ -45,10 +45,11 @@ public record CoreInspection(
         long sampledAtMs) {
 
     /**
-     * 单 key 条目的明细快照——五家族共用一个值形态，家族外字段取零值
+     * 单 key 条目的明细快照——六家族共用一个值形态，家族外字段取零值
      * （锁家族无许可/屏障字段，Semaphore 家族无屏障字段，Latch 家族无租约
      * 与持有者，ATOMIC 家族无租约/持有者/等待者、仅原子四字段有效，
-     * BARRIER 家族无租约/持有者、仅循环屏障五字段有效）。
+     * BARRIER 家族无租约/持有者、仅循环屏障五字段有效，QUEUE 家族无租约/
+     * 持有者、仅队列五字段有效且等待者携带轨道判别）。
      * 不可变值对象。
      *
      * @param key              锁键
@@ -77,6 +78,30 @@ public record CoreInspection(
      * @param barrierActionPending BARRIER 是否处于动作待决态（非该家族为 {@code false}）
      * @param barrierLastFinal BARRIER 最近完结世代的了结形态
      *                         （非该家族或尚无完结记录为 {@code null}）
+     * @param atomicRefInitial ATOMIC 有值引用形态的定型初值主张
+     *                         （非该形态为 {@code null}；该形态下 {@code null}
+     *                         亦可为"无主张"——与 {@code atomicRefValue} 同读）
+     * @param atomicRefValue ATOMIC 有值引用形态的当前载荷
+     *                         （非该形态为 {@code null}；该形态下 {@code null}
+     *                         为 null 态、零长度数组为空字节串——两态可区分。
+     *                         引用形态的 {@code atomicInitial}/{@code atomicValue}
+     *                         标量位恒 0）
+     * @param queueCapacity  QUEUE 定型容量（非该家族为 0）
+     * @param queueDepth     QUEUE 当前元素数（驻留口径，延时形态含未到期项；
+     *                       非该家族为 0）
+     * @param queueHeadExpiryMs QUEUE 队首元素绝对到期时刻（DELAY 形态读数；
+     *                       QUEUE 形态或空队为 0；非该家族恒 0）
+     * @param queueTotalPayloadBytes QUEUE 元素载荷字节之和（驻留治理读数；
+     *                       非该家族为 0）
+     * @param queueHeadPayload QUEUE 队首元素载荷克隆（不做到期可见性判定；
+     *                       空队为 {@code null}；非该家族恒 {@code null}）
+     * @param phaserPhase    PHASER 当前相位号（非该家族为 0）
+     * @param phaserRegistered PHASER 注册总数（非该家族为 0）
+     * @param phaserArrived  PHASER 当前相位到场计数（非该家族为 0；挂起
+     *                       等待明细不入本快照的 {@code waiters} 区段——
+     *                       phaser 等待无位次/许可/线程语义，经
+     *                       {@code PhaserEntry.waitersSnapshot()} 独立
+     *                       视图导出，判例条件等待并列不并号）
      */
     public record KeySnapshot(
             String key,
@@ -101,7 +126,17 @@ public record CoreInspection(
             long barrierGeneration,
             int barrierArrived,
             boolean barrierActionPending,
-            io.github.lamspace.openlatch.core.result.BarrierFinal barrierLastFinal) {
+            io.github.lamspace.openlatch.core.result.BarrierFinal barrierLastFinal,
+            byte[] atomicRefInitial,
+            byte[] atomicRefValue,
+            long queueCapacity,
+            int queueDepth,
+            long queueHeadExpiryMs,
+            long queueTotalPayloadBytes,
+            byte[] queueHeadPayload,
+            long phaserPhase,
+            int phaserRegistered,
+            int phaserArrived) {
     }
 
     /**
@@ -143,6 +178,8 @@ public record CoreInspection(
      * @param enqueuedAtMs 入队时刻（引擎时钟，毫秒）
      * @param waitedMs   已等待时长（采样时刻折算，下限 0）
      * @param notified   是否处于"已通知、待重发"状态
+     * @param track      队列挂起轨道判别（1=等容量 put-waiter、2=等元素
+     *                   take-waiter；非队列等待者恒 0，无意义）
      */
     public record WaiterSnapshot(
             long sessionId,
@@ -151,6 +188,7 @@ public record CoreInspection(
             int permits,
             long enqueuedAtMs,
             long waitedMs,
-            boolean notified) {
+            boolean notified,
+            int track) {
     }
 }

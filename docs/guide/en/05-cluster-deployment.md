@@ -30,6 +30,13 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.limit.max-key-length` | `512` | max key bytes |
 | `openlatch.server.limit.max-queue-depth-per-key` | `4096` | per-key queue depth cap |
 | `openlatch.server.limit.max-inflight-per-connection` | `1024` | inflight cap per connection |
+| `openlatch.server.limit.max-value-bytes` | `4096` | per-key payload cap for atomic references (v6); enforced only at ingress (over-limit commands never enter the log), range [1, 512KiB]; lowering the cap never retro-affects stored values |
+| `openlatch.server.limit.max-queue-capacity` | `1024` | ceiling for declared queue capacity claims (v7); an over-ceiling PUT claim is ingress-rejected with zero log entries, range [1, 65536]; combined with per-element `max-value-bytes` it bounds a key's residency |
+| `openlatch.server.limit.max-drain-bytes` | `262144` | drainTo reply byte budget (v7): the DRAIN extraction limit is clamped by budget/`max-value-bytes` and the clamped N rides the log entry (apply never reads local config), range [1, 512KiB] |
+| `openlatch.server.queue.ready-tick-ms` | `200` | delayed-queue ready-scan period (v7, Leader/standalone scheduler; affects wake-up latency precision only, never state adjudication), minimum 10ms |
+| `openlatch.server.limit.max-subscribers-per-key` | `64` | per-key topic subscriber ceiling (v8); an over-limit SUBSCRIBE is ingress-rejected (`REJECT_SUBSCRIBERS`, existing subscribers untouched), range [1, 1024]; bounds broadcast fan-out amplification |
+| `openlatch.server.limit.max-subscription-buffer` | `256` | server-side in-flight buffer depth per subscription (v8, drop-newest trigger line), range [1, 65536]; the SDK keeps a matching local tier (256) |
+| `openlatch.server.limit.max-parties-per-phaser` | `1024` | per-key phaser (v10) registration cap; an over-limit REGISTER is rejected at admission (`OVERLOADED`, existing quotas untouched), range [1, 65536]; checked only at admission (the entry never consultates it — config drift cannot split the ledger). Suspended waits instead share the existing `max-queue-depth-per-key` merged guardrail |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -126,6 +133,162 @@ availability is carried by the server-side self-healing watchdog, not by restart
 - Before rolling the server back past snapshot support: once the cluster has produced a
   snapshot (log truncated at the snapshot index), the data dir **cannot** be reopened by the
   older binary — clear & re-add, or stay on the current line.
+- **v6 atomic-reference rollback window**: reference payload log entries and snapshot
+  fields (`atomic_ref_*`) are v6 additions that pre-v6 binaries cannot interpret — before
+  rolling back below v6, drain the reference keys (a full `set(null)` does not reclaim
+  the entry, so either accept the memory residency during the rollback window, or clear
+  & re-add per the previous bullet). While on the older binary, any reference-form write
+  is shape-rejected at the old leader's ingress and never pollutes the replication face.
+- **v7 queue rollback window**: queue entries (`queue_*` snapshot fields,
+  `QUEUE_OP_ENTRY` log records, kinds 12/13) are v7 additions pre-v7 binaries
+  cannot interpret — before rolling back below v7, drain queue keys to empty
+  (`take`/`drainTo` everything; the entry itself stays, so accept an empty
+  entry's residency or clear & re-add per the earlier bullet). On the older
+  binary any `QUEUE_OP` message is rejected as an unknown message type and
+  never pollutes the replication face.
+- **v8 topic rollback window (clean by construction)**: topics are the first
+  zero-persistence primitive — the subscription registry, buffers, dedup slots
+  and `topic_seq` are Leader memory and MUST NOT reach the log or snapshots
+  (pinned by standing guard regressions). Rolling back to v7 leaves nothing to
+  drain: topic traffic contributed zero entries, so old binaries see no topic
+  traces at all — no "clear the keys first" chore unlike v6/v7 payloads. Note
+  the general mixed-version rule still applies: v8 SDK clients are rejected at
+  handshake against a rolled-back v7 server (server first on the way up,
+  client first on the way down), and in-flight subscriptions naturally stop
+  when connections drop (same loss semantics as a leader-change window).
+- **v9 condition rollback window (nothing to drain; the only constraint is
+  session convergence)**: the three primitives' rollback constraints are
+  **tracked per primitive and must not be conflated** — queue (drain keys or
+  accept unavailability), topic (zero persistence, clean by construction),
+  condition: the wait set and carried state are Leader process-volatile,
+  never logged and never snapshotted (pinned by standing zero-snapshot-delta
+  and zero-log-for-signal guard regressions); the await's release half rides
+  an **existing entry type** (`LOCK_ACQUIRE_ENTRY` — the `condition` field
+  flows through the request payload, so the Raft log and snapshot formats
+  gain nothing) — rolling back to v8 leaves **no condition-specific
+  persistent state to clear**. The sole constraint is **active v9 session
+  convergence**: a v9 SDK client against a rolled-back v8 server is rejected
+  at handshake (out-of-range handshakes failing fast is the pre-existing
+  discipline made visible, not a silent downgrade; the upgrade order for v8
+  and v9 is stated uniformly: servers first, clients second — and clients
+  first on the way down). Before rolling back, confirm v9 clients have
+  stepped down or are no longer active; in-flight awaits terminate with
+  their sessions and waiters do not resurrect.
+- **v10 phaser rollback window (fourth caliber, same shape as barrier/queue)**:
+  the phaser ledger is persistent primitive state — registrations, arrivals and
+  departures each commit a `PHASER_OP_ENTRY` (entry type 14) and the ledger is
+  written to `phaser_*` snapshot fields; pre-v10 binaries cannot understand
+  them. Before rolling back, confirm no in-flight phaser traffic or accept
+  phaser keys being unavailable on the old binary (unknown-entry error path per
+  the standing rule). Unlike the queue there is nothing to drain — the ledger
+  *is* the state; the single prerequisite is zeroing in-flight traffic. Mixed
+  version rule as usual: v10 SDK clients are refused at HELLO by a rolled-back
+  v9 server (upgrade server-first, rollback client-first). Fourth caliber
+  alongside queue "drain first", topic/condition "clean by construction" —
+  never cross-read the four.
+
+### Queue-dimension snapshot and log governance (v7)
+
+- A single queue key's snapshot residency is bounded by `capacity ×
+  max-value-bytes` (the element list) plus one `max-value-bytes` per session
+  dedup slot (latest delivery receipt; dropped at SESSION_CLOSE). Total snapshot
+  size is linear in queue keys × capacity × element ceiling and must never
+  accumulate with put/take rounds (no element history ships) — a gated
+  regression with full-capacity max-size elements plus delivery slots pins this.
+- Log entry rate: every queue write and read rides the commit (the ATOMIC GET
+  precedent), so hot queue keys are a real log-growth source; `drainTo` is the
+  built-in amortizer (many elements, one entry), and delayed wake-ups/parking/
+  bounces never enter the log (Leader-local). Production pressure on a hot
+  queue key's entry rate triggers WATCHLIST W9's evaluation path.
+- Lowering `max-value-bytes` while a queue holds oversized legacy elements can
+  push an actual drain reply above the `max-drain-bytes` budget (the direct
+  cost of "never retro-affect"); drain such keys first or size budgets ahead —
+  the frame ceiling remains the hard backstop.
+
+### Topic-dimension capacity governance (v8)
+
+- Topics contribute **nothing** to snapshots and the log (guard-pinned); their
+  governance surface is the **Leader write path**: fan-out amplification =
+  subscribers × publish rate × message size, all of it landing on Leader heap
+  buffers and socket writes;
+- Two ingress limits are the capacity clamp: `max-subscribers-per-key`
+  (default 64) caps per-key amplification; `max-subscription-buffer`
+  (default 256) caps per-subscription residency — the heap bound per
+  subscription ≈ `256 × max-value-bytes`, per key = that × subscriber count;
+- Readouts: `openlatch_server_topic_dropped_total` growth rate (dropping IS
+  "consumers can't keep up"), `topic.subscribers.max` watermark, the console's
+  Leader-side subscriber view. On sustained drops: scale consumer parallelism,
+  split topic keys, or trigger the WATCHLIST topic-row evaluation (batched
+  frames / request-gated backpressure as a separate change);
+- Size `data-dir`/heap estimates with an added term "active topic keys ×
+  subscribers × buffer depth × mean message bytes" on the Leader; topics
+  carry no durable-delivery duty — use `OBlockingQueue` for event streams that
+  must survive leader restarts.
+
+### Condition-dimension governance notes (v9)
+
+- **Zero new configuration keys**: conditions add none — waiters and the wait
+  queue share `max-queue-depth-per-key` under one merged "waiters on this key"
+  count (an over-limit await fails with `OVERLOADED`), and signal carries only
+  ever happen while the caller holds the lock, with wake-ups relayed by the
+  later release/expiry/session-close head-notify path: **zero new timers**
+  (contrast the v7 `ready-tick-ms` scan need; same immediacy as topics);
+- **Zero persistent footprint**: the wait set is Leader process-volatile and
+  never snapshotted (`SnapshotLock` gains nothing in v9 — the numbering
+  evidence), SIGNAL/SIGNAL_ALL/LEAVE never log, and each await contributes
+  exactly **one entry of an existing type** (the `RaftEntryType`-zero-addition-for-condition
+  evidence chain keeps holding in v9) — snapshot/log sizing needs no new
+  condition term;
+- **Capacity and readouts**: a large population of pure condition waiters
+  competes with normal acquisitions under the same merged guardrail — watch
+  `condition.waiters.max` (peak per-key condition-set size, carried items
+  excluded) together with `queue.depth.max` (wait-queue depth) and the
+  `waiters` gauge; watermarks pinned near the guardrail, or production
+  reports of "await never wakes" corroborated against a leader-change
+  timestamp (in-window signal loss is contract behavior) trigger the
+  WATCHLIST W13 evaluation path;
+- **Upgrade order stated uniformly for v8 and v9**: servers first, clients
+  second; out-of-range clients fail at handshake (the rollback window's only
+  condition constraint is exactly this pre-existing discipline surfacing —
+  see the rollback section above).
+
+### Phaser-dimension entry-rate governance (v10)
+
+- The phaser is an all-logged primitive: registrations, arrivals and
+  departures each commit a `PHASER_OP_ENTRY` — the entry rate scales as
+  parties × phase frequency × arrivals per phase, with no topic/condition
+  zero-log exemption. The levers are arrival frequency and key splitting:
+  small hot phases (2–3 parties, seconds apart) are the design-intended
+  shape — the benchmark phaser phases publish single-arrival throughput and
+  two-party rendezvous latency as the baseline (`target/benchmark/` report);
+  sharding the phaser key by business slice is the primary relief, while
+  `max-parties-per-phaser` (default 1024) bounds per-key ledger size;
+- Snapshot side the ledger is **bounded and rolling**: only the current
+  (phase, registered, arrived, quota rows, in-phase arrival slots, previous-
+  generation window) persists — no phase history, slots clear on each trip,
+  snapshot bytes do not grow with rounds (guard assertion); wait bookkeeping
+  is Leader-volatile with zero snapshot footprint;
+- Observation: growth of `phaser.total{op,status}` on the two `OVERLOADED`
+  lines (register = quota guardrail; await_advance = merged depth) and the
+  `phaser.parties.registered.max` water mark; when entry rate or snapshot
+  duration becomes an operational concern, the WATCHLIST W14 row triggers the
+  batched-arrival / read-path evaluation (separate change).
+
+### Payload snapshot & log size governance (v6)
+
+- The payload channel adds a **bytes** dimension to snapshot growth on top of the
+  entry-count dimension: one reference entry occupies at most `2 × max-value-bytes +
+  constant` in a snapshot (the current value plus the dedup slot each carry a payload);
+- trigger and retention semantics **do not change with payloads** — `snapshot-threshold`
+  still counts entries and each node keeps 2 snapshots; the reference-key cardinality is
+  the dominant snapshot-size variable, and combined with entry permanence it is the
+  residency cost operations must watch: namespace reference keys per tenant/round;
+- `data-dir` capacity planning gains a term: reference keys × `max-value-bytes` × constant,
+  on top of the existing write-rate × log-retention estimate;
+- observability: the console/admin protocol expose per-entry payload size plus a
+  constant-length truncated preview (full bytes never leave the admin plane), and the
+  benchmark suite carries a "batch of exactly-capped payloads → snapshot stays within
+  bounds" gate case.
 
 ## 5. Replication-stall self-healing & the supervisor (operational must-read)
 

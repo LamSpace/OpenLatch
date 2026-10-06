@@ -493,6 +493,12 @@ final class ClusterHarness implements AutoCloseable {
                 case BARRIER_LEAVE -> node.runtime.requestHandler().handleBarrierLeave(session, msg, ctx);
                 case BARRIER_ACTION_DONE ->
                         node.runtime.requestHandler().handleBarrierActionDone(session, msg, ctx);
+                case QUEUE_OP -> node.runtime.requestHandler().handleQueueOp(session, msg, ctx);
+                case TOPIC_OP -> node.runtime.requestHandler().handleTopicOp(session, msg, ctx);
+                case CONDITION_OP -> node.runtime.requestHandler()
+                        .handleConditionOp(session, msg, ctx);
+                case PHASER_OP -> node.runtime.requestHandler()
+                        .handlePhaserOp(session, msg, ctx);
                 default -> throw new IllegalArgumentException("not a write: " + msg.getType());
             }
             return awaitOutbound(10_000);
@@ -523,12 +529,18 @@ final class ClusterHarness implements AutoCloseable {
             return channel.readOutbound();
         }
 
-        /** 模拟连接断开（集群断连传播路径，等价 ServerSessionHandler.channelInactive）。 */
+        /**
+         * 模拟连接断开（集群断连传播路径，等价 ServerSessionHandler.channelInactive）。
+         * 节点已停机（{@code stopNode} 后 runtime 为空，典型于杀主用例中未清理的
+         * 孤儿连接收尾）时仅关本地通道：SESSION_CLOSE 提交目标已不存在，
+         * 摘除随该任期本地态清零自然收口。
+         */
         void disconnect() {
             if (session.markClosed()) {
                 node.registry.remove(session.sessionId());
-                if (session.isHandshaken()) {
-                    node.runtime.sessionCoordinator().submitClose(session.sessionId());
+                ClusterRuntime rt = node.runtime;
+                if (session.isHandshaken() && rt != null) {
+                    rt.sessionCoordinator().submitClose(session.sessionId());
                 }
             }
             channel.close();

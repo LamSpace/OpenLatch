@@ -53,3 +53,29 @@ Invalid config (empty address list, port clash, blank admin token) fails startup
 Observation reads are **weakly consistent snapshots**: detail reflects a best-effort read at
 request time from each node's local replica; brief gaps or degraded markers during leader
 changes are expected and not alert-worthy by themselves. Metric meanings: [08](08-observability.md).
+
+Queue entries (v7) render as: overview `QUEUE entries` count; the keys table shows
+capacity · depth · head element size + constant-length truncated preview (delay kinds
+also the head expiry); the detail page adds total resident bytes and a waiters column
+splitting the two tracks (waiting-for-capacity / waiting-for-elements). Full element
+bytes never ship in any admin response — the same anti-amplification rule as v6 payloads.
+Topic keys (v8) render the subscriber count and a subscriber list (session id,
+subscription id, subscribed-at); the registry is Leader-local, so only Leader-sourced
+pages show topic rows (follower views are an honest NOT_HELD, never an empty-shell
+success) and delivered message content never leaves the observation surface.
+Phasers (v10) render the ledger's three counters (phase, registered, current
+arrivals), a per-session quota table, and a phase-waiters section (session, request,
+observed phase, registered-at). The ledger and quotas are replicated state, readable
+identically on every node (unlike topic keys, a phaser key's detail MATCHES on a
+Follower); the waiter bookkeeping is Leader-local, honestly empty on Followers under
+the same `wait_queue_leader_only` annotation — the "two-speed projection" (full
+ledger, waiters pending re-hang) MUST NOT mislead "nobody is waiting" from readable
+counters. Pure counts and identities: no content egress.
+Conditions (v9) add a "condition waiters" section on the lock detail page, rendered
+**beside — never double-counted with — the wait queue**: each row shows the condition
+name, session id, request id, thread id and registration time (the wait duration
+follows from it); waiters already carried by a signal leave this section (they then
+belong to the wait-queue counts). The wait set is Leader-local state, so condition
+detail is non-zero only from the Leader's view (followers read an honest zero — the
+same Leader-only surface as the topic registry); the condition name is addressing
+text itself and this surface ships no content.
