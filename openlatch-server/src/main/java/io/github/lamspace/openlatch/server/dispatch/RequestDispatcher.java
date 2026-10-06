@@ -268,6 +268,9 @@ public final class RequestDispatcher {
             case CONDITION_OP -> msg.hasConditionOpRequest()
                     ? dispatchConditionOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case PHASER_OP -> msg.hasPhaserOpRequest()
+                    ? dispatchPhaserOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
@@ -354,6 +357,11 @@ public final class RequestDispatcher {
             case REJECT_BARRIER_ACTION -> StatusCode.INVALID_REQUEST;
             // v7：队列容量断言不成立同属形状非法（非零主张判例）。
             case REJECT_QUEUE_CAPACITY -> StatusCode.INVALID_REQUEST;
+            // v10：phaser 配额上限/离场透支/无条目——上限骑资源护栏码，其余
+            // 形状非法（判例 toPhaserStatus 同映射，两超限以线路 op 分轨）。
+            case REJECT_PHASER_PARTIES -> StatusCode.OVERLOADED;
+            case REJECT_PHASER_QUOTA -> StatusCode.INVALID_REQUEST;
+            case REJECT_PHASER_NO_ENTRY -> StatusCode.INVALID_REQUEST;
             case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
         };
     }
@@ -1149,6 +1157,120 @@ public final class RequestDispatcher {
      * @param status core 裁决状态
      * @return 协议状态码
      */
+    /**
+     * 分发相位器操作（v10 单机路径）：v10 门 → 形状互斥矩阵 →
+     * {@code core.phaserOp}（受理通道——配额上限与合并等待深度在引擎
+     * 门面判定，唤醒随条目锁外经监听器推送，判例 {@code dispatchQueueOp}
+     * 的受理即裁决形态；单机恒"登记等待项于条目"——集群双拓扑见
+     * {@code ClusterRequestHandler.handlePhaserOp}）。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchPhaserOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 10) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest req = msg.getPhaserOpRequest();
+        if (phaserShapeInvalid(req)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.core.result.PhaserOpResult r =
+                core.phaserOp(toPhaserCommand(session.sessionId(), msg.getRequestId(), req));
+        StatusCode status = toPhaserStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordPhaser(req.getOp(), status);
+        }
+        return envelope(msg, MessageType.PHASER_OP, b -> b.setPhaserOpResponse(
+                io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp())
+                        .setPhase(r.phase())
+                        .setRegistered(r.registered())
+                        .setArrived(r.arrived())));
+    }
+
+    /**
+     * 协议 phaser 请求 → core 命令（两车道共用；形状已由
+     * {@link #phaserShapeInvalid} 放行，{@code expected_phase} presence
+     * 按主张透传）。
+     *
+     * @param sessionId 会话 id（单机引擎内部 sid）
+     * @param requestId 信封请求 id
+     * @param req       协议请求
+     * @return core 命令
+     */
+    public static io.github.lamspace.openlatch.core.command.PhaserOpCommand toPhaserCommand(
+            long sessionId, long requestId,
+            io.github.lamspace.openlatch.protocol.PhaserOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.PhaserOpCommand(sessionId,
+                requestId, req.getKey(),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCorePhaserOp(req.getOp()),
+                req.getParties(),
+                req.hasExpectedPhase() ? req.getExpectedPhase() : null,
+                req.getAwaitRequestId());
+    }
+
+    /**
+     * phaser 请求形状互斥矩阵（接入层唯一裁决，判例
+     * {@code validateQueueShape}/{@code conditionOpShapeInvalid}，集群路径
+     * 复用本静态）：{@code parties} 仅 REGISTER 且 ≥1；
+     * {@code expected_phase} 仅 AWAIT_ADVANCE 且 ≥0（presence 必携）；
+     * {@code await_request_id} 仅 CANCEL 且 >0。矩阵外组合回
+     * {@code true}（违例）。
+     *
+     * @param req 协议请求
+     * @return 形状违例为 {@code true}
+     */
+    public static boolean phaserShapeInvalid(
+            io.github.lamspace.openlatch.protocol.PhaserOpRequest req) {
+        boolean hasExpected = req.hasExpectedPhase();
+        return switch (req.getOp()) {
+            case PHASER_OP_REGISTER -> req.getParties() < 1 || hasExpected
+                    || req.getAwaitRequestId() != 0;
+            case PHASER_OP_ARRIVE, PHASER_OP_ARRIVE_AND_AWAIT,
+                    PHASER_OP_ARRIVE_AND_DEREGISTER -> req.getParties() != 0
+                    || hasExpected || req.getAwaitRequestId() != 0;
+            case PHASER_OP_AWAIT_ADVANCE -> req.getParties() != 0 || !hasExpected
+                    || req.getExpectedPhase() < 0 || req.getAwaitRequestId() != 0;
+            case PHASER_OP_CANCEL -> req.getParties() != 0 || hasExpected
+                    || req.getAwaitRequestId() <= 0;
+            case PHASER_OP_QUERY -> req.getParties() != 0 || hasExpected
+                    || req.getAwaitRequestId() != 0;
+            default -> true;
+        };
+    }
+
+    /**
+     * core phaser 裁决 → 协议状态码（两超限同落 {@code OVERLOADED}、以线路
+     * op 回显分轨；配额透支与无条目两拒绝共 {@code INVALID_REQUEST}——
+     * 判例 {@code toQueueStatus} 的映射纪律）。
+     *
+     * @param outcome core 裁决
+     * @return 协议状态码
+     */
+    static StatusCode toPhaserStatus(io.github.lamspace.openlatch.core.result.Outcome outcome) {
+        return switch (outcome) {
+            case GRANTED -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_KEY_EMPTY -> StatusCode.KEY_EMPTY;
+            case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
+            case REJECT_QUEUE_FULL, REJECT_PHASER_PARTIES -> StatusCode.OVERLOADED;
+            case REJECT_PHASER_QUOTA, REJECT_PHASER_NO_ENTRY, REJECT_TYPE_MISMATCH ->
+                    StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+    }
+
+    /**
+     * 条件裁决 → 协议状态码（signal 权限 {@code NOT_HELD} 原词送达）。
+     *
+     * @param status core 条件裁决状态
+     * @return 协议状态码
+     */
     static StatusCode toConditionStatus(
             io.github.lamspace.openlatch.core.result.ConditionOpResult.Status status) {
         return switch (status) {
@@ -1424,6 +1546,12 @@ public final class RequestDispatcher {
                     io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
                             .setStatus(status)
                             .setOp(request.getConditionOpRequest().getOp()));
+            // v10：PHASER_OP 同规则——门控/形状/家族/无条目拒绝的状态码在线路
+            // 可见且 op 回显（判例 CONDITION_OP；默认实例形态的 OK 伪成功违例）。
+            case PHASER_OP -> b.setPhaserOpResponse(
+                    io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
+                            .setStatus(status)
+                            .setOp(request.getPhaserOpRequest().getOp()));
             default -> {
             }
         }

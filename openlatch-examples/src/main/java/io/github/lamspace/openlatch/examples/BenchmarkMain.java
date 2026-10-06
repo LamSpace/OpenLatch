@@ -34,6 +34,7 @@ import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OBlockingQueue;
 import io.github.lamspace.openlatch.client.ODelayQueue;
 import io.github.lamspace.openlatch.client.OCondition;
+import io.github.lamspace.openlatch.client.OPhaser;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OTopic;
 import io.github.lamspace.openlatch.client.OTopicSubscription;
@@ -155,6 +156,9 @@ public final class BenchmarkMain {
             // 条件相（v9）热身：signal 受理 RTT（空集）与 await/signal 乒乓交接。
             runConditionSignal(client, WARMUP_MS / 2);
             runConditionHandoff(client, server.port(), WARMUP_MS / 2);
+            // phaser 相（v10）热身：单发到场与两方按相位会合。
+            runPhaserArrive(client, WARMUP_MS / 2);
+            runPhaserTrip(client, server.port(), WARMUP_MS / 2);
             List<long[]> queueHandoffThroughput = new ArrayList<>();
             List<double[]> queueHandoffLatencies = new ArrayList<>();
             List<long[]> queueFanoutThroughput = new ArrayList<>();
@@ -170,6 +174,10 @@ public final class BenchmarkMain {
             List<double[]> conditionSignalLatencies = new ArrayList<>();
             List<long[]> conditionHandoffThroughput = new ArrayList<>();
             List<double[]> conditionHandoffLatencies = new ArrayList<>();
+            List<long[]> phaserArriveThroughput = new ArrayList<>();
+            List<double[]> phaserArriveLatencies = new ArrayList<>();
+            List<long[]> phaserTripThroughput = new ArrayList<>();
+            List<double[]> phaserTripLatencies = new ArrayList<>();
             List<long[]> refSmallThroughput = new ArrayList<>();
             List<double[]> refSmallLatencies = new ArrayList<>();
             List<long[]> refBigThroughput = new ArrayList<>();
@@ -269,6 +277,12 @@ public final class BenchmarkMain {
                 Result ch = runConditionHandoff(client, server.port(), SAMPLE_MS);
                 conditionHandoffThroughput.add(new long[] {ch.opsPerSec});
                 conditionHandoffLatencies.add(ch.latencies);
+                Result pa = runPhaserArrive(client, SAMPLE_MS);
+                phaserArriveThroughput.add(new long[] {pa.opsPerSec});
+                phaserArriveLatencies.add(pa.latencies);
+                Result pt = runPhaserTrip(client, server.port(), SAMPLE_MS);
+                phaserTripThroughput.add(new long[] {pt.opsPerSec});
+                phaserTripLatencies.add(pt.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
@@ -284,6 +298,8 @@ public final class BenchmarkMain {
             report = report + renderConditionSection(conditionSignalThroughput,
                     conditionSignalLatencies, conditionHandoffThroughput,
                     conditionHandoffLatencies);
+            report = report + renderPhaserSection(phaserArriveThroughput,
+                    phaserArriveLatencies, phaserTripThroughput, phaserTripLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -1149,6 +1165,122 @@ public final class BenchmarkMain {
         } finally {
             subClient.shutdown();
         }
+    }
+
+    /**
+     * 相位器单发到场相（v10）：单方注册自合拢循环——每发即一条变异日志条目，
+     * 度量到场受理吞吐与 RTT（条目率基线，供 W14 观察口径引用）。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果（ops=到场次数）
+     */
+    private static Result runPhaserArrive(OpenLatchClient client, long millis) {
+        OPhaser ph = client.newPhaser("bench:phaser:arrive", 1);
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            ph.arrive(); // 应到 1：每发即合拢换代
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 相位器两方会合相（v10）：主连接与子连接各持一方配额循环
+     * {@code arriveAndAwaitAdvance}——每相位两次到场（1 条主 RTT+1 条子
+     * 提交+唤醒推送），ops=完成相位数，延迟取主侧单次会合全程。
+     *
+     * @param client 主客户端
+     * @param port   服务端端口（子连接）
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样或收工join被打断
+     * @throws java.util.concurrent.ExecutionException 子连接建连失败
+     * @throws java.util.concurrent.TimeoutException 子连接建连超时
+     */
+    private static Result runPhaserTrip(OpenLatchClient client, int port, long millis)
+            throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        // 每次调用用独立键：注册可重复累加（JDK 同判），热身与采样窗不可共享账簿。
+        String key = "bench:phaser:trip:" + System.nanoTime();
+        OPhaser a = client.newPhaser(key);
+        OpenLatchClient subClient = OpenLatchClient.builder()
+                .address("127.0.0.1:" + port)
+                .defaultWaitTimeout(Duration.ofSeconds(60))
+                .build();
+        subClient.connectAsync().get(10, TimeUnit.SECONDS);
+        try {
+            OPhaser c = subClient.newPhaser(key);
+            a.register(); // 应到 2
+            c.register();
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            java.util.concurrent.atomic.AtomicBoolean ended =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicLong lastTrip =
+                    new java.util.concurrent.atomic.AtomicLong();
+            // 等待者（peer）量"到场→被唤醒"的会合全程；驱动侧以纯 arrive 推进
+            // 相位（与 IT 已验证的驱动形态一致）。
+            Thread peer = new Thread(() -> {
+                try {
+                    while (!ended.get()) {
+                        lastTrip.set(System.nanoTime());
+                        c.arriveAndAwaitAdvance();
+                        reservoir.record(System.nanoTime() - lastTrip.get());
+                        ops.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (RuntimeException e) {
+                    System.err.println("[bench-phaser-peer] " + e);
+                }
+            }, "bench-phaser-peer");
+            peer.setDaemon(true);
+            peer.start();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                a.arrive(); // 每发补齐 2/2 → 合拢并唤醒 peer
+            }
+            ended.set(true);
+            peer.interrupt();
+            peer.join(5_000);
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            subClient.shutdown();
+        }
+    }
+
+    /**
+     * 渲染 phaser 小节（v10），追加至统一基线报告。
+     *
+     * @param arriveThroughput 单发到场吞吐批
+     * @param arriveLatencies  单发到场 RTT 批
+     * @param tripThroughput   两方会合相位吞吐批
+     * @param tripLatencies    两方会合全程延迟批
+     * @return Markdown 小节
+     */
+    private static String renderPhaserSection(List<long[]> arriveThroughput,
+            List<double[]> arriveLatencies, List<long[]> tripThroughput,
+            List<double[]> tripLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## phaser 相（v10）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| 单发到场（每发一变异条目，自合拢） | ")
+                .append(medianOps(arriveThroughput))
+                .append(" | ").append(fmt(medianQuantile(arriveLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(arriveLatencies, 0.99))).append(" |\n");
+        sb.append("| 两方按相位会合（arriveAndAwaitAdvance 全程） | ")
+                .append(medianOps(tripThroughput))
+                .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.99))).append(" |\n");
+        return sb.toString();
     }
 
     /**

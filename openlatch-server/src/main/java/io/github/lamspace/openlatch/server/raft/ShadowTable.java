@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.server.raft;
 import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserArrival;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserParty;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
@@ -96,6 +98,40 @@ public final class ShadowTable {
     public record ArrivalRef(long sessionId, long requestId) { }
 
     /**
+     * v10：phaser 每会话注册配额镜像项（逻辑会话 id → 未离场配额）。
+     *
+     * @param sessionId 逻辑会话 id
+     * @param parties   注册配额数（恒 &gt; 0）
+     */
+    /**
+     * v10：phaser 每会话注册配额镜像项（逻辑会话 id → 未离场配额）。
+     *
+     * @param sessionId             逻辑会话 id
+     * @param parties               未离场的注册配额（&gt; 0）
+     * @param lastRegisterRequestId 注册幂等槽：该会话最近一次 REGISTER 请求 id
+     *                              （0=尚无）
+     * @param lastRegisterPhase     该注册的到场相位回显（幂等重发回显源）
+     */
+    public record PartyRef(long sessionId, int parties,
+                           long lastRegisterRequestId, long lastRegisterPhase) { }
+
+    /**
+     * v10：phaser 复制态镜像输入（引擎 {@code PhaserEntry.ReplicatedState}
+     * 经逻辑 id 折算后的形态；列表序即确定性导出序）。
+     *
+     * @param phase        当前相位号
+     * @param registered   注册总数
+     * @param arrived      当前相位到场计数
+     * @param parties      配额表（账簿插入序）
+     * @param arrivals     在场去重槽（插入序）
+     * @param prevPhase    上一推进周期到场相位（-1=无换代窗口）
+     * @param prevArrivals 上一推进周期到场槽（插入序）
+     */
+    public record PhaserMirrorData(long phase, int registered, int arrived,
+                                   List<PartyRef> parties, List<ArrivalRef> arrivals,
+                                   long prevPhase, List<ArrivalRef> prevArrivals) { }
+
+    /**
      * 循环屏障复制态镜像输入（应用点自引擎导出的不可变快照）。
      *
      * @param parties             定型许可数
@@ -154,6 +190,10 @@ public final class ShadowTable {
      *                               其余家族 0）
      * @param queueHeadPayload QUEUE 队首元素载荷（预览数据源，空队 {@code null}；
      *                         其余家族 {@code null}）
+     * @param phaserPhase    PHASER 当前相位号（其余家族 0）
+     * @param phaserRegistered PHASER 注册总数（其余家族 0）
+     * @param phaserArrived  PHASER 当前相位到场计数（其余家族 0）
+     * @param phaserParties  PHASER 每会话注册配额（逻辑 id，会话升序；其余家族空）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
@@ -163,7 +203,9 @@ public final class ShadowTable {
                                  boolean barrierActionPending, int barrierCompletedResult,
                                  byte[] refInitial, byte[] refValue,
                                  long queueCapacity, int queueDepth, long queueHeadExpiryMs,
-                                 long queueTotalPayloadBytes, byte[] queueHeadPayload) { }
+                                 long queueTotalPayloadBytes, byte[] queueHeadPayload,
+                                 long phaserPhase, int phaserRegistered, int phaserArrived,
+                                 List<PartyRef> phaserParties) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -247,6 +289,20 @@ public final class ShadowTable {
         private List<ArrivalRef> barrierCompletedArrivals = List.of();
         /** BARRIER 完结世代执行者逻辑会话（0=无）。 */
         private long barrierCompletedExecutor;
+        /** PHASER 当前相位号（其余家族 0）。 */
+        private long phaserPhase;
+        /** PHASER 注册总数（其余家族 0）。 */
+        private int phaserRegistered;
+        /** PHASER 当前相位到场计数（其余家族 0）。 */
+        private int phaserArrived;
+        /** PHASER 每会话配额（逻辑 id，会话升序；其余家族空）。 */
+        private List<PartyRef> phaserParties = List.of();
+        /** PHASER 在场去重槽（逻辑 id，插入序；仅参与 digest，不入观察视图）。 */
+        private List<ArrivalRef> phaserArrivals = List.of();
+        /** PHASER 上一推进周期到场相位（-1=无换代窗口；digest 用）。 */
+        private long phaserPrevPhase = -1L;
+        /** PHASER 上一推进周期到场槽（逻辑 id，插入序；digest 用）。 */
+        private List<ArrivalRef> phaserPrevArrivals = List.of();
 
         /**
          * 构造复制态条目。
@@ -389,7 +445,8 @@ public final class ShadowTable {
                 l.barrierActionSession != 0, l.barrierCompletedResult,
                 l.refInitial, l.refValue,
                 l.queueCapacity, l.queueDepth, l.queueHeadExpiryMs,
-                l.queueTotalPayloadBytes, l.queueHeadPayload);
+                l.queueTotalPayloadBytes, l.queueHeadPayload,
+                l.phaserPhase, l.phaserRegistered, l.phaserArrived, l.phaserParties);
     }
 
     /**
@@ -574,6 +631,33 @@ public final class ShadowTable {
                 }
                 continue;
             }
+            if (isPhaserType(l.lockType)) {
+                // v10：死亡镜像同步——该会话的配额行/槽行摘除与 registered 重算
+                // 与引擎 removeSession 同构（arrived 不回退——"已到场事实不撤销"；
+                // 换代窗槽行同摘，死者内部身份不留存）。相位推进的唤醒传播经
+                // applySessionClose 的 advancedPhasers 镜像刷新另行收口。
+                boolean touched = false;
+                for (PartyRef pr : l.phaserParties) {
+                    if (pr.sessionId() == sessionId) {
+                        l.phaserParties = l.phaserParties.stream()
+                                .filter(x -> x.sessionId() != sessionId).toList();
+                        l.phaserRegistered = Math.max(0, l.phaserRegistered - pr.parties());
+                        touched = true;
+                        break;
+                    }
+                }
+                int before = l.phaserArrivals.size();
+                l.phaserArrivals = l.phaserArrivals.stream()
+                        .filter(a -> a.sessionId() != sessionId).toList();
+                int beforePrev = l.phaserPrevArrivals.size();
+                l.phaserPrevArrivals = l.phaserPrevArrivals.stream()
+                        .filter(a -> a.sessionId() != sessionId).toList();
+                if (touched || l.phaserArrivals.size() != before
+                        || l.phaserPrevArrivals.size() != beforePrev) {
+                    adminView.put(en.getKey(), viewOf(l));
+                }
+                continue;
+            }
             if (l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE) {
                 // 循环屏障条目常驻不回收：会话死亡的世代破障由引擎经
                 // SESSION_CLOSE 应用点裁决，破障结果经 barrierMirror
@@ -740,6 +824,30 @@ public final class ShadowTable {
                     }
                     lb.addQueueDedupSlots(sb);
                 }
+            } else if (isPhaserType(l.lockType)) {
+                // v10 相位器条目：账簿仅呈当前 (phase, registered, arrived,
+                // 配额, 在场槽, 换代窗)——相位历史零驻留（尺寸有界的序列化
+                // 面依据）；列表序即镜像的确定性导出序（与引擎 replicatedState
+                // 同序，digest 跨副本可比）。
+                lb.setPhaserPhase(l.phaserPhase).setPhaserRegistered(l.phaserRegistered)
+                        .setPhaserArrived(l.phaserArrived);
+                for (PartyRef party : l.phaserParties) {
+                    lb.addPhaserParties(SnapshotPhaserParty.newBuilder()
+                            .setSessionId(party.sessionId()).setParties(party.parties())
+                            .setLastRegisterRequestId(party.lastRegisterRequestId())
+                            .setLastRegisterPhase(party.lastRegisterPhase()));
+                }
+                for (ArrivalRef a : l.phaserArrivals) {
+                    lb.addPhaserArrivals(SnapshotPhaserArrival.newBuilder()
+                            .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                }
+                if (l.phaserPrevPhase >= 0) {
+                    lb.setPhaserPrevPhase(l.phaserPrevPhase);
+                    for (ArrivalRef a : l.phaserPrevArrivals) {
+                        lb.addPhaserPrevArrivals(SnapshotPhaserArrival.newBuilder()
+                                .setSessionId(a.sessionId()).setRequestId(a.requestId()));
+                    }
+                }
             } else if (isAtomicType(l.lockType)) {
                 // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
                 lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
@@ -873,6 +981,21 @@ public final class ShadowTable {
                 }
                 sl.queueTotalPayloadBytes = sum;
                 locks.put(l.getKey(), sl);
+            } else if (isPhaserType(l.getLockTypeValue())) {
+                // v10 相位器条目装载：账簿原样还原（常驻条目不入 heldIndex）。
+                sl.phaserPhase = l.getPhaserPhase();
+                sl.phaserRegistered = l.getPhaserRegistered();
+                sl.phaserArrived = l.getPhaserArrived();
+                sl.phaserParties = l.getPhaserPartiesList().stream()
+                        .map(pt -> new PartyRef(pt.getSessionId(), pt.getParties(),
+                                pt.getLastRegisterRequestId(), pt.getLastRegisterPhase()))
+                        .toList();
+                sl.phaserArrivals = l.getPhaserArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
+                sl.phaserPrevPhase = l.hasPhaserPrevPhase() ? l.getPhaserPrevPhase() : -1L;
+                sl.phaserPrevArrivals = l.getPhaserPrevArrivalsList().stream()
+                        .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
+                locks.put(l.getKey(), sl);
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
                 sl.latchTotal = l.getLatchTotal();
                 sl.latchCount = l.getLatchCount();
@@ -977,6 +1100,71 @@ public final class ShadowTable {
     public boolean isBarrier(String key) {
         SLock l = locks.get(key);
         return l != null && l.lockType == LockType.LOCK_TYPE_BARRIER_VALUE;
+    }
+
+    /**
+     * v10：协议数值是否为 PHASER 家族。
+     *
+     * @param lockTypeValue 协议 {@code LockType} 数值
+     * @return PHASER 家族为 {@code true}
+     */
+    public static boolean isPhaserType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_PHASER_VALUE;
+    }
+
+    /**
+     * v10：指定 key 是否镜像为相位器条目（受理预检家族判定用）。
+     *
+     * @param key 相位器键
+     * @return 镜像存在且为 PHASER 家族为 {@code true}
+     */
+    public boolean isPhaser(String key) {
+        SLock l = locks.get(key);
+        return l != null && isPhaserType(l.lockType);
+    }
+
+    /**
+     * v10：相位器账簿镜像整体刷新（判例 {@link #barrierMirror}——账簿以引擎
+     * {@code replicatedState} 导出为权威形整体重发布，观察读数与换代窗口随
+     * 镜像存续；条目不存在时按镜像建条目（引擎建条目应用点先行于本调用）。
+     * 家族不符零扰动。
+     *
+     * @param key 相位器键
+     * @param d   引擎导出的逻辑 id 镜像数据
+     */
+    public void phaserMirror(String key, PhaserMirrorData d) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            l = new SLock(LockType.LOCK_TYPE_PHASER_VALUE, 0, 0, 0);
+            locks.put(key, l);
+        }
+        if (!isPhaserType(l.lockType)) {
+            return;
+        }
+        l.phaserPhase = d.phase();
+        l.phaserRegistered = d.registered();
+        l.phaserArrived = d.arrived();
+        l.phaserParties = List.copyOf(d.parties());
+        l.phaserArrivals = List.copyOf(d.arrivals());
+        l.phaserPrevPhase = d.prevPhase();
+        l.phaserPrevArrivals = List.copyOf(d.prevArrivals());
+        adminView.put(key, viewOf(l));
+    }
+
+    /**
+     * v10：抓取时刻单键注册 party 峰值（{@code phaser.parties.registered.max}
+     * 集群口径，镜像弱一致遍历、纯读零扰动）。
+     *
+     * @return 各 phaser 条目注册总数的最大值；无条目为 0
+     */
+    public int phaserRegisteredMax() {
+        int max = 0;
+        for (AdminEntryView v : adminView.values()) {
+            if (isPhaserType(v.lockType()) && v.phaserRegistered() > max) {
+                max = v.phaserRegistered();
+            }
+        }
+        return max;
     }
 
     /**

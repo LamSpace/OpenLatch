@@ -134,5 +134,28 @@ public enum Outcome {
      * 非请求错误，连接与会话不受影响，server 层映射协议同名状态码
      * {@code BARRIER_BROKEN}。
      */
-    BARRIER_BROKEN
+    BARRIER_BROKEN,
+    /**
+     * 拒绝：相位器注册使 {@code registeredParties} 超过
+     * {@code max-parties-per-phaser} 护栏（判定唯一在受理点——条目应用侧
+     * MUST NOT 复核本上限，节点本地配置参与账簿判定会引入跨副本回放分歧，
+     * 判例 {@link #REJECT_QUEUE_CAPACITY} 的"钳制属接入层"纪律）；server
+     * 层映射协议 {@code OVERLOADED}（资源护栏语义骑既有码，与队列"等待满"
+     * 同轨；线路判别由请求 op 标签承载——register 线超限=配额护栏）。
+     */
+    REJECT_PHASER_PARTIES,
+    /**
+     * 拒绝：{@code ARRIVE_AND_DEREGISTER} 的调用会话注册配额为零——本原语
+     * 对 JDK 匿名 party 未定义行为的显式化收紧（离场只能扣本会话配额，
+     * 死亡摘除因此有确定的归属域）；账簿与等待集零扰动，server 层映射
+     * 协议 {@code INVALID_REQUEST}。
+     */
+    REJECT_PHASER_QUOTA,
+    /**
+     * 拒绝：非 REGISTER 操作命中不存在的相位器条目——REGISTER 是 PHASER
+     * 家族唯一的建条目入口（phaser 无 parties 定型断言可折叠，不做隐式
+     * 建条目，避免"key 在而账簿空"歧义窗）；server 层映射协议
+     * {@code INVALID_REQUEST}。
+     */
+    REJECT_PHASER_NO_ENTRY
 }

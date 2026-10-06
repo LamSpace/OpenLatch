@@ -17,6 +17,7 @@
 | `LockAcquisitionTimeoutException` | 客户端 | 等待预算（默认 30s）耗尽 | 视业务：加大预算/拆临界区/降级 |
 | `OpenLatchTimeoutException` | 客户端 | 单请求 5s 无应答（连接活着） | 检查节点负载/时钟；瞬时一次可容忍 |
 | `ServerUnavailableException` | 客户端 | 连接不可用（含切换窗口快速失败） | 重试；检查种子配置 |
+| `TimeoutException`（phaser `awaitAdvanceInterruptibly` 到期） | 客户端 | 等待预算内相位未推进越过已见值（先尽力 CANCEL 撤销） | 与 `awaitAdvance` 的 `OpenLatchTimeoutException` 同属有界等待收束；需更长等待调大预算或循环重入（v10） |
 | `IllegalMonitorStateException` | 客户端 | 未持有而解锁/归还/条件 signal（v9 起 signal 双源同型：本地先行，或服务端 `NOT_HELD` 映射） | 修代码路径（生命周期管理） |
 | `LockLostException`（回调） | 客户端 | 锁被剥夺 | 中止临界区提交——这是设计必答题 |
 
@@ -152,6 +153,34 @@ mvn -pl openlatch-server verify -Pdrill        # 停摆采样（仪器类）
 - **条件读数在 Follower 上为零**：等待集为 Leader 本地态——Follower 的
   KEY_DETAIL 条件区段如实为零（与等待队列 Leader-only 口径同源），属如实呈现
   而非数据缺失。
+
+## phaser（v10）排查速查
+
+- **"相位不推进"的判别三分法**（`arriveAndAwaitAdvance`/`awaitAdvance` 久候不决）：
+  ① **到场不足**——查 `getArrivedParties()`/管理面 phaser 区段比对 `getRegisteredParties()`：
+  有注册方未到场（缺席者活着但在别的工作里）→ 等它到场或由其 `arriveAndDeregister`
+  离场；缺席者进程已死但注册配额尚未摘除 → 检查其会话是否真已关闭（SESSION_CLOSE
+  未达时账簿仍按其在册应到——失联探针窗内属预期，非缺陷）；② **车道窗超时**——变异
+  操作（注册/到场/离场）经 Leader 直发道，换主窗可能显式超时（W11 型）：客户端以
+  同请求标识重发幂等安全，持续超时看第 3 节；等待侧分片重发自愈、不构成第二暴露面；
+  ③ **应用簿记错**——`arriveAndDeregister` 透支被拒（该会话配额已尽）后调用方仍按
+  "会合会完成"等待：核对每会话注册/离场计数；
+- **`OVERLOADED` 两超限以请求分轨**：REGISTER 线=超 `max-parties-per-phaser`
+  （既有配额零扰动，处置为拆键或调上限）；AWAIT_ADVANCE 线=挂起等待达
+  `max-queue-depth-per-key` 合并口径（`arriveAndAwaitAdvance` 的挂起半程不受拒）——
+  看请求类型即知是哪道闸；
+- **换代窗口迟到重发按新到场计**：应答丢失很迟（跨两次推进）才重发的到场会计入
+  新相位——显式声明竞态（窗口同屏障了结记录口径），重发要快（SDK 自动重发在
+  `requestTimeout` 量级内）；应用不应以"到场必然恰好一次"编排正确性——以
+  `getArrivedParties()`/`getPhase()` 读数对账；
+- **等待"没醒"先排除谓词**：phaser 无 signal 概念，唤醒谓词是账簿相位——若确实
+  未推进那是到场问题（上一条①），若已推进而调用方没收到，那是等待总超时收束
+  （`awaitAdvance(int)` 有界，30s 后抛异常属契约），循环重入即续等。**与条件
+  "换主窗 signal 丢失"的甄别**：phaser 的等待谓词在复制账簿，重挂即刻了结，
+  不存在事件丢失窗——若外观像"丢了唤醒"，根因必在①/②/③而非契约面；
+- **读数与在途变更交叠**：`getPhase()` 与 `getArrivedParties()` 是各自独立的
+  一次往返（无事务性合并读数），先后两读之间相位可能已推进——对账逻辑须容忍
+  "读数回退"的观感（以单调相位为准绳，不缓存跨读数做差）。
 
 ## 7. FAQ
 

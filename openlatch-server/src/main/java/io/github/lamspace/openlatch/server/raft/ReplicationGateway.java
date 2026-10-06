@@ -140,6 +140,12 @@ public final class ReplicationGateway implements ApplyObserver {
     /** v9 条件等待登记表（会话摘除、换主清零与授予侧收口钩子；可为未挂载）。 */
     private volatile io.github.lamspace.openlatch.server.condition.ConditionRegistry
             conditionRegistry;
+    /**
+     * v10：phaser 等待簿记（Leader 本地易失态——等待登记/唤醒排空/展示读数，
+     * 账簿本体在复制状态机；{@code null}=夹具形态无 phaser 面，抵达即回
+     * INTERNAL_ERROR 记 WARN）。
+     */
+    private volatile io.github.lamspace.openlatch.server.phaser.PhaserRegistry phaserRegistry;
 
     /**
      * 回挂条件等待登记表（v9，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
@@ -154,6 +160,17 @@ public final class ReplicationGateway implements ApplyObserver {
     public void setConditionRegistry(
             io.github.lamspace.openlatch.server.condition.ConditionRegistry registry) {
         this.conditionRegistry = registry;
+    }
+
+    /**
+     * 装配 v10 phaser 等待簿记（判例 {@code setConditionRegistry}——Leader
+     * 受理与副作用登记、换主清零、会话摘除的唯一挂点）。
+     *
+     * @param registry 簿记实例，{@code null} 表示不启用 phaser 面
+     */
+    public void setPhaserRegistry(io.github.lamspace.openlatch.server.phaser.PhaserRegistry
+            registry) {
+        this.phaserRegistry = registry;
     }
 
     /** v7 队列就绪驱动（当选首扫钩子；可为未挂载）。 */
@@ -287,6 +304,14 @@ public final class ReplicationGateway implements ApplyObserver {
                 // 补登记（幂等接纳；判例 WaitQueue/TopicRegistry 换主清零）。
                 cr.clear();
             }
+            io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                    phaserRegistry;
+            if (pr != null) {
+                // v10：phaser 等待簿记随换主清零——簿记无日志/快照来源；等待项
+                // 经双通道重挂以 AWAIT_ADVANCE 重发补登（谓词在复制账簿，重挂
+                // 无损耗——对照 v9 signal 丢失窗的本原语增强面）。
+                pr.clear();
+            }
             LeaseExpiryDriver driver = expiryDriver;
             if (driver != null) {
                 driver.onLeadershipGained();
@@ -346,6 +371,37 @@ public final class ReplicationGateway implements ApplyObserver {
             }
             case LEASE_RENEW_ENTRY -> {
                 // 续租成功仅刷新队列无关状态（唤醒来源为释放/到期/会话关闭）。
+            }
+            case PHASER_OP_ENTRY -> {
+                // v10：phaser 变异应用点簿记——QUEUED（ARRIVE_AND_AWAIT 未合拢
+                // 形态）登记等待簿记（expected=回执到场相位）；OK 摘簿记（含
+                // 唤醒后的了结重发）；本条目推进相位则排空唤醒（含第三方等待）。
+                try {
+                    var pp = io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    var pop = pp.getRequest().getOp();
+                    String pkey = pp.getRequest().getKey();
+                    long now = System.currentTimeMillis();
+                    io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                            phaserRegistry;
+                    if (pr == null) {
+                        break;
+                    }
+                    if (result.getStatus() == ApplyStatus.QUEUED && pop == io.github
+                            .lamspace.openlatch.protocol.PhaserOp
+                            .PHASER_OP_ARRIVE_AND_AWAIT) {
+                        pr.register(pkey, pp.getSessionId(), pp.getRequestId(),
+                                result.getPhaserPhase(), now);
+                    } else if (result.getStatus() == ApplyStatus.OK) {
+                        pr.remove(pkey, pp.getSessionId(), pp.getRequestId());
+                    }
+                    for (String adv : result.getPhaserAdvancedKeysList()) {
+                        wakePhaserWaiters(adv, now);
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("phaser op payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
             }
             default -> {
             }
@@ -513,6 +569,18 @@ public final class ReplicationGateway implements ApplyObserver {
                     // 锁持有/租约/等待队列由条目侧既有簿记各自收口。
                     cr.removeSession(sp.getSessionId());
                 }
+                io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr =
+                        phaserRegistry;
+                if (pr != null) {
+                    // v10：死亡即退订——摘该会话全部 phaser 等待簿记（配额摘除
+                    // 与推进判定在条目应用侧，本臂仅簿记回收，判例 v8/v9 同径）。
+                    pr.removeSession(sp.getSessionId());
+                }
+                // v10：隐式摘除驱动的相位推进传播——被推进 key 的存活等待者
+                // （簿记形）收唤醒通知（判例 barrier_released_keys 臂）。
+                for (String pkey : result.getPhaserAdvancedKeysList()) {
+                    wakePhaserWaiters(pkey, now);
+                }
                 // 离场即破障经会话关闭传播：被破世代的存活等待者收放行通知。
                 for (String bkey : result.getBarrierReleasedKeysList()) {
                     for (WaitQueue.Waiter w : waitQueue.broadcastKey(bkey, now)) {
@@ -617,6 +685,36 @@ public final class ReplicationGateway implements ApplyObserver {
      *
      * @param w   待通知的队首等待项
      * @param key 释放的锁键
+     */
+    /**
+     * 排空唤醒指定 phaser key 的等待簿记：当前相位读影子表账簿（镜像与 apply
+     * 同线程推进，此处读数即当值终态），谓词 {@code expected < 当前相位} 的
+     * 簿记项出集并逐一推送 {@code AWAIT_NOTIFY}（ref=其 request_id，判例
+     * barrier broadcastKey 臂；推送丢失由客户端重发/保活重挂自愈——簿记
+     * 摘除不丢正确性，谓词恒可判）。
+     *
+     * @param key 相位器键
+     * @param now 当前时刻（簿记侧未消费，保形参一致）
+     */
+    private void wakePhaserWaiters(String key, long now) {
+        io.github.lamspace.openlatch.server.phaser.PhaserRegistry pr = phaserRegistry;
+        if (pr == null) {
+            return;
+        }
+        var view = kernel.shadow().adminEntry(key);
+        if (view == null || !ShadowTable.isPhaserType(view.lockType())) {
+            return;
+        }
+        for (var w : pr.wake(key, view.phaserPhase())) {
+            pushAwaitNotify(new WaitQueue.Waiter(w.sessionId(), w.requestId(), key), key);
+        }
+    }
+
+    /**
+     * 向等待者所在连接写一条 AWAIT_NOTIFY（连接已不存在即静默丢弃）。
+     *
+     * @param w   等待者簿记项
+     * @param key 锁键（随通知一并报告）
      */
     private void pushAwaitNotify(WaitQueue.Waiter w, String key) {
         ServerSession session = sessions.get(w.sessionId());

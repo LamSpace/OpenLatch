@@ -334,6 +334,6 @@ public final class LatchEntry implements KeyEntry {
                 List.of(), List.copyOf(waiterSnaps),
                 0, 0, total, count, List.copyOf(participants),
                 null, 0, 0, 0,
-                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null);
+                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null, 0, 0, 0);
     }
 }

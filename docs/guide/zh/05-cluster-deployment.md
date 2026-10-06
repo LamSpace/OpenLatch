@@ -35,6 +35,7 @@
 | `openlatch.server.queue.ready-tick-ms` | `200` | 延时队列到点唤醒扫描周期（v7，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms |
 | `openlatch.server.limit.max-subscribers-per-key` | `64` | 单键 topic（v8）订阅数上限；超限的 SUBSCRIBE 入口拒绝（`REJECT_SUBSCRIBERS`，既有订阅零扰动），取值 [1, 1024]；钳广播 fan-out 放大面 |
 | `openlatch.server.limit.max-subscription-buffer` | `256` | 每订阅服务端在途缓冲条数（v8，drop-newest 触发线），取值 [1, 65536]；SDK 本地另有二级缓冲（256 条）同策略 |
+| `openlatch.server.limit.max-parties-per-phaser` | `1024` | 单键相位器（v10）注册总数上限；超限的 REGISTER 入口拒绝（`OVERLOADED`，既有配额零扰动），取值 [1, 65536]；判定唯一在受理点（条目应用侧不复核，配置漂移不撕裂账簿）。挂起等待另受 `max-queue-depth-per-key` 合并口径（既有行，v9 起三原语共用） |
 | `openlatch.server.metrics.enabled` | `true` | 指标管理端点开关（Prometheus 抓取 `http://host:port/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0`=临时）；绑定冲突即启动失败——同机多节点须互异 |
 | `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理令牌；未配置 ⇒ 一切管理请求被拒 |
@@ -153,6 +154,15 @@ OpenLatchClient client = OpenLatchClient.builder()
   为服务端先行、客户端后行，回退序客户端先行）。回滚前确认 v9 客户端已降回
   SDK 或不再活跃；在途 await 随会话终结收束，等待项不复活。
 
+- **v10 相位器的回滚窗口（屏障/队列同型，第四口径）**：相位器是持久态原语——
+  注册配额、到场计数与相位号逐条经 `PHASER_OP_ENTRY` 入日志并写入快照字段
+  （`phaser_*`，14 号条目类型），早于 v10 的二进制无法理解——降级前确认无在途
+  phaser 流量（等待簿记本就 Leader 易失无需处理），或接受 phaser key 在旧二进制
+  上不可用（条目按未知类型 error 路径现行口径处置）。与队列"回滚前清 key"、
+  topic/condition"天然干净"并列第四种口径，**互不混读**：phaser 没有可"排空"的
+  驻留数据（账簿即状态本体），只有"在途流量清零"一条前置动作。混布规则同前：
+  v10 SDK 客户端连已回退的 v9 服务端握手即拒（升级序服务端先行、回退序客户端先行）。
+
 ### 载荷下的快照与日志尺寸治理（v6）
 
 - 载荷通道把"条目数"维度的快照膨胀引入"字节数"维度：单条有值引用条目快照占用
@@ -196,6 +206,23 @@ OpenLatchClient client = OpenLatchClient.builder()
   Leader 堆内存项；topic 不承担持久投递义务——需要抗 Leader 重启的事件流
   请用 `OBlockingQueue`。
 
+### phaser 维度的条目率治理（v10）
+
+- 相位器是**全入日志**原语：注册、到场、离场逐条 `PHASER_OP_ENTRY`——条目率
+  ≈ 参与者数 × 相位频率 × 每相到场数，无 topic/condition 的零日志豁免面。
+  治理杠杆因此在"到场频率"与"键切分"两处：
+  - 高频小相位（每相位 2-3 方、秒级推进）是设计内形态，基准 phaser 相给出
+    单发到场与两方会合的吞吐/延迟基线（`target/benchmark/` 报告）；
+  - 热点键拆分（按业务分片多开 phaser key）是首选泄压，注册配额上限
+    `max-parties-per-phaser`（默认 1024）封顶单键账簿体量；
+- 快照侧账簿**有界且滚动**：只驻留当前 (phase, registered, arrived, 配额表,
+  在场槽, 换代窗口)——相位历史零驻留、去重槽随推进清空，快照字节不随轮次
+  增长（回归断言钉死）；等待簿记为 Leader 易失零足迹；
+- 观测口径：`phaser.total{op,status}` 两超限线增速（`{register,OVERLOADED}`
+  配额、`{await_advance,OVERLOADED}` 深度）、`phaser.parties.registered.max`
+  水位；条目率/快照时长成为运维压力时按 WATCHLIST W14 行触发评估批量到场
+  合并或读路径折案（另立 change）。
+
 ### 条件维度的治理注记（v9）
 
 - **零新增配置**：条件不引入任何新服务端键——等待人数与等待队列按"本 key
@@ -204,7 +231,8 @@ OpenLatchClient client = OpenLatchClient.builder()
   **零新定时器**（对照 v7 `ready-tick-ms` 的扫描需求；与 topic 即时性同相）；
 - **持久侧零足迹**：等待集为 Leader 进程易失、不入快照（`SnapshotLock` v9 零
   扩展即编号证据），SIGNAL/SIGNAL_ALL/LEAVE 零日志条目；await 仅贡献**一条
-  既有条目类型**（`RaftEntryType` 止于 13 的证据链在 v9 继续成立）——快照与
+  既有条目类型**（条件维自 v9 起条目类型零占用——v10 上界升至 14 为 phaser
+  专用值，不构成该证据的例外）——快照与
   日志治理无须为条件增设估算项；
 - **容量与观察口径**：纯条件等待的大集群与正常获取挤占同一合并护栏——
   `condition.waiters.max` 水位（单键条件等待集峰值，不含已搬运项）应配合

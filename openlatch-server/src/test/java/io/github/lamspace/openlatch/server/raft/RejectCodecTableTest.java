@@ -88,7 +88,8 @@ class RejectCodecTableTest {
                     MessageType.LATCH_AWAIT, MessageType.ATOMIC_OP,
                     MessageType.BARRIER_AWAIT, MessageType.BARRIER_LEAVE,
                     MessageType.BARRIER_ACTION_DONE, MessageType.QUEUE_OP,
-                    MessageType.TOPIC_OP, MessageType.CONDITION_OP);
+                    MessageType.TOPIC_OP, MessageType.CONDITION_OP,
+                    MessageType.PHASER_OP);
 
     /** 客户端接入车道全部请求类型（PING/AWAIT_NOTIFY 无拒绝应答语义，除外）。 */
     private static RejectCase[] allCases() {
@@ -159,6 +160,17 @@ class RejectCodecTableTest {
                                             .ConditionOp.CONDITION_OP_SIGNAL)
                                     .setCondition("x").setThreadId(1L)),
                     Envelope::hasConditionOpResponse),
+            // v10：PHASER_OP 同型拒绝——默认实例 OK 会被成型为"注册成功/等待
+            // 登记成功（QUEUED=OK 零值混淆）/查询空账簿"伪成功（判例
+            // CONDITION_OP；QUEUED 亦是状态码自述面）。
+            new RejectCase(MessageType.PHASER_OP, 10,
+                    b -> b.setPhaserOpRequest(
+                            io.github.lamspace.openlatch.protocol.PhaserOpRequest
+                                    .newBuilder().setKey("k")
+                                    .setOp(io.github.lamspace.openlatch.protocol
+                                            .PhaserOp.PHASER_OP_REGISTER)
+                                    .setParties(1)),
+                    Envelope::hasPhaserOpResponse),
             // v9：带 condition 的折叠 ACQUIRE 同型拒绝行（门控/角色/形状三码形
             // 恒经 acquire_response 自述——折叠不新建应答线，行内断言钉死
             // "await 是 ACQUIRE 生命周期"的线路可见性）。
@@ -255,11 +267,17 @@ class RejectCodecTableTest {
         for (RejectCase c : allCases()) {
             if (c.type() != MessageType.ATOMIC_OP && c.type() != MessageType.QUEUE_OP
                     && c.type() != MessageType.TOPIC_OP
-                    && c.type() != MessageType.CONDITION_OP) {
+                    && c.type() != MessageType.CONDITION_OP
+                    && c.type() != MessageType.PHASER_OP) {
                 continue;
             }
             Envelope resp = ClusterRequestHandler.notLeaderEnvelope(request(c), unknown);
-            if (c.type() == MessageType.CONDITION_OP) {
+            if (c.type() == MessageType.PHASER_OP) {
+                assertThat(resp.getPhaserOpResponse().getOp())
+                        .as("PHASER_OP 拒绝须回显 op（指标 recordPhaser 消费同表达式）")
+                        .isEqualTo(io.github.lamspace.openlatch.protocol
+                                .PhaserOp.PHASER_OP_REGISTER);
+            } else if (c.type() == MessageType.CONDITION_OP) {
                 assertThat(resp.getConditionOpResponse().getOp())
                         .as("CONDITION_OP 拒绝须回显 op（指标 recordCondition 消费同表达式）")
                         .isEqualTo(io.github.lamspace.openlatch.protocol
@@ -347,6 +365,7 @@ class RejectCodecTableTest {
             case QUEUE_OP -> resp.getQueueOpResponse().getStatus();
             case TOPIC_OP -> resp.getTopicOpResponse().getStatus();
             case CONDITION_OP -> resp.getConditionOpResponse().getStatus();
+            case PHASER_OP -> resp.getPhaserOpResponse().getStatus();
             default -> throw new IllegalArgumentException("no codec: " + type);
         };
     }

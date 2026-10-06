@@ -38,7 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 基线逐字节相等、重启节点不重放任何陈旧唤醒（等待集为 Leader 易失态、搬运
  * 时序不入日志——"signal 是事件不是状态"）；await 折叠的释放半程恰以一条既有
  * {@code LOCK_ACQUIRE_ENTRY} 进日志（其生效性由后续持有者可授予侧证）；并以
- * 描述符级断言钉死复制面（{@code RaftEntryType} 值域止于 13 且无 CONDITION、
+ * 描述符级断言钉死复制面（条件维条目类型零占用——{@code RaftEntryType} 无
+ * CONDITION 取值，v10 起值域上界 14 为 phaser 专用不构成例外、
  * {@code SnapshotLock} 无 condition 字段）——未来把 signal 家族塞进日志或把
  * 等待集写进快照的改动，在本守卫与编号证据上即刻转红。
  */
@@ -137,14 +138,16 @@ class StateMachineConditionTest {
 
     @Test
     void replicationSurfaceCarriesNoConditionTypes() {
-        // 编号证据：RaftEntryType 值域止于 13（v9 未新增条目类型——await 复用
-        // 既有 LOCK_ACQUIRE_ENTRY、signal 家族零条目），无 CONDITION 取值
-        // （UNRECOGNIZED 为 protobuf 哨兵值，取号即抛，不入值域断言）。
+        // 编号证据：条件维自 v9 起条目类型零占用——await 复用既有
+        // LOCK_ACQUIRE_ENTRY、signal 家族零条目，值域中无 CONDITION 取值
+        // （v10 上界升至 14 且 14 为 PHASER_OP_ENTRY 专用值，与条件边界无涉——
+        // 证据线为版本相对口径而非绝对上界；UNRECOGNIZED 为 protobuf 哨兵值，
+        // 取号即抛，不入值域断言）。
         for (RaftEntryType t : RaftEntryType.values()) {
             if (t == RaftEntryType.UNRECOGNIZED) {
                 continue;
             }
-            assertThat(t.getNumber()).isLessThanOrEqualTo(13);
+            assertThat(t.getNumber()).isLessThanOrEqualTo(14);
             assertThat(t.name()).doesNotContain("CONDITION");
         }
         // 快照面：SnapshotLock 字段零 condition（等待集不入快照，await 的复制

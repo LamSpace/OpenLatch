@@ -90,12 +90,14 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      *                    去重槽；非该形态恒 {@code null}）
      * @param queue       QUEUE/DELAY_QUEUE 条目的状态组（容量/元素列表/去重槽表；
      *                    非队列形态恒 {@code null}）
+     * @param phaser      PHASER 条目的账簿状态组（相位/注册/到场/配额/换代窗口；
+     *                    非相位器形态恒 {@code null}，v10）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
                         AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef,
-                        QueueState queue) {
+                        QueueState queue, PhaserState phaser) {
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -110,7 +112,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
         public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                 long expiresAtMs, List<Holder> holders) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    0, 0, 0, null, null, null, null);
+                    0, 0, 0, null, null, null, null, null);
         }
 
         /**
@@ -130,7 +132,35 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 long expiresAtMs, List<Holder> holders, int permitsTotal,
                 long latchTotal, long latchCount) {
             this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
-                    permitsTotal, latchTotal, latchCount, null, null, null, null);
+                    permitsTotal, latchTotal, latchCount, null, null, null, null, null);
+        }
+
+        /**
+         * v10 之前的十三参形态（含 atomic/barrier/atomicRef/queue 状态组、
+         * 不含相位器状态组）：PHASER 状态组恒 {@code null}——既有构造点
+         * （恢复装配与测试）不因新维改写。
+         *
+         * @param key         锁键
+         * @param lockType    锁类型
+         * @param leaseToken  当前租约凭证
+         * @param leaseMs     实际生效租期
+         * @param expiresAtMs 当前到期时刻
+         * @param holders     持有者列表
+         * @param permitsTotal Semaphore 许可总量
+         * @param latchTotal  Latch 定型初始计数
+         * @param latchCount  Latch 当前剩余计数
+         * @param atomic      标量原子状态组（非该形态 {@code null}）
+         * @param barrier     屏障状态组（非该形态 {@code null}）
+         * @param atomicRef   有值引用状态组（非该形态 {@code null}）
+         * @param queue       队列状态组（非该形态 {@code null}）
+         */
+        public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
+                long expiresAtMs, List<Holder> holders, int permitsTotal,
+                long latchTotal, long latchCount, AtomicState atomic, BarrierState barrier,
+                AtomicRefState atomicRef, QueueState queue) {
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    permitsTotal, latchTotal, latchCount, atomic, barrier, atomicRef,
+                    queue, null);
         }
 
         /**
@@ -181,6 +211,20 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             } else if (queue != null) {
                 throw new IllegalArgumentException(
                         "non-queue entry carries queue state: key=" + key);
+            }
+            boolean phaserKind = lockType == LockType.PHASER;
+            if (phaserKind) {
+                if (phaser == null) {
+                    throw new IllegalArgumentException(
+                            "phaser entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "phaser entry carries lease or holders: key=" + key);
+                }
+            } else if (phaser != null) {
+                throw new IllegalArgumentException(
+                        "non-phaser entry carries phaser state: key=" + key);
             }
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
@@ -250,6 +294,15 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                             "bad queue state: key=" + key + " capacity=" + queue.capacity()
                                     + " elements=" + queue.elements().size());
                 }
+            } else if (phaserKind) {
+                // 相位器自洽性首检完成租约/持有面；此处校验他族字段零携带
+                // （账簿不变量由 PhaserState 构造器钉定）。
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0
+                        || atomic != null || atomicRef != null || barrier != null
+                        || queue != null) {
+                    throw new IllegalArgumentException(
+                            "phaser entry must not carry other-family state: key=" + key);
+                }
             } else if (atomicRefKind) {
                 // 引用条目自洽性已在家族首检完成（载荷两态原样直写，不校验）。
             } else {
@@ -283,7 +336,8 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (lockType != LockType.READ && lockType != LockType.LATCH
                     && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
-                    && !atomicKind && !atomicRefKind && !queueKind && holders.size() != 1) {
+                    && !atomicKind && !atomicRefKind && !queueKind && !phaserKind
+                    && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -452,6 +506,74 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             elements = java.util.List.copyOf(elements);
             slots = java.util.List.copyOf(slots);
+        }
+    }
+
+    /**
+     * PHASER 条目的快照状态组（v10；账簿直写通道，数据载体）：相位号、
+     * 注册总数、当前相位到场计数、每会话配额表、当前在场去重槽与上一
+     * 推进周期窗口（换代重发判据）。列表序即确定性导出序（配额按会话
+     * id 升序、槽按 (会话,请求) 升序——跨副本摘要可比的前提）；等待集
+     * 不入本状态组（Leader 本地易失态，恢复即清空、客户端重挂补登记——
+     * v9 条件集条款同构）。
+     *
+     * <p><b>账簿不变量</b>（构造即钉定，快照存续的条目恒自洽）：
+     * {@code registered} 恒等于配额表 parties 之和；{@code arrived==0}
+     * 或 {@code arrived < registered}（推进判据 {@code arrived>0 ∧
+     * arrived≥registered} 的补集——已到场者死亡致 registered 缩小的形态
+     * 由 removeSession 的即时推进收口，恢复态恒满足）；{@code prevPhase}
+     * 为 -1（尚无换代）或小于 {@code phase} 的相位号；换代窗口空则
+     * {@code prevArrivals} 必空。槽与 {@code arrived} 刻意不互为镜像
+     * （死亡摘槽不回退计数——"已到场事实不撤销"）。
+     *
+     * @param phase        当前相位号（≥0）
+     * @param registered   注册总数（= 配额表之和）
+     * @param arrived      当前相位到场计数（≥0）
+     * @param parties      每会话注册配额（会话 id 升序）
+     * @param arrivals     当前在场去重槽（(会话,请求) 升序）
+     * @param prevPhase    上一推进周期到场相位（-1=尚无换代）
+     * @param prevArrivals 上一推进周期到场槽（升序）
+     */
+    public record PhaserState(long phase, int registered, int arrived,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.PartyView> parties,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival> arrivals,
+            long prevPhase,
+            java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival> prevArrivals) {
+
+        /**
+         * 构造并校验账簿自洽性与列表深复制。
+         *
+         * @throws IllegalArgumentException 自洽性违例
+         */
+        public PhaserState {
+            if (phase < 0) {
+                throw new IllegalArgumentException("phaser phase must be >= 0: " + phase);
+            }
+            parties = java.util.List.copyOf(parties);
+            arrivals = java.util.List.copyOf(arrivals);
+            prevArrivals = java.util.List.copyOf(prevArrivals);
+            int sum = 0;
+            for (var p : parties) {
+                if (p.parties() < 1) {
+                    throw new IllegalArgumentException("phaser party row must be positive: " + p);
+                }
+                sum += p.parties();
+            }
+            if (sum != registered) {
+                throw new IllegalArgumentException(
+                        "phaser registered mismatch: ledger=" + registered + " parties=" + sum);
+            }
+            if (arrived < 0 || (arrived > 0 && arrived >= registered)) {
+                throw new IllegalArgumentException(
+                        "bad phaser arrival counters: arrived=" + arrived
+                                + " registered=" + registered);
+            }
+            if (prevPhase < -1 || (prevPhase >= 0 && prevPhase >= phase)) {
+                throw new IllegalArgumentException("bad phaser prevPhase: " + prevPhase);
+            }
+            if (prevPhase == -1 && !prevArrivals.isEmpty()) {
+                throw new IllegalArgumentException("phaser prev arrivals without prev phase");
+            }
         }
     }
 

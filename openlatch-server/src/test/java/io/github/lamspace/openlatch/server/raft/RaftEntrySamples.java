@@ -220,6 +220,30 @@ final class RaftEntrySamples {
     }
 
     /** 释放锁条目。 */
+    /**
+     * v10：相位器变异条目样本（仅变异操作词入日志——AWAIT/CANCEL/QUERY 为
+     * Leader 本地簿记，不经本工厂；expected_phase 参数保留 presence 形态以便
+     * 违例条目注入用例构造）。
+     */
+    static RaftLogEntry phaserSample(long sessionId, long requestId, String key,
+            io.github.lamspace.openlatch.protocol.PhaserOp op, int parties,
+            Long expectedPhase, long awaitRequestId, long wallMs, long seq) {
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.PhaserOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setParties(parties)
+                        .setAwaitRequestId(awaitRequestId);
+        if (expectedPhase != null) {
+            rb.setExpectedPhase(expectedPhase);
+        }
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.PHASER_OP_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload
+                        .newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId).setRequest(rb)
+                        .build().toByteString())
+                .build();
+    }
+
     static RaftLogEntry release(long sessionId, String key, long token, long wallMs, long seq) {
         return release(sessionId, key, token, wallMs, seq, 7);
     }

@@ -36,6 +36,9 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
 | `openlatch.server.topic.subscribers.max` | Gauge | — | peak per-key **subscriber count** (v8, scrape-time) — the third distinct depth dimension beside `queue.depth.max` (waiters) and `elements.depth.max` (elements); subscribers are never counted in `waiters` |
 | `openlatch.server.condition.total` | Counter | `op`=`signal`/`signal_all`/`leave`, `status` | condition operations (v9; the signal family is always immediate — `QUEUED`/`DENIED`/`OVERLOADED` are unreachable on this line since waiter-full rejects arise on the await fold side; `NOT_HELD` is its **own permission line** (the count projection of signal-authority verdicts; idempotent LEAVE replays count as `OK`); **await counts fold into the existing `acquire.total` lines (QUEUED/OK/OVERLOADED each on their track) and this metric has no `await` op** — an await is exactly an ACQUIRE lifecycle, the counting-side evidence of the fold boundary) |
 | `openlatch.server.condition.waiters.max` | Gauge | — | peak per-key **condition wait-set size** (v9, scrape-time, carried items excluded — they join the wait-queue dimension after a carry) — the fourth member of the **four-dimension distinction** beside `queue.depth.max` (wait-queue depth), `elements.depth.max` (elements) and `topic.subscribers.max` (subscriptions): names are near, meanings are not — never conflate; condition waiters ARE counted in the `waiters` gauge (unlike subscribers) |
+| `openlatch.server.phaser.total` | Counter | `op`=`register`/`arrive`/`arrive_and_await`/`arrive_and_deregister`/`await_advance`/`cancel`/`query`, `status` | phaser operation counts (v10). The two OVERLOADED caps split by `op`: `{register,OVERLOADED}` = registration quota guardrail, `{await_advance/arrive_and_await,OVERLOADED}` = merged waiting-depth guardrail (the op-side dual of the queue's double-full split); `QUEUED` is the normal pending receipt for the two await ops; `DENIED`/`BARRIER_BROKEN`/`NOT_HELD`/`REJECT_SUBSCRIBERS` are permanently unreachable on this line (no immediate-form, no break, no ownership)
+| `openlatch.server.phaser.parties.registered.max` | Gauge | — | single-key **registered party total** peak at scrape time (v10) — an *obligation* metric, **not a wait metric**: the fifth caliber beside `queue.depth.max` (wait queue depth), `elements.depth.max` (elements), `topic.subscribers.max` (subscriptions) and `condition.waiters.max` (condition waiters); names are near, meanings far — never cross-read. Suspended phaser waits count in the aggregate `waiters` Gauge; `registered` never does |
+
 | `openlatch.cluster.is_leader` | Gauge | `node_id` | leadership gauge (registered in cluster mode only) |
 
 ### Starter alerts (calibrate per workload)
@@ -68,6 +71,7 @@ Logical name → wire name: dots to underscores, counters get a `_total` suffix,
   (waiting is a promise, signal is an event; no compensation): observe per
   the WATCHLIST W13 basis (loss rate + watermark) and self-rescue with
   `await(timeout, unit)` on the application side (v9).
+- `increase(openlatch_server_phaser_total{op="register",status="OVERLOADED"}[5m])` persistently non-zero — a key is pinned against `max-parties-per-phaser` (capacity signal: split the key or raise the cap); growth on `{op="await_advance",status="OVERLOADED"}` means bystander waits press the merged depth guardrail — read it against `phaser.parties.registered.max`: the former high while the latter low means bystander pile-up, both high means a hot key (v10)
 
 ## Client metrics
 

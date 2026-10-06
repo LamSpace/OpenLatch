@@ -1632,6 +1632,45 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程相位器句柄（{@link OPhaser}，协议 v10）：动态注册/到场/离席
+     * 的按相位会合原语，参与者会话死亡即时隐式摘除配额且不空转（对照
+     * {@link #newBarrier} 的死亡破障——单死者不炸一锅）。句柄构造零网络，
+     * 无初始注册；participants 随 {@link OPhaser#register()} 显式进入。
+     *
+     * @param key 相位器键（非空）
+     * @return 相位器句柄（线程安全）
+     * @throws IllegalArgumentException key 为空
+     */
+    public OPhaser newPhaser(String key) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        return new RemotePhaser(this, key, 0);
+    }
+
+    /**
+     * 创建携初始注册数的相位器句柄：{@code initialParties} 于本会话首个
+     * 业务操作前同步提交注册（归属本会话；会话重建后按死亡摘除语义重执，
+     * 超调方向保守论证见 {@link RemotePhaser} 类注）。
+     *
+     * @param key            相位器键（非空）
+     * @param initialParties 初始注册数（{@code >= 0}；0 等同 {@link #newPhaser(String)}）
+     * @return 相位器句柄
+     * @throws IllegalArgumentException key 为空或 parties 为负
+     */
+    public OPhaser newPhaser(String key, int initialParties) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        if (initialParties < 0) {
+            throw new IllegalArgumentException("initialParties must be >= 0: " + initialParties);
+        }
+        return new RemotePhaser(this, key, initialParties);
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
@@ -1876,6 +1915,37 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setRequestId(requestId)
                 .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
                         .setKey(key).setGeneration(generation))
+                .build();
+    }
+
+    /**
+     * 构造 PHASER_OP 信封（v10，直发车道——变异经提交、等待/撤销/读数 Leader
+     * 本地，形状互斥矩阵由装配点保证：parties 仅 REGISTER 且 &gt;=1；
+     * {@code expectedPhase} 非 null 仅 AWAIT_ADVANCE；await_request_id 仅
+     * CANCEL）。不设信封协议版本（判例 condition 直发，会话门由握手协商承载）。
+     *
+     * @param requestId      请求 id
+     * @param op             相位器操作
+     * @param key            相位器键
+     * @param parties        注册计数（仅 REGISTER）
+     * @param expectedPhase  已见相位号（仅 AWAIT_ADVANCE，其余传 null）
+     * @param awaitRequestId 被撤销等待项请求 id（仅 CANCEL）
+     * @return 信封
+     */
+    static Envelope phaserEnvelope(long requestId,
+            io.github.lamspace.openlatch.protocol.PhaserOp op, String key, int parties,
+            Long expectedPhase, long awaitRequestId) {
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.PhaserOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setParties(parties)
+                        .setAwaitRequestId(awaitRequestId);
+        if (expectedPhase != null) {
+            rb.setExpectedPhase(expectedPhase);
+        }
+        return Envelope.newBuilder()
+                .setType(MessageType.PHASER_OP)
+                .setRequestId(requestId)
+                .setPhaserOpRequest(rb)
                 .build();
     }
 

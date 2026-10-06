@@ -79,6 +79,7 @@ class ServerConfigTest {
                 openlatch.server.queue.ready-tick-ms = 100
                 openlatch.server.limit.max-subscribers-per-key = 32
                 openlatch.server.limit.max-subscription-buffer = 128
+                openlatch.server.limit.max-parties-per-phaser = 2048
                 """);
 
         ServerConfig cfg = ServerConfig.load(file.toString());
@@ -100,10 +101,13 @@ class ServerConfigTest {
         assertThat(cfg.queueReadyTickMs()).isEqualTo(100L);
         assertThat(cfg.maxSubscribersPerKey()).isEqualTo(32);
         assertThat(cfg.maxSubscriptionBuffer()).isEqualTo(128);
+        assertThat(cfg.maxPartiesPerPhaser()).isEqualTo(2048);
         // v8 默认值钉定（64 订阅 / 256 条缓冲）。
         ServerConfig def = ServerConfig.defaults();
         assertThat(def.maxSubscribersPerKey())
                 .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIBERS_PER_KEY).isEqualTo(64);
+        assertThat(def.maxPartiesPerPhaser())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_PARTIES_PER_PHASER);
         assertThat(def.maxSubscriptionBuffer())
                 .isEqualTo(ServerConfig.DEFAULT_MAX_SUBSCRIPTION_BUFFER).isEqualTo(256);
     }
@@ -116,6 +120,8 @@ class ServerConfigTest {
                 "openlatch.server.limit.max-subscribers-per-key = 1025",
                 "openlatch.server.limit.max-subscription-buffer = 0",
                 "openlatch.server.limit.max-subscription-buffer = 65537",
+                "openlatch.server.limit.max-parties-per-phaser = 0",
+                "openlatch.server.limit.max-parties-per-phaser = 65537",
         }) {
             Path file = tempDir.resolve("bad-topic-limit.properties");
             Files.writeString(file, line + "\n");

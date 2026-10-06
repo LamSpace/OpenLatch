@@ -106,5 +106,16 @@ public enum LockType {
      * 折算的绝对到期时刻，未到期仅不可见、不消失（到期不触发回收）。
      * ACQUIRE 携带本类型属请求形状错误，入口即拒。
      */
-    DELAY_QUEUE
+    DELAY_QUEUE,
+    /**
+     * 相位器家族（枚举序与协议 {@code LOCK_TYPE_PHASER} 数值 14 对齐）：
+     * 非锁家族类型，仅作 key 定型判别——动态注册/到场/离会的会合原语，
+     * 操作经门面独立入口（{@code phaserOp}，命令为 {@code PhaserOpCommand}）
+     * 进入 {@code PhaserEntry}，不经获取/释放/续租命令通道；形态由通道
+     * 隐含、无子形态判别（判例 {@link #BARRIER}——线路请求不携本值，
+     * ACQUIRE/其余车道携带属请求形状错误，入口即拒）。参与者配额按会话
+     * 记账，会话死亡隐式摘除且已到场事实不撤销（与屏障"死亡即破障"
+     * 刻意分轨，见 {@code PhaserEntry} 契约）。
+     */
+    PHASER
 }

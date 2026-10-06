@@ -312,6 +312,73 @@ loop, and the signal family is pure Leader-local queue surgery.
   not prioritized over elders already queued (the JDK non-fair effect; the
   fairness promise constrains enqueue order only).
 
+## 12. Phaser and phase rendezvous
+
+`OClient.newPhaser(key[, initialParties])` (protocol v10) is the distributed
+counterpart of JDK `Phaser`: multi-party rendezvous **by phase** with dynamic
+membership — participants register and deregister freely, arrival and waiting
+are decoupled, and phase numbers advance monotonically without reuse. Against
+the cyclic barrier (v5) the three hardening points become: fixed parties →
+**dynamic per-session quotas**; arrive-equals-gate → **arrive can be
+non-blocking** (`arrive` vs `arriveAndAwaitAdvance`); leave-breaks →
+**death removes quota without exploding the group**. The ledger (quotas,
+arrival counts, phase) is replicated state — every mutation is a log entry and
+survives failover and restarts; wait bookkeeping is Leader-local (v9's dual
+topology precedent).
+
+- **Quotas are session-attributed** — `register`/`bulkRegister(n)` credit the
+  calling session; `arriveAndDeregister` can only decrement its own session's
+  quota (overdraft rejected — JDK's anonymous-party undefined behavior made
+  explicit, so death cleanup knows exactly what to remove).
+- **Arrival is a state transition (all mutations logged)** — register/arrive/
+  deregister each commit a `PHASER_OP_ENTRY` (v5 Barrier doctrine; Latch's
+  "counts in, waits out" family). Trip rule: `arrived > 0 ∧ arrived ≥
+  registered`; after a trip counts reset but **registrations persist across
+  phases** (only departure removes).
+- **Two-layer replay idempotence** — arrival dedup is keyed
+  (session, request) valid within the current phase; a rolled **previous-
+  generation window** keeps the last trip's arrivals for one cycle so a lost-
+  reply resend terminates with its arrival phase instead of double counting
+  (declared race beyond the window, same bound style as Barrier's completed
+  record). Registration carries a per-session last-(request, phase) slot.
+- **Death: implicit quota removal, arrival facts stand, no stall** — a dead
+  session's outstanding quota is subtracted immediately (the obligation can
+  trip on the spot — one dead member never starves the group), while already
+  counted arrivals are NOT rolled back (a fact once replicated stays, the
+  queue's "death doesn't swallow elements" counterpart). Contrast with
+  Barrier's break-on-death: dynamic membership lets removal replace breaking —
+  the generalization pays off exactly here.
+- **Zero registered = idle, never terminated** — unlike JDK (zero-party
+  termination is sticky), this library provides no termination surface: after
+  everyone deregisters the key idles (phase kept, quota 0) and later
+  `register` resumes from the current phase. Same reasoning as Barrier's
+  refusal of sticky breakage.
+- **Three Non-Goals** — no `onAdvance` hook (the server runs no user code;
+  discriminate "I was the last arrival" from the returned arrival phase and
+  run your action locally — no ordering versus others' wake-ups); no
+  termination; no parent/child tiering (a local-counter scalability
+  optimization whose benefit evaporates behind per-arrival RTT). Also:
+  phase numbers are `long` (JDK `int` wraps at 2^31).
+- **Waits self-heal across leader change (stronger than v9's contrast)** —
+  the wake predicate "current phase > observed phase" lives in the replicated
+  ledger, so lost wake pushes are repaired by the client's bounded re-sends
+  immediately — no loss window, no compensation needed (contrast the
+  condition's "signal is an event" loss window). `awaitAdvance(int)` is
+  bounded by the wait budget (default 30 s then `OpenLatchTimeoutException`;
+  loop to re-enter for JDK's unbounded semantics);
+  `awaitAdvanceInterruptibly(phase, timeout, unit)` best-effort CANCELs before
+  throwing `TimeoutException`.
+- **Reads are RTT-priced, Leader-local, zero-log** — every getter is one
+  QUERY round trip; readings are advisory, **not linearized** — deliberately
+  diverging from v4's "GET also commits" precedent (a phase reading is stale
+  by language fact).
+- **Two guardrails, separate lines** — `max-parties-per-phaser` (default
+  1024) caps per-key registration (overflow `OVERLOADED`, existing quotas
+  untouched, checked only at admission); suspended waits share
+  `max-queue-depth-per-key` (pure `awaitAdvance` overflow `OVERLOADED`;
+  `arriveAndAwaitAdvance`'s wait half is always lenient — an arrival already
+  in the ledger is never stranded by depth).
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -328,6 +395,7 @@ loop, and the signal family is pure Leader-local queue surgery.
 | Bounded queue | — | elements bound to the key, not the session (**producer death never swallows them** — stronger than the JDK); declared capacity, two "fulls" split (element-full = false/park, waiter-full = OVERLOADED); dedup slots: no double-insert, identical replay; elements never null; delay form folds expiry at the apply point, per-tie FIFO (v7) |
 | Broadcast topic | — | at-most-once; weak backpressure = drop-newest across two buffer tiers (never backpressures, never disconnects); per-subscription ascending seq within one term, rebased at leader change; dedup only same-Leader (cross-term retries may double-deliver — consumer idempotence required); **death unsubscribes** (the queue's inverse); "one key, one form" is an application contract (v8) |
 | Condition variable | host lock's | await folds a full release and re-acquires — **returns holding the lock** with reentrancy counting from 1; spurious wake-ups allowed, **the guard loop is the caller's obligation**; signal requires ownership (authoritative server check + local pre-check, two layers), await permission is local-only (an explicit downgrade); named addressing (key, name) is cross-process equivalent; **waiting is a promise, signal is an event** (auto re-registration across leader change, in-window signals uncompensated); waiters hold no lease and holder death never signals for you (prefer timed await); read/write forms unsupported; waiter count merges into the key's waiting guardrail (v9) |
+| Phaser | — | dynamic quotas attributed per session (`arriveAndDeregister` overdraft rejected); registrations/arrivals/departures each logged, **quotas persist across phases (only departure removes)**; trip = arrivals ≥ quota with immediate wake; **death removes quota without stalling and never rolls back counted arrivals** (contrast Barrier's break-on-death); zero quota = idle, no termination (re-register revives); no hook / no tiering / long phases (three Non-Goals); wait predicate lives in the ledger — **self-heals across leader change** (contrast the condition's signal loss window); every read is one RTT, advisory, non-linearized; `awaitAdvance` bounded by the wait budget (v10) |
 
 ## Next
 

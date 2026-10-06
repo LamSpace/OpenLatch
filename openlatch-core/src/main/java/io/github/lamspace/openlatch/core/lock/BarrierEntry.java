@@ -665,7 +665,7 @@ public final class BarrierEntry implements KeyEntry {
                 0, 0, 0, 0, List.of(),
                 null, 0, 0, 0,
                 parties, generation, arrivals.size(), actionPending != null,
-                completed == null ? null : completed.result(), null, null, 0L, 0, 0L, 0L, null);
+                completed == null ? null : completed.result(), null, null, 0L, 0, 0L, 0L, null, 0, 0, 0);
     }
 
     /**

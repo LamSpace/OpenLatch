@@ -117,6 +117,12 @@ public final class ClusterRequestHandler {
     private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
     /** v9 条件等待登记表（Leader 本地态）；{@code null}=夹具无条件面。 */
     private final io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions;
+    /**
+     * v10：phaser 等待簿记（Leader 本地态，账簿本体经复制状态机——纯等待/
+     * 撤销/读数在本簿记与影子表直答，变异操作经提交；{@code null}=夹具无
+     * phaser 面，抵达回 {@code INTERNAL_ERROR}，判例 conditions 同形态）。
+     */
+    private final io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers;
 
     /**
      * 构造处理器（不埋点，既有测试夹具形态）。
@@ -191,6 +197,31 @@ public final class ClusterRequestHandler {
                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry
                                          conditions) {
+        this(gateway, kernel, waitQueue, config, leaderTracker, metrics, topics, conditions, null);
+    }
+
+    /**
+     * 构造集群请求处理器（v10 全参形态：追加 phaser 等待簿记装配）。
+     *
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（影子读与提交路径装配）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param topics        topic 登记表（Leader 本地态）
+     * @param conditions    条件等待登记表（Leader 本地态）
+     * @param phasers       phaser 等待簿记（Leader 本地态）；{@code null}=夹具
+     *                      无 phaser 面（PHASER_OP 抵达时回 {@code INTERNAL_ERROR}）
+     */
+    public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker, ServerMetrics metrics,
+                                 io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                 io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                         conditions,
+                                 io.github.lamspace.openlatch.server.phaser.PhaserRegistry
+                                         phasers) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
@@ -199,6 +230,7 @@ public final class ClusterRequestHandler {
         this.metrics = metrics;
         this.topics = topics;
         this.conditions = conditions;
+        this.phasers = phasers;
     }
 
     /**
@@ -1075,6 +1107,212 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * PHASER_OP 集群路径（v10，Leader 权威车道双轨分派——判例
+     * {@code handleQueueOp}/{@code handleBarrierAwait} 的合成形态）：统一预检
+     * （角色门/载荷/键长/会话在场经 {@code validateEnvelope}，v10 门与形状
+     * 互斥矩阵前置，全部拒绝态零提交、簿记零扰动）后按操作词分两轨：
+     *
+     * <ul>
+     *   <li><b>变异操作</b>（REGISTER/ARRIVE/ARRIVE_AND_AWAIT/
+     *   ARRIVE_AND_DEREGISTER）经 {@code PHASER_OP_ENTRY} 提交——账簿迁移在
+     *   应用点确定性重放；受理点仅做<b>配额上限预检</b>（影子表 registered +
+     *   parties 与 config 上限、家族/无条目在带拒绝，超限零条目——上限判定
+     *   唯一在受理点，应用侧不复核）与 {@code ARRIVE_AND_AWAIT} 的簿记联动
+     *   （回执 QUEUED 的等待登记、OK 的簿记摘除与推进唤醒广播均在
+     *   {@code ReplicationGateway} 应用副作用完成，与提交串行点同线程）。</li>
+     *   <li><b>本地操作词</b>（AWAIT_ADVANCE/CANCEL/QUERY）零日志直答——
+     *   等待谓词读影子表账簿（{@code expected < phase} 即刻了结；挂起入
+     *   {@code PhaserRegistry} 簿记并受合并深度护栏）；簿记为 Leader 本地态，
+     *   Follower 抵达已在角色门同型拒绝。</li>
+     * </ul>
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code phaser_op_request} 分支）
+     * @param ctx     连接上下文
+     */
+    public void handlePhaserOp(ServerSession session, Envelope msg,
+                               ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 10) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (phasers == null) {
+            log.warn("PHASER_OP handled without phaser registry assembly");
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR));
+            return;
+        }
+        io.github.lamspace.openlatch.protocol.PhaserOpRequest req = msg.getPhaserOpRequest();
+        if (RequestDispatcher.phaserShapeInvalid(req)) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        String key = req.getKey();
+        var view = kernel.shadow().adminEntry(key);
+        boolean isPhaser = view != null && ShadowTable.isPhaserType(view.lockType());
+        var op = req.getOp();
+        // 家族/无条目在带裁决（零条目、零簿记扰动；判例 signal 形态守卫双源）。
+        if (view != null && !isPhaser) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        switch (op) {
+            case PHASER_OP_REGISTER, PHASER_OP_ARRIVE, PHASER_OP_ARRIVE_AND_AWAIT,
+                    PHASER_OP_ARRIVE_AND_DEREGISTER -> {
+                if (op == io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER) {
+                    int registered = isPhaser ? view.phaserRegistered() : 0;
+                    if ((long) registered + req.getParties() > config.maxPartiesPerPhaser()) {
+                        respondPhaser(ctx, session, startNanos, msg,
+                                StatusCode.OVERLOADED, 0, 0, 0);
+                        return;
+                    }
+                } else if (!isPhaser) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload payload =
+                        io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload.newBuilder()
+                        .setSessionId(session.sessionId())
+                        .setRequestId(msg.getRequestId())
+                        .setRequest(req)
+                        .build();
+                gateway.submit(io.github.lamspace.openlatch.protocol.raft.RaftEntryType
+                        .PHASER_OP_ENTRY, payload.toByteString())
+                        .whenComplete((r, err) -> {
+                            Envelope resp = err == null
+                                    ? mapPhaserOp(msg, r)
+                                    : commitFailure(msg, err);
+                            if (metrics != null && resp.hasPhaserOpResponse()) {
+                                metrics.recordPhaser(op,
+                                        resp.getPhaserOpResponse().getStatus());
+                            }
+                            respondAsync(ctx, session, startNanos, resp);
+                        });
+            }
+            case PHASER_OP_AWAIT_ADVANCE -> {
+                if (!isPhaser) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                long expected = req.getExpectedPhase();
+                if (view.phaserPhase() > expected) {
+                    // 谓词已越（含唤醒后的了结重发与换主重挂）：即刻了结。
+                    phasers.remove(key, session.sessionId(), msg.getRequestId());
+                    respondPhaser(ctx, session, startNanos, msg, StatusCode.OK,
+                            view.phaserPhase(), view.phaserRegistered(),
+                            view.phaserArrived());
+                    return;
+                }
+                if (phasers.count(key) >= config.maxQueueDepthPerKey()) {
+                    respondPhaser(ctx, session, startNanos, msg, StatusCode.OVERLOADED,
+                            0, 0, 0);
+                    return;
+                }
+                phasers.register(key, session.sessionId(), msg.getRequestId(), expected, now);
+                respondPhaser(ctx, session, startNanos, msg, StatusCode.QUEUED,
+                        view.phaserPhase(), view.phaserRegistered(), view.phaserArrived());
+            }
+            case PHASER_OP_CANCEL -> {
+                phasers.remove(key, session.sessionId(), req.getAwaitRequestId());
+                respondPhaser(ctx, session, startNanos, msg, StatusCode.OK,
+                        isPhaser ? view.phaserPhase() : 0,
+                        isPhaser ? view.phaserRegistered() : 0,
+                        isPhaser ? view.phaserArrived() : 0);
+            }
+            case PHASER_OP_QUERY -> {
+                if (!isPhaser) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                respondPhaser(ctx, session, startNanos, msg, StatusCode.OK,
+                        view.phaserPhase(), view.phaserRegistered(), view.phaserArrived());
+            }
+            default -> writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+        }
+    }
+
+    /**
+     * PHASER 变异操作回执映射：应用回执 → 协议应答（零值形拒绝态不携计数；
+     * {@code QUEUE_FULL} 对 phaser 恒不可达——上限判定在受理点、条目应用侧
+     * 不复核，防御映射为 {@code OVERLOADED}）。
+     *
+     * @param msg 原请求信封
+     * @param r   应用回执
+     * @return 应答信封
+     */
+    private Envelope mapPhaserOp(Envelope msg,
+            io.github.lamspace.openlatch.protocol.raft.ApplyResult r) {
+        StatusCode status = switch (r.getStatus()) {
+            case OK -> StatusCode.OK;
+            case QUEUED -> StatusCode.QUEUED;
+            case QUEUE_FULL -> StatusCode.OVERLOADED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.PHASER_OP)
+                .setRequestId(msg.getRequestId())
+                .setPhaserOpResponse(io.github.lamspace.openlatch.protocol
+                        .PhaserOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(msg.getPhaserOpRequest().getOp())
+                        .setPhase(r.getPhaserPhase())
+                        .setRegistered(r.getPhaserRegistered())
+                        .setArrived(r.getPhaserArrived()))
+                .build();
+    }
+
+    /**
+     * PHASER 本地操作词的即时应答写回（簿记/影子直答路径专用，op 回显与
+     * 三计数择用）。
+     *
+     * @param ctx        连接上下文
+     * @param session    会话
+     * @param startNanos 起始时刻（写回耗时埋点）
+     * @param msg        原请求信封
+     * @param status     应答状态码
+     * @param phase      相位回显（拒绝态 0）
+     * @param registered 注册总数回显（拒绝态 0）
+     * @param arrived    到场数回显（拒绝态 0）
+     */
+    private void respondPhaser(ChannelHandlerContext ctx, ServerSession session,
+            long startNanos, Envelope msg, StatusCode status, long phase, int registered,
+            int arrived) {
+        Envelope resp = Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.PHASER_OP)
+                .setRequestId(msg.getRequestId())
+                .setPhaserOpResponse(io.github.lamspace.openlatch.protocol
+                        .PhaserOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(msg.getPhaserOpRequest().getOp())
+                        .setPhase(phase)
+                        .setRegistered(registered)
+                        .setArrived(arrived))
+                .build();
+        if (metrics != null) {
+            metrics.recordPhaser(msg.getPhaserOpRequest().getOp(), status);
+        }
+        writeSync(ctx, session, startNanos, resp);
+    }
+
+    /**
      * BARRIER_AWAIT 集群路径（ACQUIRE 车道 + 复制提交）：到场改变复制状态
      * （到场账簿、合拢与执行者指定、世代号），MUST 经日志——与 Latch
      * "await 零日志"的边界差异系设计使然（屏障到场是状态迁移事件）。
@@ -1356,6 +1594,7 @@ public final class ClusterRequestHandler {
             case QUEUE_OP -> msg.hasQueueOpRequest();
             case TOPIC_OP -> msg.hasTopicOpRequest();
             case CONDITION_OP -> msg.hasConditionOpRequest();
+            case PHASER_OP -> msg.hasPhaserOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -1373,6 +1612,7 @@ public final class ClusterRequestHandler {
             case QUEUE_OP -> msg.getQueueOpRequest().getKey();
             case TOPIC_OP -> msg.getTopicOpRequest().getKey();
             case CONDITION_OP -> msg.getConditionOpRequest().getKey();
+            case PHASER_OP -> msg.getPhaserOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -1515,6 +1755,10 @@ public final class ClusterRequestHandler {
             // v9：CONDITION_OP 同型拒绝——op 回显沿 TOPIC_OP 判例；默认实例的
             // OK 会被成型为"signal 搬运成功/leave 摘除成功"伪成功，码形违例
             // 在此杜绝（Follower 零副作用拒绝的线路可见面）。
+            case PHASER_OP -> b.setPhaserOpResponse(
+                    io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER)
+                            .setOp(msg.getPhaserOpRequest().getOp()));
             case CONDITION_OP -> b.setConditionOpResponse(
                     io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
                             .setStatus(StatusCode.NOT_LEADER)

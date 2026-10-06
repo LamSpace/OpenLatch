@@ -159,6 +159,7 @@ public final class ClientMetrics {
             case LOCK_RELEASE -> resp.getReleaseResponse().getStatus().name();
             case LEASE_RENEW -> resp.getLeaseRenewResponse().getStatus().name();
             case CONDITION_OP -> resp.getConditionOpResponse().getStatus().name();
+            case PHASER_OP -> resp.getPhaserOpResponse().getStatus().name();
             case LATCH_COUNT_DOWN -> resp.getLatchCountDownResponse().getStatus().name();
             case LATCH_AWAIT -> resp.getLatchAwaitResponse().getStatus().name();
             case HELLO -> resp.getHelloResponse().getStatus().name();

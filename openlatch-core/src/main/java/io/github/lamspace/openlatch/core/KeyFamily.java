@@ -54,5 +54,7 @@ public enum KeyFamily {
     /** 循环屏障家族（{@code BarrierEntry}）：世代会合可复用，离场即破障。 */
     BARRIER,
     /** 有界队列家族（{@code QueueEntry}）：元素绑定 key 不绑定会话，常驻不回收。 */
-    QUEUE
+    QUEUE,
+    /** 相位器家族（{@code PhaserEntry}）：动态注册配额与相位账簿，死亡摘除不空转，常驻不回收。 */
+    PHASER
 }

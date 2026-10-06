@@ -23,6 +23,7 @@ enum MessageType
   TOPIC_OP 19
   TOPIC_MESSAGE 20
   CONDITION_OP 21
+  PHASER_OP 22
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -38,6 +39,7 @@ enum LockType
   LOCK_TYPE_ATOMIC_REFERENCE 11
   LOCK_TYPE_QUEUE 12
   LOCK_TYPE_DELAY_QUEUE 13
+  LOCK_TYPE_PHASER 14
 enum StatusCode
   OK 0
   QUEUED 1
@@ -74,6 +76,14 @@ enum ConditionOp
   CONDITION_OP_SIGNAL 0
   CONDITION_OP_SIGNAL_ALL 1
   CONDITION_OP_LEAVE 2
+enum PhaserOp
+  PHASER_OP_REGISTER 0
+  PHASER_OP_ARRIVE 1
+  PHASER_OP_ARRIVE_AND_AWAIT 2
+  PHASER_OP_ARRIVE_AND_DEREGISTER 3
+  PHASER_OP_AWAIT_ADVANCE 4
+  PHASER_OP_CANCEL 5
+  PHASER_OP_QUERY 6
 message Envelope
   protocol_version 1
   type 2
@@ -115,6 +125,8 @@ message Envelope
   topic_message 44
   condition_op_request 45
   condition_op_response 46
+  phaser_op_request 47
+  phaser_op_response 48
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -201,6 +213,7 @@ message AdminSummaryResponse
   barrier_entries 11
   queue_entries 12
   topic_entries 13
+  phaser_entries 14
 message AdminListKeysRequest
   token 1
   page 2
@@ -225,6 +238,9 @@ message AdminKeyInfo
   queue_head_payload_preview 16
   topic_subscribers 17
   condition_waiters 18
+  phaser_phase 19
+  phaser_registered 20
+  phaser_arrived 21
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -290,6 +306,19 @@ message AdminKeyDetailResponse
   topic_subscribers_info 30
   condition_waiters 31
   condition_waiters_info 32
+  phaser_phase 33
+  phaser_registered 34
+  phaser_arrived 35
+  phaser_waiters_info 36
+  phaser_parties_info 37
+message AdminPhaserWaiterInfo
+  session_id 1
+  request_id 2
+  expected_phase 3
+  registered_at_ms 4
+message AdminPhaserPartyInfo
+  session_id 1
+  parties 2
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -386,3 +415,15 @@ message ConditionOpRequest
 message ConditionOpResponse
   status 1
   op 2
+message PhaserOpRequest
+  key 1
+  op 2
+  parties 3
+  expected_phase 4
+  await_request_id 5
+message PhaserOpResponse
+  status 1
+  op 2
+  phase 3
+  registered 4
+  arrived 5

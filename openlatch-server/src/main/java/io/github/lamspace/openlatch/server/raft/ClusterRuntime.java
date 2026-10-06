@@ -84,6 +84,35 @@ public final class ClusterRuntime {
                            io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
                            io.github.lamspace.openlatch.server.condition.ConditionRegistry
                                    conditions) {
+        this(subsystem, waitQueue, gateway, sessionCoordinator, expiryDriver, queueReadyDriver,
+                requestHandler, leaderTracker, stallWatchdog, topics, conditions, null);
+    }
+
+    /**
+     * 全参装配（v10 起含 phaser 簿记；判例 conditions 同位）。
+     *
+     * @param subsystem         Raft 子系统
+     * @param waitQueue         本节点等待队列
+     * @param gateway           复制网关
+     * @param sessionCoordinator 会话协调器
+     * @param expiryDriver      租约到期驱动
+     * @param queueReadyDriver  队列就绪驱动
+     * @param requestHandler    集群请求处理器
+     * @param leaderTracker     Leader 提示单源
+     * @param stallWatchdog     复制停摆看门狗
+     * @param topics            topic 登记表
+     * @param conditions        条件等待登记表
+     * @param phasers           phaser 等待簿记（可为 {@code null}——兼容装配）
+     */
+    private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
+                           ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
+                           LeaseExpiryDriver expiryDriver, QueueReadyDriver queueReadyDriver,
+                           ClusterRequestHandler requestHandler,
+                           LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog,
+                           io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                           io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                   conditions,
+                           io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
@@ -95,6 +124,7 @@ public final class ClusterRuntime {
         this.stallWatchdog = stallWatchdog;
         this.topics = topics;
         this.conditions = conditions;
+        this.phasers = phasers;
     }
 
     /** v8 topic 登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
@@ -102,6 +132,9 @@ public final class ClusterRuntime {
 
     /** v9 条件等待登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
     private final io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions;
+
+    /** v10 phaser 等待簿记（Leader 本地易失态；管理观察与测试断言入口）。 */
+    private final io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers;
 
     /**
      * v8 topic 登记表（管理面订阅维数据源；观察读数 Leader 视角口径）。
@@ -120,6 +153,16 @@ public final class ClusterRuntime {
      */
     public io.github.lamspace.openlatch.server.condition.ConditionRegistry conditionRegistry() {
         return conditions;
+    }
+
+    /**
+     * v10 phaser 等待簿记（管理面 phaser 等待明细数据源；Leader 视角口径——
+     * 非 Leader 节点簿记恒空，如实零读；账簿三计数与配额走影子表复制态）。
+     *
+     * @return 簿记（与运行时同生命周期）
+     */
+    public io.github.lamspace.openlatch.server.phaser.PhaserRegistry phaserRegistry() {
+        return phasers;
     }
 
     /**
@@ -183,12 +226,17 @@ public final class ClusterRuntime {
         io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions =
                 new io.github.lamspace.openlatch.server.condition.ConditionRegistry();
         gateway.setConditionRegistry(conditions);
+        // v10：phaser 等待簿记（Leader 本地易失态——账簿本体经复制状态机，本簿记
+        // 承担等待展示/唤醒排空/深度护栏；判例 ConditionRegistry 装配位与换主清零）。
+        io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers =
+                new io.github.lamspace.openlatch.server.phaser.PhaserRegistry();
+        gateway.setPhaserRegistry(phasers);
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
-                waitQueue, config, leaderTracker, metrics, topics, conditions);
+                waitQueue, config, leaderTracker, metrics, topics, conditions, phasers);
         if (metrics != null) {
             // 复制态 gauge 与角色指标绑定：抓取线程弱一致读，不触碰应用锁。
             metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
-                    clusterConfig.nodeId(), leaderTracker, topics, conditions);
+                    clusterConfig.nodeId(), leaderTracker, topics, conditions, phasers);
         }
         // 复制停摆自愈看门狗：装配末位——全部判据通道（division/gateway/
         // client 池）此时均已就绪；阈值由 election-timeout 折算钉死。
@@ -196,7 +244,7 @@ public final class ClusterRuntime {
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
                 expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog, topics,
-                conditions);
+                conditions, phasers);
     }
 
     /**

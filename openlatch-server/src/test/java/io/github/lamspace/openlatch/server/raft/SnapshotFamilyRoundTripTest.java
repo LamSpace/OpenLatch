@@ -18,8 +18,11 @@ package io.github.lamspace.openlatch.server.raft;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
+import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotState;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -30,6 +33,100 @@ import static org.assertj.core.api.Assertions.assertThat;
  * v3 新字段扰动（缺省字段不出现）。
  */
 class SnapshotFamilyRoundTripTest {
+
+    @Test
+    void phaserLedgerSurvivesSnapshotInstallAndTailReplay() throws Exception {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(41, 1_000, 1).toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(42, 1_000, 2).toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(43, 1_000, 3).toByteArray());
+        // 混合迁移：注册×2、三发到场合拢（0→1）、A_D 缩应到、跨推进重发、
+        // 会话摘除（s43 未到场即死）。
+        java.util.List<RaftLogEntry> seq = new java.util.ArrayList<>(List.of(
+                RaftEntrySamples.phaserSample(41, 101, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER,
+                        2, null, 0, 2_000, 10),
+                RaftEntrySamples.phaserSample(42, 102, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER,
+                        1, null, 0, 2_100, 11),
+                RaftEntrySamples.phaserSample(41, 103, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 2_200, 12),
+                RaftEntrySamples.phaserSample(42, 104, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 2_300, 13),
+                RaftEntrySamples.phaserSample(43, 105, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 2_400, 14),
+                // 换代窗口内重发（rid=103）：终态回显、不双计。
+                RaftEntrySamples.phaserSample(41, 103, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 2_500, 15),
+                // s42 A_D：应到 3→2（arrived 1 后新周期）。
+                RaftEntrySamples.phaserSample(42, 106, "p",
+                        io.github.lamspace.openlatch.protocol.PhaserOp
+                                .PHASER_OP_ARRIVE_AND_DEREGISTER,
+                        0, null, 0, 2_600, 16)));
+        seq.forEach(e -> origin.applyEntry(toBytes(e)));
+        origin.applyEntry(RaftEntrySamples.sessionClose(43, 2_700, 17).toByteArray());
+
+        SnapshotState snap = origin.snapshotState();
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        // 账簿逐字段保真：相位 1、registered 2（s42 离场 −1）、arrived 1、
+        // 在场槽与换代窗口的死者身份已摘。
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        var view = restored.shadow().adminEntry("p");
+        assertThat(view.phaserPhase()).isEqualTo(1);
+        assertThat(view.phaserRegistered()).isEqualTo(2);
+        assertThat(view.phaserArrived()).isEqualTo(1);
+
+        // 快照位点后回放续运转：补齐到场即合拢 1→2，双副本终态一致。
+        RaftLogEntry tail = RaftEntrySamples.phaserSample(41, 107, "p",
+                io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                0, null, 0, 3_000, 18);
+        ApplyResult receipt = ApplyResult.parseFrom(
+                origin.applyEntry(toBytes(tail)));
+        ApplyResult receipt2 = ApplyResult.parseFrom(
+                restored.applyEntry(toBytes(tail)));
+        assertThat(receipt.toByteArray()).isEqualTo(receipt2.toByteArray());
+        assertThat(receipt.getPhaserAdvancedKeysList()).containsExactly("p");
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        assertThat(restored.shadow().adminEntry("p").phaserPhase()).isEqualTo(2);
+    }
+
+    @Test
+    void phaserSnapshotSizeBoundedAcrossRounds() throws Exception {
+        // 尺寸有界且滚动：N 键持续多轮合拢——快照字节不随轮次增长
+        // （相位历史零驻留、在场槽随推进清空、换代窗单窗滚动）。
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        core.applyEntry(RaftEntrySamples.sessionOpen(51, 1_000, 1).toByteArray());
+        core.applyEntry(RaftEntrySamples.phaserSample(51, 101, "b1",
+                io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER,
+                2, null, 0, 1_100, 2).toByteArray());
+        long sizeAfter10 = 0;
+        long rid = 200;
+        for (int round = 1; round <= 40; round++) {
+            for (int i = 0; i < 2; i++) {
+                core.applyEntry(toBytes(RaftEntrySamples.phaserSample(51, rid++, "b1",
+                        io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 2_000 + round, 100L + round)));
+            }
+            if (round == 10) {
+                sizeAfter10 = core.snapshotState().toByteArray().length;
+            }
+        }
+        long sizeAfter40 = core.snapshotState().toByteArray().length;
+        assertThat(core.shadow().adminEntry("b1").phaserPhase()).isEqualTo(40);
+        // 30 轮推进后的快照与第 10 轮同尺寸量级（常数差仅相位号 varint 宽度）。
+        assertThat(Math.abs(sizeAfter40 - sizeAfter10)).isLessThanOrEqualTo(8L);
+    }
+
+    /** 序列化辅助（统一走条目字节接口）。 */
+    private static byte[] toBytes(RaftLogEntry e) {
+        return e.toByteArray();
+    }
+
 
     @Test
     void semaphoreAndLatchSurviveSnapshotInstall() throws Exception {

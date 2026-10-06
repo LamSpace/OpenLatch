@@ -178,6 +178,22 @@ class ConsoleStandaloneTest {
         assertThat(condClient.acquire("cond:job", 7L, -1L, "gate"))
                 .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.QUEUED);
         awaitVisible("/keys", "cond:job");
+        // v10 phaser：构造注册 2 方、一方到场即返，另一方线程挂 arriveAndAwaitAdvance
+        //（相位未合拢持续挂起——页签三计数、等待区段与"等待者含相位等待"口径的
+        // 断言依赖此状态；teardown 关会话即隐式摘除收敛）。
+        io.github.lamspace.openlatch.client.OPhaser phaser =
+                seedClient.newPhaser("stage:phaser", 3);
+        phaser.arrive(); // 1/3；BLOCKED 的 A_A 再计一发（2/3 挂起）
+        BLOCKED.submit(() -> {
+            try {
+                phaser.arriveAndAwaitAdvance();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException e) {
+                // 会话关闭/超时形态：观察面已断言过，脱队可接受。
+            }
+        });
+        awaitVisible("/keys", "stage:phaser");
     }
 
     /** 关停服务器与客户端（daemon 阻塞线程随连接关闭自然脱队）。 */
@@ -227,11 +243,15 @@ class ConsoleStandaloneTest {
                 .contains(OpenLatchServer.serverVersion())
                 .doesNotContain("管理认证失败");
         // 持有 lock=1 / semaphore=1 / latch 条目=1 / barrier 条目=1 / queue 条目=1 /
-        // 等待者=6（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一 + v9 条件
-        // 等待者一——v9 口径：等待者数字含条件等待者，表头随行注记）。
+        // phaser 条目=1 /
+        // 等待者=7（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一 + v9 条件
+        // 等待者一 + v10 phaser 到场等待者一——v9/v10 口径：等待者数字含条件与
+        // 相位等待者，表头随行注记）。
         assertThat(body).contains("<td>1</td>");
-        assertThat(body).contains("<td>6</td>");
-        assertThat(body).contains("等待者（含条件）");
+        assertThat(body).contains("<td>7</td>");
+        assertThat(body).contains("等待者（含条件/相位等待）");
+        // v10：PHASER 条目数列（概览表头与读数）。
+        assertThat(body).contains("PHASER 条目");
         // 会话数：业务客户端 + 控制台自身管理连接 + v9 条件预置裸协议连接。
         assertThat(body).contains("<td>3</td>");
         // sparkline 三线已渲染（指标区未降级）。
@@ -244,14 +264,14 @@ class ConsoleStandaloneTest {
         String body = get("/keys");
         assertThat(body).contains("order:1").contains("pool:db").contains("gate:boot")
                 .contains("stage:sync").contains("tasks:queue").contains("alerts:topic")
-                .contains("cond:job")
+                .contains("cond:job").contains("stage:phaser")
                 .contains("lock").contains("semaphore").contains("latch").contains("barrier")
-                .contains("queue").contains("topic");
+                .contains("queue").contains("topic").contains("phaser");
         // 七行 key（链接计数），总条数读数为 7（pager 的 <span>7</span>）——
         // 含 v9 条件等待键（持有已随 await 释放、条件集使条目持续可见）。
         assertThat(org.springframework.util.StringUtils.countOccurrencesOf(
-                body, "/key?node=")).isEqualTo(7);
-        assertThat(body).contains("<span>7</span>");
+                body, "/key?node=")).isEqualTo(8);
+        assertThat(body).contains("<span>8</span>");
         // v9 LOCK 行条件等待数随行呈现（Leader/单机来源非零如实）。
         assertThat(body).contains("1 条件等待");
         // topic 行读数（订阅数；Leader 本地登记注记）。
@@ -260,6 +280,8 @@ class ConsoleStandaloneTest {
         assertThat(body).contains("2 方 · 世代 1 · 到场 1");
         // 队列行读数（容量 · 深度 · 队首预览——全量元素不外发）。
         assertThat(body).contains("2 容量 · 深度 2 · 队首 1B");
+        // v10 phaser 行读数（registered · 相位 · 到场——三计数复制态口径）。
+        assertThat(body).contains("3 registered · 相位 0 · 到场 2");
         // 锁名可点进详情（只读边界：无解锁按钮/表单）。
         assertThat(body).contains("/key?node=");
         assertThat(body).doesNotContain("<form method=\"post\"");
@@ -297,6 +319,13 @@ class ConsoleStandaloneTest {
                 .doesNotContain("console-payload-secret");
         assertThat(get("/keys")).doesNotContain("console-payload-secret");
         assertThat(get("/")).doesNotContain("console-payload-secret");
+        // v10 phaser 明细：账簿三计数横注 + 注册配额表 + 相位等待区段
+        //（登记到达序、已见相位读数；无持有语义如实标注）。
+        String ph = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=stage:phaser");
+        assertThat(ph).contains("相位 0 · registered 3 · 当前到场 2")
+                .contains("<h3>注册配额</h3>").contains("<h3>相位等待</h3>")
+                .contains("无持有者（相位器按注册/到场合拢裁决，无持有语义）");
         // v9 条件等待区段（单机口径）：区段标题、条件名寻址明细、
         // "持有已随 await 释放"形态注记（不以空壳掩盖）；等待队列区段
         // 与之并列且搬运项不重复（当前无搬运，队列为"无人等待"）。

@@ -342,6 +342,66 @@ try {
    v≤8 会话发 `CONDITION_OP` 或携带 `condition` 字段的 ACQUIRE 得
    `INVALID_REQUEST` 消息级拒绝、不断连。
 
+## 相位器（OPhaser，v10）
+
+跨进程按相位会合的泛化结构，对应 JDK `Phaser`。句柄无状态、无需关闭；同 key
+句柄（含跨进程）绑定服务端同一账簿。生产者-阶段流水惯用法：
+
+```java
+OPhaser ph = client.newPhaser("pipeline");   // 构造零网络
+ph.register();                                // 本线程/本参与者注册（返回当前相位）
+// ...生产工作...
+int 到场相位 = (int) ph.arriveAndAwaitAdvance(); // 到场并等本相位全员到齐
+// 返回时该相位已（或即将）合拢；相位号单调递增，下一轮继续 arriveAndAwaitAdvance
+ph.arriveAndDeregister();                     // 离场：扣本会话一个配额
+```
+
+读数与旁观（不需要参与也能等）：
+
+```java
+long seen = ph.getPhase();                    // 一次 QUERY 往返（advisory 读数）
+ph.awaitAdvanceInterruptibly(seen, 5, TimeUnit.SECONDS); // 等相位推进越过 seen
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §12](01-concepts.md)）：
+
+1. **配额按会话记账，离场只扣本会话**：`arriveAndDeregister` 在无配额的会话上
+   调用抛 `OpenLatchException`（`INVALID_REQUEST`）——JDK 匿名 party 的未定义
+   行为在此显式化拒绝；会话死亡时其全部未离场配额隐式摘除（应到集合缩小可
+   当场合拢，存活方不空转），**已计入的到场事实不撤销**；
+2. **注册数跨相位存续、无一次性定型**：与屏障 parties 断言不同，phaser 没有
+   "首次主张须匹配"面——`register` 何时都合法、`bulkRegister(n)` 即加 n；
+   全员离场后账簿**空转**（相位保持、配额 0），后续注册自当前相位恢复运转；
+   **无终止态**（不提供 `isTerminated`/`forceTerminated`，与 JDK 归零即终止相反，
+   理由见概念篇）；
+3. **无 `onAdvance` 钩子**：相位动作以"返回值判别 + 本地执行"替代——
+   `arriveAndAwaitAdvance()` 回显的到场相位号可判"我是否为该相位最后一发"
+   （配合 `getArrivedParties()`），但钩子与他人醒转**无先后保证**（不承诺
+   "动作先于全体放行"，屏障的两阶段动作在此刻意不采纳）；
+4. **返回值与相位号宽度**：各方法相位返回值为 `long`（JDK `int` 在 2^31 个
+   相位后回绕，本库账簿单调 long）；`awaitAdvance(long)` 入参是**你已见的
+   相位号**，返回是了结时刻的当前相位（严格大于入参）；
+5. **成本模型**：每次调用至少 1 个 RTT（注册/到场/离场/查询各 1 次；
+   `arriveAndAwaitAdvance` 会合全程 = 到场 1 次 + 唤醒后了结重发 1 次起）；
+   等待以分片重发承载保活语义——服务端唤醒丢失（如换主）由下一次重发即刻
+   了结或续挂，**无丢失窗**（对照条件"换主窗 signal 不补偿"：这里的等待谓词
+   在复制账簿，自愈是结构性的）。高频 `getPhase()` 就是高频网络——应用侧节流；
+6. **超时纪律**：`awaitAdvance(long)` 以等待总超时兜底（默认 30s，
+   `OpenLatchTimeoutException`），需要 JDK"无限等"语义请外层循环重入；
+   `awaitAdvanceInterruptibly(phase, timeout, unit)` 预算耗尽抛
+   `TimeoutException`（先尽力 CANCEL 撤销挂起；撤销丢失由护栏与清理三路回收
+   兜底，ghost 等待受 `max-queue-depth-per-key` 钳制）；中断收束同路径并保留
+   中断位；
+7. **不提供清单**：父子分层派生（`parent` 构造不收）、终止面、
+   `bulkArriveAndDeregister` 对偶（循环 `arriveAndDeregister` 即可）；读数
+   （`getPhase` 族）为 Leader 本地零日志、**不承诺线性化伴随**——与 v4 原子
+   GET"读亦经提交"的判例刻意不一致（相位读数返回即刻可能过期）；
+8. **护栏与版本门**：`max-parties-per-phaser`（默认 1024、[1,65536]）限单键
+   注册总数——超限 `REGISTER` 收 `OVERLOADED`、既有配额零扰动；挂起等待受
+   `max-queue-depth-per-key` 合并口径（纯 `awaitAdvance` 超限 `OVERLOADED`；
+   `arriveAndAwaitAdvance` 的挂起半程恒宽容）。需 v10 握手（升级序先服务端后
+   客户端）：v≤9 会话发 `PHASER_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连。
+
 ## 异步用法
 
 ```java

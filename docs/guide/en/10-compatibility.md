@@ -7,7 +7,7 @@
 | Java runtime/compile | **25** (only) | all artifacts build with `release=25`; 17/21 cannot load them |
 | Spring Boot starter | **4.x** | depends on Boot-4-only artifacts; Boot 3.x incompatible — wire the SDK manually ([03](03-client-sdk.md)) |
 | Spring Framework | whatever Boot 4 ships (Framework 7) | starter targets Boot 4 contexts only |
-| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9** (HELLO negotiation, range [1,9]) | out-of-range rejected at handshake — no implicit compatibility |
+| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10** (HELLO negotiation, range [1,10]) | out-of-range rejected at handshake — no implicit compatibility |
 | Micrometer | host-provided (not transitive) | inject a `MeterRegistry` to enable client metrics |
 | Artifact delivery | client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on Maven Central (1.0.0+); server & console executable jars on GitHub Releases | client: use the coordinates directly; server/console: download a jar or build locally |
 
@@ -24,6 +24,7 @@
 | v7 | bounded & delay queues (`OBlockingQueue`/`ODelayQueue`): the `QUEUE_OP` message pair, `LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` kinds, per-session dedup slots, two-fulls split (DENIED vs OVERLOADED), capacity/drain ingress clamps, apply-point expiry folding, queue snapshot fields |
 | v8 | broadcast pub/sub (`OTopic`): `TOPIC_OP` message pair + `TOPIC_MESSAGE` push, `REJECT_SUBSCRIBERS` in-band code, weak backpressure = drop-newest across two buffer tiers, per-session publish dedup at the accepting Leader, **zero log / zero snapshot contribution** (first zero-persistence primitive), `max-subscribers-per-key`/`max-subscription-buffer` ingress clamps |
 | v9 | condition variables (`OCondition`): the `CONDITION_OP` message pair (SIGNAL/SIGNAL_ALL/LEAVE — **AWAIT is not in the vocabulary**; awaits fold into the ACQUIRE loop via `AcquireRequest`'s `optional condition` presence), zero-log signal family / zero-snapshot-footprint wait sets, no new `StatusCode`/`LockType`/`RaftEntryType` values, waiter count merged into the `max-queue-depth-per-key` guardrail (zero new config) |
+| v10 | phaser (`OPhaser`): the single `PHASER_OP` message pair (REGISTER / ARRIVE / ARRIVE_AND_AWAIT / ARRIVE_AND_DEREGISTER / AWAIT_ADVANCE / CANCEL / QUERY — arrival and waiting decoupled), **all mutations logged** (each commits a `PHASER_OP_ENTRY`, entry type 14; wait/cancel/query stay zero-log), previous-generation window + per-session registration idempotence slots, death removes quotas without rolling back counted arrivals (no stall), waits self-heal across leader change (contrast the condition's signal window), three Non-Goals (no onAdvance hook / no termination / no parent-child tiering), new `max-parties-per-phaser` guardrail (default 1024), `StatusCode` unchanged (both caps ride `OVERLOADED`, separated by `op`), phases are `long` |
 
 Mixed-version rule: **server ≥ client**. Old clients (v1/v2) work fully against new servers;
 a newer client against an older server is rejected at handshake (explicit failure beats
@@ -38,8 +39,10 @@ server v8 (v≤7 sessions sending `TOPIC_OP` get an `INVALID_REQUEST` message-le
 rejection without disconnect, every other primitive unaffected), and condition
 operations require server v9 (v≤8 sessions sending `CONDITION_OP` or an ACQUIRE
 carrying the `condition` field get an `INVALID_REQUEST` message-level rejection
-without disconnect, every other primitive unaffected); after the server is
-upgraded, v≤8 clients keep their byte-for-byte behavior.
+without disconnect, every other primitive unaffected), and phaser operations
+require server v10 (v≤9 sessions sending `PHASER_OP` get an `INVALID_REQUEST`
+message-level rejection without disconnect, every other primitive unaffected);
+after the server is upgraded, v≤9 clients keep their byte-for-byte behavior.
 
 ## Upgrade & rollback order
 

@@ -18,6 +18,8 @@
 | `OpenLatchTimeoutException` | client | one request unanswered for 5s (connection alive) | check node load/clocks; a lone blip is tolerable |
 | `ServerUnavailableException` | client | connection unavailable (incl. failover fast-fail) | retry; verify seed config |
 | `IllegalMonitorStateException` | client | unlock/release/signal without holding (v9: signaling has two same-shaped sources — the local pre-check, or the server's `NOT_HELD` mapped to this exception) | fix the lifecycle code path |
+| `TimeoutException` (phaser `awaitAdvanceInterruptibly` expiry) | client | the phase did not advance beyond the observed value within the budget (a best-effort CANCEL was sent first) | enlarge the budget or loop re-entering; same bounded-wait family as the phaser `OpenLatchTimeoutException` (v10) |
+
 | `LockLostException` (callback) | client | the lock was taken away | abort the in-flight commit — by-design obligation |
 
 ## 2. Failover behavior baseline (measured)
@@ -181,6 +183,44 @@ auto-convergence after healing; sampler red only if all rounds ABORTED.
   so follower KEY_DETAIL condition sections honestly read zero (the same
   Leader-only surface as the wait queue) — faithful presentation, not data
   loss.
+
+## Phaser (v10) triage quick sheet
+
+- **"The phase won't advance" — three-way split** (an `arriveAndAwaitAdvance`/
+  `awaitAdvance` that never resolves): ① **arrivals missing** — compare
+  `getArrivedParties()` with `getRegisteredParties()` (or the admin phaser
+  section): registered members that are alive but doing other work simply
+  haven't arrived; a dead member whose quota has not yet been swept means its
+  SESSION_CLOSE hasn't landed (within the probe window this is expected, not a
+  defect — the sweep trips the phase on the spot); ② **lane window** —
+  mutations ride the leader-routed direct lane and can time out explicitly
+  during leader change (the W11 shape): resending the same request id is
+  idempotent-safe; persistent NOT_LEADER/timeout falls back to section 3; the
+  wait side self-heals via chunked re-sends and is not a second exposure;
+  ③ **application bookkeeping** — a rejected `arriveAndDeregister` overdraft
+  means that session already spent its quota while the code still waits for a
+  rendezvous that now needs one arrival less/more than assumed: audit the
+  per-session register/deregister pairing;
+- **`OVERLOADED` tells you which gate by request type**: on REGISTER it is
+  `max-parties-per-phaser` (existing quotas untouched — split the key or raise
+  the cap); on AWAIT_ADVANCE it is the merged `max-queue-depth-per-key` wait
+  budget (`arriveAndAwaitAdvance`'s wait half is never refused — its arrival
+  already counts);
+- **Late cross-trip resends count as new arrivals**: a lost reply re-sent after
+  two further trips rolls out of the previous-generation window and is counted
+  afresh (declared race). React within `requestTimeout`-scale latency; never
+  build correctness on "exactly one arrival" — cross-check with the counters;
+- **A wait "missed its wake-up"? Rule out the predicate first**: phasers have
+  no signal — the wake predicate is the ledger phase. If the phase really
+  hasn't advanced, it's case ①/③; if it advanced but your call returned by
+  timeout, that is the bounded-wait contract (`awaitAdvance(int)` caps at the
+  wait budget) — loop to re-enter. **Contrast with the condition's signal loss
+  window**: here no event is lost; if it looks like a lost wake-up, the root
+  cause is ①/②/③, never the contract;
+- **Reads are independent round trips**: `getPhase()` then
+  `getArrivedParties()` are two QUERYs — between them the phase may advance,
+  so a naive diff can look "negative". Anchor reconciliation on the monotonic
+  phase, not on cached cross-read deltas.
 
 ## 7. FAQ
 

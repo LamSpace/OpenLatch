@@ -20,6 +20,8 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.UnknownFieldSet;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -286,6 +288,25 @@ class ProtocolCodecTest {
         assertThat(QueueOp.QUEUE_OP_DRAIN.getNumber()).isEqualTo(2);
         assertThat(QueueOp.QUEUE_OP_PEEK.getNumber()).isEqualTo(3);
         assertThat(QueueOp.QUEUE_OP_SIZE.getNumber()).isEqualTo(4);
+
+        // v10：相位器消息对/家族判别/操作词编号钉定（StatusCode 零新增——14 值不变，
+        // 由 golden 与下列值域断言共同承载）。
+        assertThat(MessageType.CONDITION_OP.getNumber()).isEqualTo(21);
+        assertThat(MessageType.PHASER_OP.getNumber()).isEqualTo(22);
+        assertThat(LockType.LOCK_TYPE_DELAY_QUEUE.getNumber()).isEqualTo(13);
+        assertThat(LockType.LOCK_TYPE_PHASER.getNumber()).isEqualTo(14);
+        // 生成枚举含 protobuf UNRECOGNIZED 哨兵（取号即抛不入协议面），计数按线路值域
+        assertThat(java.util.Arrays.stream(StatusCode.values())
+                .filter(s -> s != StatusCode.UNRECOGNIZED).count()).isEqualTo(14);
+        assertThat(java.util.Arrays.stream(LockType.values())
+                .filter(l -> l != LockType.UNRECOGNIZED).count()).isEqualTo(15);
+        assertThat(PhaserOp.PHASER_OP_REGISTER.getNumber()).isZero();
+        assertThat(PhaserOp.PHASER_OP_ARRIVE.getNumber()).isEqualTo(1);
+        assertThat(PhaserOp.PHASER_OP_ARRIVE_AND_AWAIT.getNumber()).isEqualTo(2);
+        assertThat(PhaserOp.PHASER_OP_ARRIVE_AND_DEREGISTER.getNumber()).isEqualTo(3);
+        assertThat(PhaserOp.PHASER_OP_AWAIT_ADVANCE.getNumber()).isEqualTo(4);
+        assertThat(PhaserOp.PHASER_OP_CANCEL.getNumber()).isEqualTo(5);
+        assertThat(PhaserOp.PHASER_OP_QUERY.getNumber()).isEqualTo(6);
     }
 
     /** 场景：v2 CLUSTER_VIEW 响应信封回环——成员表逐项等值，payload 分支为 cluster_view。 */
@@ -892,7 +913,8 @@ class ProtocolCodecTest {
         assertThat(parsedDetail.getConditionWaitersInfo(0).getCondition()).isEqualTo("dataReady");
         assertThat(parsedDetail.getConditionWaitersInfo(0).getRegisteredAtMs()).isEqualTo(999L);
 
-        // v9 编号反向钉定：raft 无 CONDITION 条目类型（止于 13）、SnapshotLock 无 condition 字段
+        // v9 编号反向钉定：raft 无 CONDITION 条目类型（v10 起值域上界 14 为 phaser
+        // 专用，条件维占用零的口径不变）、SnapshotLock 无 condition 字段
         assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.values()).allSatisfy(t ->
                 assertThat(t.name()).doesNotContain("CONDITION"));
         assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.QUEUE_OP_ENTRY.getNumber())
@@ -927,5 +949,118 @@ class ProtocolCodecTest {
         return roundTrip(Envelope.newBuilder().setProtocolVersion(7)
                 .setType(MessageType.QUEUE_OP).setRequestId(33L)
                 .setQueueOpResponse(resp).build()).getQueueOpResponse();
+    }
+
+    /**
+     * 场景：v10 相位器消息对回环——七操作词全形状与矩阵违例形如实承载（形状裁决
+     * 在接入层，编解码只载字节，判例 condition 三操作形），{@code expected_phase}
+     * 未主张与 0 主张两态可判别（{@code awaitAdvance(0)} 为 JDK 合法入相，presence
+     * 与值域分离）、应答择用与零值形、管理面 phaser 维（LIST_KEYS 三计数 /
+     * DETAIL 等待与配额明细）回环，并正向钉定 v10 编号证据线：
+     * {@code RaftEntryType.PHASER_OP_ENTRY = 14} 上界、{@code SnapshotLock}
+     * phaser 字段链 35–40、{@code ApplyResult} 回执字段 23–26。
+     */
+    @Test
+    void phaserOperationRoundTrip() throws InvalidProtocolBufferException {
+        // 七操作词 + 违例形：parties 仅 REGISTER、expected_phase 仅 AWAIT_ADVANCE、
+        // await_request_id 仅 CANCEL——违例组合字节级照载（不裁决）
+        PhaserOpRequest register = PhaserOpRequest.newBuilder()
+                .setKey("ph").setOp(PhaserOp.PHASER_OP_REGISTER).setParties(3).build();
+        PhaserOpRequest arrive = PhaserOpRequest.newBuilder()
+                .setKey("ph").setOp(PhaserOp.PHASER_OP_ARRIVE).build();
+        PhaserOpRequest arriveAwait = arrive.toBuilder()
+                .setOp(PhaserOp.PHASER_OP_ARRIVE_AND_AWAIT).build();
+        PhaserOpRequest arriveDereg = arrive.toBuilder()
+                .setOp(PhaserOp.PHASER_OP_ARRIVE_AND_DEREGISTER).build();
+        PhaserOpRequest awaitNoPhase = PhaserOpRequest.newBuilder()
+                .setKey("ph").setOp(PhaserOp.PHASER_OP_AWAIT_ADVANCE).build();
+        PhaserOpRequest awaitZero = awaitNoPhase.toBuilder().setExpectedPhase(0L).build();
+        PhaserOpRequest awaitSeen = awaitNoPhase.toBuilder().setExpectedPhase(7L).build();
+        PhaserOpRequest awaitNegative = awaitNoPhase.toBuilder().setExpectedPhase(-1L).build();
+        PhaserOpRequest cancel = PhaserOpRequest.newBuilder()
+                .setKey("ph").setOp(PhaserOp.PHASER_OP_CANCEL).setAwaitRequestId(81L).build();
+        PhaserOpRequest query = arrive.toBuilder().setOp(PhaserOp.PHASER_OP_QUERY).build();
+        PhaserOpRequest violation = register.toBuilder().setExpectedPhase(1L).build();
+
+        // presence 两态：未主张 vs 0 主张（sint64+optional——awaitAdvance(0) 合法）
+        assertThat(awaitNoPhase.hasExpectedPhase()).isFalse();
+        assertThat(awaitZero.hasExpectedPhase()).isTrue();
+        assertThat(awaitZero.getExpectedPhase()).isZero();
+        assertThat(awaitNoPhase.toByteArray()).isNotEqualTo(awaitZero.toByteArray());
+        for (PhaserOpRequest req : List.of(register, arrive, arriveAwait, arriveDereg,
+                awaitZero, awaitSeen, awaitNegative, cancel, query, violation)) {
+            assertThat(roundTrip(envPhaser(req)).getPhaserOpRequest()).isEqualTo(req);
+        }
+        assertThat(roundTrip(envPhaser(awaitNegative)).getPhaserOpRequest()
+                .getExpectedPhase()).isEqualTo(-1L);
+
+        // 应答择用：到场相位回显 + 账簿快照；QUEUED 形态；拒绝零值形（两超限共码
+        // OVERLOADED、op 回显分轨）
+        PhaserOpResponse ok = PhaserOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(PhaserOp.PHASER_OP_ARRIVE)
+                .setPhase(5L).setRegistered(3).setArrived(1).build();
+        PhaserOpResponse queued = PhaserOpResponse.newBuilder()
+                .setStatus(StatusCode.QUEUED).setOp(PhaserOp.PHASER_OP_AWAIT_ADVANCE)
+                .setPhase(5L).setRegistered(3).setArrived(2).build();
+        PhaserOpResponse overload = PhaserOpResponse.newBuilder()
+                .setStatus(StatusCode.OVERLOADED).setOp(PhaserOp.PHASER_OP_REGISTER).build();
+        assertThat(parsePhaserResponse(ok).getPhase()).isEqualTo(5L);
+        assertThat(parsePhaserResponse(queued).getStatus()).isEqualTo(StatusCode.QUEUED);
+        PhaserOpResponse parsedOverload = parsePhaserResponse(overload);
+        assertThat(parsedOverload.getPhase()).isZero();
+        assertThat(parsedOverload.getOp()).isEqualTo(PhaserOp.PHASER_OP_REGISTER);
+
+        // 管理面 phaser 维：LIST_KEYS 三计数 + waiter_count 双轨；DETAIL 等待/配额明细
+        AdminKeyInfo keyInfo = AdminKeyInfo.newBuilder()
+                .setKey("ph").setFamily("phaser").setWaiterCount(2)
+                .setPhaserPhase(11L).setPhaserRegistered(4).setPhaserArrived(2).build();
+        AdminKeyInfo parsedKeyInfo = AdminKeyInfo.parseFrom(keyInfo.toByteArray());
+        assertThat(parsedKeyInfo.getPhaserPhase()).isEqualTo(11L);
+        assertThat(parsedKeyInfo.getPhaserArrived()).isEqualTo(2);
+        AdminKeyDetailResponse detail = AdminKeyDetailResponse.newBuilder()
+                .setStatus(StatusCode.OK).setFamily("phaser")
+                .setPhaserPhase(11L).setPhaserRegistered(4).setPhaserArrived(2)
+                .addPhaserWaitersInfo(AdminPhaserWaiterInfo.newBuilder()
+                        .setSessionId(0x100000001L).setRequestId(81L)
+                        .setExpectedPhase(10L).setRegisteredAtMs(999L).build())
+                .addPhaserPartiesInfo(AdminPhaserPartyInfo.newBuilder()
+                        .setSessionId(0x100000001L).setParties(3).build())
+                .build();
+        AdminKeyDetailResponse parsedDetail = AdminKeyDetailResponse.parseFrom(detail.toByteArray());
+        assertThat(parsedDetail).isEqualTo(detail);
+        assertThat(parsedDetail.getPhaserWaitersInfo(0).getExpectedPhase()).isEqualTo(10L);
+        assertThat(parsedDetail.getPhaserPartiesInfo(0).getParties()).isEqualTo(3);
+
+        // v10 编号证据正向钉定：条目上界 14、值域无空洞复用；快照 phaser 字段链
+        // 35–40；回执 phaser 字段 23–26（1–13 既有值语义由 golden 冻结保证）
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.PHASER_OP_ENTRY.getNumber())
+                .isEqualTo(14);
+        for (io.github.lamspace.openlatch.protocol.raft.RaftEntryType t
+                : io.github.lamspace.openlatch.protocol.raft.RaftEntryType.values()) {
+            if (t == io.github.lamspace.openlatch.protocol.raft.RaftEntryType.UNRECOGNIZED) {
+                continue;
+            }
+            assertThat(t.getNumber()).isBetween(0, 14);
+        }
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .findFieldByName("phaser_phase").getNumber()).isEqualTo(35);
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .findFieldByName("phaser_prev_arrivals").getNumber()).isEqualTo(41);
+        assertThat(io.github.lamspace.openlatch.protocol.raft.ApplyResult.getDescriptor()
+                .findFieldByName("phaser_advanced_keys").getNumber()).isEqualTo(26);
+    }
+
+    /** phaser 请求信封包裹（复用 {@link #roundTrip(Envelope)} 于 PHASER_OP 通道）。 */
+    private static Envelope envPhaser(PhaserOpRequest req) {
+        return Envelope.newBuilder().setProtocolVersion(10)
+                .setType(MessageType.PHASER_OP).setRequestId(81L)
+                .setPhaserOpRequest(req).build();
+    }
+
+    /** phaser 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 PHASER_OP 通道）。 */
+    private static PhaserOpResponse parsePhaserResponse(PhaserOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(10)
+                .setType(MessageType.PHASER_OP).setRequestId(82L)
+                .setPhaserOpResponse(resp).build()).getPhaserOpResponse();
     }
 }

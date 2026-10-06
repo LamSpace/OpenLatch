@@ -961,6 +961,6 @@ public final class LockEntry implements KeyEntry {
                 List.copyOf(holderSnaps), List.copyOf(waiterSnaps),
                 0, 0, 0, 0, List.of(),
                 null, 0, 0, 0,
-                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null);
+                0, 0, 0, false, null, null, null, 0L, 0, 0L, 0L, null, 0, 0, 0);
     }
 }

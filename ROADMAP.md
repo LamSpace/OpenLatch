@@ -8,6 +8,7 @@
 
 - **2026-09-16 定位裁决**:采纳"B——允许小载荷协调数据结构"(每 key 限额、默认 4KB、服务端钳制)为能力边界;落地次序按"A——纯协调面先行"。来源:JDK 并发原语扩展的可行性分析(五轴:定位契合/机制复用/协议成本/语义保真/竞品先例)。
 - **2026-10-01 发布裁决**:1.0.0 发布并打 tag `v1.0.0`;Maven Central 发布范围收窄至客户端 SDK 链(protocol/client/starter),core/server/console 退出中央仓库、服务端与控制台改经 GitHub Releases 可执行 jar 分发。WATCHLIST W5 发布挂账就此清账。
+- **2026-10-06 三档立项裁决(OPhaser)**:OCondition 落地同型复刻——OPhaser 于需求信号未至时提前立项(用户裁决"基于预研落地 OPhaser";三档"需求信号出现再评估"的规则以本行登记为放行依据,预研随 change 转正)。协议升至 v10 门;架构裁决=变异全入日志(注册/到场/离场逐条 `PHASER_OP_ENTRY`——"到场是状态迁移"沿 v5 Barrier,落地纪律第 2 条对本原语不豁免)、等待/取消/查询零日志(v9 双拓扑延伸:等待是订阅不是状态);三 Non-Goal=onAdvance 钩子/终止态粘滞/父子分层派生均不做(用户裁决,理由钉入 design);死亡语义=隐式摘除配额且已到场事实不撤销(与 Barrier"死亡即破障"刻意对照)。
 - **2026-10-05 三档立项裁决**:OCondition 于需求信号未至时提前立项(用户裁决"先立项看看,尽量完善";三档"需求信号出现再评估"的规则以本行登记为放行依据,预研随 change 转正)。协议升至 v9 门;架构裁决=半入日志(await 的释放折叠经既有 LOCK_ACQUIRE_ENTRY 恰一条条目、SIGNAL/SIGNAL_ALL/LEAVE 零日志判例 v8 豁免类目化"signal 是事件不是状态")。OPhaser 维持三档不动。
 - 库产物面**不得**启用 `--enable-preview`(W5 发布挂账已于 2026-10-01 随 1.0.0 发布清账,禁令延续至发布后仍适用);预览 API 转正前不入任何对外契约。
 - 每个新 wire 类型随协议版本门引入(先例:v3 携带 FAIR/SEMAPHORE/LATCH)。
@@ -38,7 +39,7 @@
 | 候选原语 | JDK 对应 | 备注 | 状态 |
 |---|---|---|---|
 | `OCondition` | `Condition` | 锁 key 下的服务端等待集(`await`/`signal`/`signalAll`,唤醒后重新竞争)。等待队列与推送机制现成,但虚假唤醒承诺、signal 权限、与租约到期交互需专章设计(三专章裁决见提案 design:D1 折叠与双拓扑、D3 权限分轨、D6 租约与换主分层)——已随 v9 落地兑现 | 已落地([提案归档](openspec/changes/archive/2026-10-06-add-ocondition/)) |
-| `OPhaser` | `Phaser` | Barrier 的泛化(动态注册/分层派生),Barrier 落地后自然延伸 | 未启动 |
+| `OPhaser` | `Phaser` | Barrier 的泛化(动态注册/分层派生),Barrier 落地后自然延伸。2026-10-06 提前立项裁决见决策记录;分层派生与 onAdvance 钩子、终止态为显式 Non-Goal(泛化的可判定子集,理由见提案 design);v10 三 Non-Goal 差异与死亡摘除契约已在双语指南 01 §12/03 章声明 | 已落地([提案归档](openspec/changes/archive/2026-10-06-add-ophaser/)) |
 | 延时触发(定时单次标记) | `Timer` | 由 `OBlockingQueue` 延时形态覆盖即可,不单立——已随 v7 落地兑现 | 挂起 |
 
 ## 工程改进(非对外 API 面,各立小 change)

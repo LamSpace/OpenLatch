@@ -131,6 +131,27 @@ public final class ServerMetrics {
      * （对照该线"订阅者不计入"的既有分轨——等待与订阅之别）。
      */
     public static final String CONDITION_WAITERS_MAX = "openlatch.server.condition.waiters.max";
+    /**
+     * v10：相位器操作计数线 {@code op ∈ (register/arrive/arrive_and_await/
+     * arrive_and_deregister/await_advance/cancel/query)}。两超限共码
+     * {@code OVERLOADED} 以 op 分轨（register 线=配额护栏、await_advance/
+     * arrive_and_await 线=合并等待深度护栏，判例 v7 队列双"满"分轨的 op 侧
+     * 对偶）；{@code DENIED}/{@code BARRIER_BROKEN}/{@code REJECT_SUBSCRIBERS}/
+     * {@code NOT_HELD} 对 phaser 恒不可达（无立即式拒绝、无破相、无持有概念）。
+     * 判例 {@link #CONDITION_TOTAL} 常量注。
+     */
+    public static final String PHASER_TOTAL = "openlatch.server.phaser.total";
+    /**
+     * v10："phaser 键注册 party 总数"量纲线（抓取时刻单键峰值）——
+     * <b>应到集合口径而非等待口径</b>：与 {@code queue.depth.max}（等待队深）/
+     * {@code elements.depth.max}（元素）/{@code topic.subscribers.max}（订阅）/
+     * {@code condition.waiters.max}（条件等待）并列为第五口径（"depth/elements/
+     * subscribers/conditions/parties"五口径，注释互引、MUST NOT 混名混义）；
+     * phaser 挂起等待项不为本线计数（其入 {@code waiters} 合计口径——
+     * "registered 是不是等待数"的防混读句）。
+     */
+    public static final String PHASER_PARTIES_REGISTERED_MAX =
+            "openlatch.server.phaser.parties.registered.max";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -427,6 +448,41 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记一次 phaser 操作（v10）。线路操作枚举映射为标签词表小写蛇形
+     * （{@code PHASER_OP_ARRIVE_AND_AWAIT → arrive_and_await}）；
+     * 判例 {@link #recordCondition}。
+     *
+     * @param op     协议操作枚举
+     * @param status 应答状态码
+     */
+    public void recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp op,
+            StatusCode status) {
+        Counter.builder(PHASER_TOTAL)
+                .tags("op", phaserOpLabel(op), "status", status.name())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * phaser 操作词标签（去前缀小写）。
+     *
+     * @param op 协议操作枚举
+     * @return 标签词
+     */
+    private static String phaserOpLabel(io.github.lamspace.openlatch.protocol.PhaserOp op) {
+        return switch (op) {
+            case PHASER_OP_REGISTER -> "register";
+            case PHASER_OP_ARRIVE -> "arrive";
+            case PHASER_OP_ARRIVE_AND_AWAIT -> "arrive_and_await";
+            case PHASER_OP_ARRIVE_AND_DEREGISTER -> "arrive_and_deregister";
+            case PHASER_OP_AWAIT_ADVANCE -> "await_advance";
+            case PHASER_OP_CANCEL -> "cancel";
+            case PHASER_OP_QUERY -> "query";
+            default -> "unknown";
+        };
+    }
+
+    /**
      * 绑定单机形态 gauge（弱一致回调读数，抓取时实时计算）：
      * {@code locks.held{type}} 两线、{@code waiters}、{@code queue.depth.max}、
      * {@code sessions}。仅单机装配调用（集群形态见 {@link #bindClusterGauges}）。
@@ -453,6 +509,10 @@ public final class ServerMetrics {
         // v9：条件等待口径（单机=core 条目等待集读数；四口径互引见常量注。
         // totalWaiters 口径已含条件等待者——本线为单键峰值口径）。
         Gauge.builder(CONDITION_WAITERS_MAX, core, CoreEngine::maxConditionWaiters)
+                .register(registry);
+        // v10：注册 party 峰值（单机=core 条目账簿读数；waiters 合计已由
+        // stats().totalWaiters 含 phaser 挂起项——五口径互引见常量注）。
+        Gauge.builder(PHASER_PARTIES_REGISTERED_MAX, core, CoreEngine::maxPhaserRegistered)
                 .register(registry);
         bindSessionsGauge(sessions);
     }
@@ -490,6 +550,29 @@ public final class ServerMetrics {
                                   LeaderTracker tracker,
                                   io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
                                   io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, topics, conditions, null);
+    }
+
+    /**
+     * 集群形态 gauge（v10 全参形态：追加 phaser 等待簿记）。
+     *
+     * @param shadow     复制状态影子表（本副本）
+     * @param waitQueue  本节点等待队列（Leader 任期内非空）
+     * @param sessions   本节点会话注册表
+     * @param nodeId     本节点 id
+     * @param tracker    Leader 提示单源视图
+     * @param topics     topic 登记表，可为 {@code null}
+     * @param conditions 条件等待登记表，可为 {@code null}
+     * @param phasers    phaser 等待簿记，可为 {@code null}（无 phaser 面时
+     *                   {@code waiters} 合计不含 phaser 等待项、不注册
+     *                   parties 峰值线）
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions,
+                                  io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers) {
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[0])
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[1])
@@ -497,7 +580,8 @@ public final class ServerMetrics {
         // v9 口径：waiters 合计加条件等待者（Leader 本地登记表读数；对照
         // 单机 stats().totalWaiters 天然含集，两形态同"等待总数含条件"语义）。
         Gauge.builder(WAITERS, waitQueue, q -> q.totalWaiters()
-                + (conditions == null ? 0 : conditions.totalCount())).register(registry);
+                + (conditions == null ? 0 : conditions.totalCount())
+                + (phasers == null ? 0 : phasers.totalCount())).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
         Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
         if (topics != null) {
@@ -513,6 +597,12 @@ public final class ServerMetrics {
             Gauge.builder(CONDITION_WAITERS_MAX, conditions,
                     io.github.lamspace.openlatch.server.condition.ConditionRegistry::maxCountCurrent)
                     .register(registry);
+        }
+        if (phasers != null) {
+            // v10：注册 party 峰值读影子表账簿（复制态，任期口径同 condition：
+            // 非 Leader 镜像未推进时如实读数；等待簿记仅供上方合计加数）。
+            Gauge.builder(PHASER_PARTIES_REGISTERED_MAX, shadow,
+                    ShadowTable::phaserRegisteredMax).register(registry);
         }
         bindSessionsGauge(sessions);
         bindClusterIsLeader(nodeId, () -> tracker.snapshot().leaderNodeId() == nodeId);

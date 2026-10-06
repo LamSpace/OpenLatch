@@ -345,6 +345,7 @@ public final class AdminRequestHandler {
             int atomicEntries = 0;
             int barrierEntries = 0;
             int queueEntries = 0;
+            int phaserEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
@@ -354,11 +355,14 @@ public final class AdminRequestHandler {
                     barrierEntries++;
                 } else if (k.family() == KeyFamily.QUEUE) {
                     queueEntries++;
+                } else if (k.family() == KeyFamily.PHASER) {
+                    phaserEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    .setPhaserEntries(phaserEntries)
                     // v8：订阅登记键数（Leader/单机视角；无持有语义单列）。
                     .setTopicEntries(standaloneTopics == null ? 0
                             : standaloneTopics.topicKeyCount())
@@ -371,6 +375,7 @@ public final class AdminRequestHandler {
             int atomicEntries = 0;
             int barrierEntries = 0;
             int queueEntries = 0;
+            int phaserEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
@@ -383,11 +388,16 @@ public final class AdminRequestHandler {
                 } else if (ShadowTable.isQueueType(v.lockType())) {
                     // v7：队列两形态合并单列（判例 latch/atomic/barrier）。
                     queueEntries++;
+                } else if (ShadowTable.isPhaserType(v.lockType())) {
+                    // v10：相位器条目数（复制态家族读数，各节点经镜像收敛一致，
+                    // 与 topic 的 Leader 本地表口径分轨）。
+                    phaserEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
+                    .setPhaserEntries(phaserEntries)
                     // v8：订阅登记键数仅 Leader 视角呈现（降级残留随下次当选
                     // 一并清零，非 Leader 恒 0——判例等待队列 Leader 门控）。
                     .setTopicEntries(leaderNow() ? cluster.topicRegistry().topicKeyCount() : 0)
@@ -396,7 +406,9 @@ public final class AdminRequestHandler {
                     // 单机侧 stats().totalWaiters() 已含条件集，两形态同口径）。
                     .setTotalWaiters(leaderNow()
                             ? cluster.waitQueue().totalWaiters()
-                                    + cluster.conditionRegistry().totalCount() : 0)
+                                    + cluster.conditionRegistry().totalCount()
+                                    + (cluster.phaserRegistry() == null
+                                            ? 0 : cluster.phaserRegistry().totalCount()) : 0)
                     .setNodeRole(currentRole());
         }
         return envelope(msg, MessageType.ADMIN_SUMMARY, x -> x.setAdminSummaryResponse(b));
@@ -461,6 +473,14 @@ public final class AdminRequestHandler {
                         // v9：LOCK 行条件等待数读条目条件集（未搬运项口径；
                         // 已搬运入队项归 waiterCount 等待队列口径，不重复计）。
                         row.setConditionWaiters(standaloneCore.conditionWaiterCount(k.key()));
+                    }
+                    if (k.family() == KeyFamily.PHASER) {
+                        // v10：phaser 行账簿三计数（复制态读数）；等待数取
+                        // 条目等待集（单机条目即真源——明细另在 KEY_DETAIL）。
+                        row.setPhaserPhase(k.phaserPhase())
+                                .setPhaserRegistered(k.phaserRegistered())
+                                .setPhaserArrived(k.phaserArrived())
+                                .setWaiterCount(standaloneCore.phaserWaiters(k.key()).size());
                     }
                     if (k.family() == KeyFamily.ATOMIC) {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
@@ -536,6 +556,15 @@ public final class AdminRequestHandler {
                                     v.queueHeadPayload() == null
                                             ? 0 : v.queueHeadPayload().length)
                             .setQueueHeadPayloadPreview(payloadPreview(v.queueHeadPayload()));
+                } else if (ShadowTable.isPhaserType(v.lockType())) {
+                    // v10：phaser 行账簿三计数（复制态，各节点一致——与等待数
+                    // 的 Leader 本地簿记口径双轨同行，"三计数可读而等待数为零"
+                    // 非矛盾）。
+                    row.setPhaserPhase(v.phaserPhase())
+                            .setPhaserRegistered(v.phaserRegistered())
+                            .setPhaserArrived(v.phaserArrived());
+                    row.setWaiterCount(leader && cluster.phaserRegistry() != null
+                            ? cluster.phaserRegistry().count(en.getKey()) : 0);
                 }
                 rows.add(row.build());
             }
@@ -665,6 +694,26 @@ public final class AdminRequestHandler {
                             // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
                             .setQueueTrack(w.track()).build());
             }
+            if (snap.family() == KeyFamily.PHASER) {
+                // v10：phaser 键明细——账簿三计数（复制态）+ 挂起等待明细
+                //（单机=条目等待集，登记到达序；与 waiters 区段并列不并号）
+                // + 配额明细（引擎内部 sid 直读——单机无逻辑 id 折算语义）。
+                b.setPhaserPhase(snap.phaserPhase())
+                        .setPhaserRegistered(snap.phaserRegistered())
+                        .setPhaserArrived(snap.phaserArrived());
+                for (var pv : standaloneCore.phaserParties(req.getKey())) {
+                    b.addPhaserPartiesInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserPartyInfo.newBuilder()
+                            .setSessionId(pv.sessionId()).setParties(pv.parties()).build());
+                }
+                for (var wv : standaloneCore.phaserWaiters(req.getKey())) {
+                    b.addPhaserWaitersInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserWaiterInfo.newBuilder()
+                            .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                            .setExpectedPhase(wv.expectedPhase())
+                            .setRegisteredAtMs(wv.enqueuedAtMs()).build());
+                }
+            }
             if (snap.family() == KeyFamily.LOCK) {
                 // v9：LOCK 键条件等待明细（条目锁内只读快照，集建立序→
                 // 集内到达序；与等待队列区段并列——已搬运入队项只在上方
@@ -713,6 +762,20 @@ public final class AdminRequestHandler {
                         .setBarrierLastFinal(v.barrierCompletedResult() == 0
                                 ? "none" : barrierFinalWord(v.barrierCompletedResult() - 1));
             }
+            if (ShadowTable.isPhaserType(v.lockType())) {
+                // v10：phaser 明细——账簿三计数与配额行（复制态镜像，各节点
+                // 一致照常呈现——与 topic 键的 Follower 未命中分轨）；挂起等待
+                // 明细为 Leader 本地簿记（下方 leader 分支填充，Follower 随
+                // wait_queue_leader_only 同源标注如实空）。
+                b.setPhaserPhase(v.phaserPhase())
+                        .setPhaserRegistered(v.phaserRegistered())
+                        .setPhaserArrived(v.phaserArrived());
+                for (var pr : v.phaserParties()) {
+                    b.addPhaserPartiesInfo(io.github.lamspace.openlatch.protocol
+                            .AdminPhaserPartyInfo.newBuilder()
+                            .setSessionId(pr.sessionId()).setParties(pr.parties()).build());
+                }
+            }
             if (ShadowTable.isQueueType(v.lockType())) {
                 // v7：队列明细（复制态镜像读数；首元素到期为条目时刻口径，
                 // 全量元素零外发）。
@@ -740,6 +803,19 @@ public final class AdminRequestHandler {
                             .setWaitedMs(w.waitedMs()).setNotified(w.notified())
                             // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
                             .setQueueTrack(w.track()).build());
+                }
+                if (ShadowTable.isPhaserType(v.lockType())
+                        && cluster.phaserRegistry() != null) {
+                    // v10：phaser 等待明细（Leader 本地簿记视图，登记到达序；
+                    // 非 Leader 不填——proto 缺省零值/空列表即如实零读，上方
+                    // wait_queue_leader_only 同源标注）。
+                    for (var wv : cluster.phaserRegistry().waiters(req.getKey())) {
+                        b.addPhaserWaitersInfo(io.github.lamspace.openlatch.protocol
+                                .AdminPhaserWaiterInfo.newBuilder()
+                                .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                                .setExpectedPhase(wv.expectedPhase())
+                                .setRegisteredAtMs(wv.enqueuedAtMs()).build());
+                    }
                 }
                 if ("lock".equals(familyNameOfLockType(v.lockType()))) {
                     // v9：LOCK 键条件等待明细——Leader 本地登记表视图
@@ -835,6 +911,7 @@ public final class AdminRequestHandler {
             case ATOMIC -> "atomic";
             case BARRIER -> "barrier";
             case QUEUE -> "queue";
+            case PHASER -> "phaser";
         };
     }
 
@@ -859,6 +936,9 @@ public final class AdminRequestHandler {
         }
         if (ShadowTable.isQueueType(lockTypeValue)) {
             return "queue";
+        }
+        if (ShadowTable.isPhaserType(lockTypeValue)) {
+            return "phaser";
         }
         return "lock";
     }

@@ -58,6 +58,8 @@ import io.github.lamspace.openlatch.protocol.raft.BarrierLeavePayload;
 import io.github.lamspace.openlatch.protocol.raft.LatchCountDownPayload;
 import io.github.lamspace.openlatch.protocol.raft.SessionPayload;
 import io.github.lamspace.openlatch.server.dispatch.RequestDispatcher;
+import io.github.lamspace.openlatch.core.result.PhaserOpResult;
+import io.github.lamspace.openlatch.protocol.raft.PhaserOpPayload;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotLock;
@@ -285,6 +287,7 @@ public final class LockStateMachineCore {
                     case BARRIER_LEAVE_ENTRY -> applyBarrierLeave(entry);
                     case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
                     case QUEUE_OP_ENTRY -> applyQueueOp(entry);
+                    case PHASER_OP_ENTRY -> applyPhaserOp(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -344,6 +347,7 @@ public final class LockStateMachineCore {
         long sid = p.getSessionId();
         java.util.List<String> freed;
         List<String> brokenBarriers = List.of();
+        List<String> advancedPhasers = List.of();
         Map<Long, Long> toLogical = new HashMap<>();
         if (shadow.hasSession(sid)) {
             // 折算表快照 MUST 先于 sidMap 摘除——死亡会话的内部 sid 仍需按
@@ -354,7 +358,9 @@ public final class LockStateMachineCore {
             shadow.removeSession(sid);
             Long local = sidMap.remove(sid);
             if (local != null) {
-                brokenBarriers = engine.sessionClosed(local);
+                CoreEngine.SessionCleanup cleanup = engine.sessionClosed(local);
+                brokenBarriers = cleanup.brokenBarriers();
+                advancedPhasers = cleanup.advancedPhasers();
             }
             freed = shadow.dropSessionHolders(sid);
         } else {
@@ -366,6 +372,12 @@ public final class LockStateMachineCore {
         for (String bk : brokenBarriers) {
             mirrorBarrier(bk, toLogical);
             b.addBarrierReleasedKeys(bk);
+        }
+        // v10：死亡隐式摘除配额驱动的相位推进（"死亡不空转"）——镜像刷新 +
+        // 回执携带被推进 key 供 Leader 侧 PhaserRegistry/等待簿记唤醒广播。
+        for (String pk : advancedPhasers) {
+            mirrorPhaser(pk, toLogical);
+            b.addPhaserAdvancedKeys(pk);
         }
         return b.build();
     }
@@ -810,6 +822,123 @@ public final class LockStateMachineCore {
     }
 
     /**
+     * PHASER_OP_ENTRY：引擎变异应用（注册配额、到场计数与换代、离场扣减、
+     * 死亡摘除——全部账簿迁移在条目内确定性重放，跨副本一致；等待簿记
+     * MUST NOT 入引擎，判例"集群引擎恒不登记等待项"）。回执携带到场相位
+     * 与账簿快照（应答回显），tripped 经 {@code phaser_advanced_keys} 驱动
+     * Leader 侧唤醒广播（{@code ReplicationGateway}）。配额上限判定在受理
+     * 点（Leader 预检），应用侧不复核——配置漂移不撕裂账簿。
+     *
+     * @param entry 条目（载荷为 {@link PhaserOpPayload}）
+     * @return 回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（调用方转 INTERNAL_ERROR）
+     */
+    private ApplyResult applyPhaserOp(RaftLogEntry entry) throws InvalidProtocolBufferException {
+        PhaserOpPayload p = PhaserOpPayload.parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        io.github.lamspace.openlatch.core.PhaserOpType op = toCorePhaserOp(req.getOp());
+        if (op == null) {
+            return ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+        }
+        PhaserOpResult r = engine.phaserApply(new io.github.lamspace.openlatch.core.command
+                .PhaserOpCommand(local, p.getRequestId(), req.getKey(), op,
+                req.getParties(),
+                req.hasExpectedPhase() ? req.getExpectedPhase() : null,
+                req.getAwaitRequestId()));
+        return switch (r.outcome()) {
+            case GRANTED, QUEUED -> {
+                mirrorPhaser(req.getKey(), null);
+                ApplyResult.Builder b = ApplyResult.newBuilder()
+                        .setStatus(r.outcome() == io.github.lamspace.openlatch.core.result.Outcome.GRANTED
+                                ? ApplyStatus.OK : ApplyStatus.QUEUED)
+                        .setPhaserPhase(r.phase())
+                        .setPhaserRegistered(r.registered())
+                        .setPhaserArrived(r.arrived());
+                if (r.tripped()) {
+                    b.addPhaserAdvancedKeys(req.getKey());
+                }
+                yield b.build();
+            }
+            case REJECT_SESSION ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.REJECT_SESSION).build();
+            case REJECT_PHASER_QUOTA, REJECT_PHASER_NO_ENTRY, REJECT_PHASER_PARTIES,
+                    REJECT_TYPE_MISMATCH, REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG ->
+                    ApplyResult.newBuilder().setStatus(ApplyStatus.INVALID_REQUEST).build();
+            default -> error("unreachable phaser op outcome " + r.outcome(), entry);
+        };
+    }
+
+    /**
+     * 协议 {@code PhaserOp} → core {@code PhaserOpType}（枚举序逐项对应 0–6）；
+     * 未知回 {@code null}。
+     *
+     * @param wireOp 协议操作枚举
+     * @return core 操作，未知为 {@code null}
+     */
+    public static io.github.lamspace.openlatch.core.PhaserOpType toCorePhaserOp(
+            io.github.lamspace.openlatch.protocol.PhaserOp wireOp) {
+        return switch (wireOp) {
+            case PHASER_OP_REGISTER -> io.github.lamspace.openlatch.core.PhaserOpType.REGISTER;
+            case PHASER_OP_ARRIVE -> io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE;
+            case PHASER_OP_ARRIVE_AND_AWAIT ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE_AND_AWAIT;
+            case PHASER_OP_ARRIVE_AND_DEREGISTER ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.ARRIVE_AND_DEREGISTER;
+            case PHASER_OP_AWAIT_ADVANCE ->
+                    io.github.lamspace.openlatch.core.PhaserOpType.AWAIT_ADVANCE;
+            case PHASER_OP_CANCEL -> io.github.lamspace.openlatch.core.PhaserOpType.CANCEL;
+            case PHASER_OP_QUERY -> io.github.lamspace.openlatch.core.PhaserOpType.QUERY;
+            default -> null;
+        };
+    }
+
+    /**
+     * 镜像指定 key 的相位器账簿（应用点统一刷新落点）。
+     *
+     * @param key 相位器键
+     */
+    private void mirrorPhaser(String key) {
+        mirrorPhaser(key, null);
+    }
+
+    /**
+     * 镜像指定 key 的相位器账簿（映射表覆写形态，SESSION_CLOSE 传播专用：
+     * 先于 sidMap 摘除拍下的内部→逻辑折算表，防死者内部 sid 泄入镜像）。
+     *
+     * @param key         相位器键
+     * @param toLogicalBy 预置折算表，可为 {@code null}
+     */
+    private void mirrorPhaser(String key, Map<Long, Long> toLogicalBy) {
+        var st = engine.phaserReplicatedState(key);
+        if (st == null) {
+            return;
+        }
+        Map<Long, Long> toLogical = toLogicalBy != null ? toLogicalBy : new HashMap<>();
+        if (toLogicalBy == null) {
+            for (var en : sidMap.entrySet()) {
+                toLogical.put(en.getValue(), en.getKey());
+            }
+        }
+        var parties = st.parties().stream()
+                .map(pt -> new ShadowTable.PartyRef(
+                        toLogical.getOrDefault(pt.sessionId(), pt.sessionId()),
+                        pt.parties(), pt.lastRegisterRequestId(), pt.lastRegisterPhase()))
+                .toList();
+        java.util.function.Function<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival,
+                ShadowTable.ArrivalRef> ref = a -> new ShadowTable.ArrivalRef(
+                        toLogical.getOrDefault(a.sessionId(), a.sessionId()), a.requestId());
+        shadow.phaserMirror(key, new ShadowTable.PhaserMirrorData(st.phase(), st.registered(),
+                st.arrived(), parties,
+                st.arrivals().stream().map(ref).toList(),
+                st.prevPhase(),
+                st.prevArrivals().stream().map(ref).toList()));
+    }
+
+    /**
      * 协议队列形态数值 → core 枚举（12/13）；其余回 {@code null}。
      *
      * @param number 协议 {@code LockType} 数值
@@ -1222,10 +1351,59 @@ public final class LockStateMachineCore {
                     queue = new CoreStateRestore.QueueState(l.getQueueCapacity(),
                             qElements, qSlots);
                 }
+                // v10：相位器状态组重建——配额表/槽经 newSidMap 折算引擎内部 id
+                // （判例屏障账簿）；映射缺失（已消亡会话残留）的行剔除并重算
+                // registered 保持"配额和恒等于注册总数"不变量，arrived 防御性
+                // 收敛到推进判据补集（理论不可达——死亡摘除与推进同关键区）。
+                CoreStateRestore.PhaserState phaser = null;
+                if (ShadowTable.isPhaserType(l.getLockTypeValue())) {
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry
+                            .PartyView> keptParties = new java.util.ArrayList<>();
+                    int registeredSum = 0;
+                    for (var pt : l.getPhaserPartiesList()) {
+                        Long internal = newSidMap.get(pt.getSessionId());
+                        if (internal == null) {
+                            continue;
+                        }
+                        keptParties.add(new io.github.lamspace.openlatch.core.lock
+                                .PhaserEntry.PartyView(internal, pt.getParties(),
+                                        pt.getLastRegisterRequestId(),
+                                        pt.getLastRegisterPhase()));
+                        registeredSum += pt.getParties();
+                    }
+                    java.util.function.Function<io.github.lamspace.openlatch.protocol.raft
+                            .SnapshotPhaserArrival, io.github.lamspace.openlatch.core.lock
+                            .PhaserEntry.Arrival> conv = a ->
+                            new io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival(
+                                    newSidMap.get(a.getSessionId()), a.getRequestId());
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival>
+                            cur = new java.util.ArrayList<>();
+                    for (var a : l.getPhaserArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            cur.add(conv.apply(a));
+                        }
+                    }
+                    java.util.List<io.github.lamspace.openlatch.core.lock.PhaserEntry.Arrival>
+                            prev = new java.util.ArrayList<>();
+                    for (var a : l.getPhaserPrevArrivalsList()) {
+                        if (newSidMap.containsKey(a.getSessionId())) {
+                            prev.add(conv.apply(a));
+                        }
+                    }
+                    long prevPhase = l.hasPhaserPrevPhase() ? l.getPhaserPrevPhase() : -1L;
+                    int registered = registeredSum;
+                    int arrived = l.getPhaserArrived();
+                    if (arrived > 0 && arrived >= registered) {
+                        arrived = Math.max(0, registered - 1);
+                    }
+                    phaser = new CoreStateRestore.PhaserState(l.getPhaserPhase(), registered,
+                            arrived, java.util.List.copyOf(keptParties), java.util.List.copyOf(cur),
+                            prevPhase, java.util.List.copyOf(prev));
+                }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
                         l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(),
-                        atomic, barrier, atomicRef, queue));
+                        atomic, barrier, atomicRef, queue, phaser));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

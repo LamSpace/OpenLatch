@@ -412,6 +412,74 @@ Semantic boundaries (details in [01 Concepts §11](01-concepts.md)):
    ACQUIRE carrying the `condition` field get an `INVALID_REQUEST`
    message-level rejection without disconnect.
 
+## Phaser (`OPhaser`, v10)
+
+The generalized multi-party phase rendezvous, counterpart to JDK `Phaser`.
+Handles are stateless and need no close; handles on the same key (including
+across processes) bind one server-side ledger. Worker-loop idiom:
+
+```java
+OPhaser ph = client.newPhaser("pipeline");   // construction is network-free
+ph.register();                                // this participant (returns current phase)
+// ...produce...
+long arrivalPhase = ph.arriveAndAwaitAdvance(); // arrive and wait for this phase's trip
+// returns once the phase is (or is about to be) complete; phases advance monotonically
+ph.arriveAndDeregister();                     // depart: removes one of THIS session's quotas
+```
+
+Bystanders (no participation needed):
+
+```java
+long seen = ph.getPhase();                     // one QUERY round trip (advisory read)
+ph.awaitAdvanceInterruptibly(seen, 5, TimeUnit.SECONDS); // wait until phase advances beyond seen
+```
+
+Semantic boundaries (see [01 Core Concepts §12](01-concepts.md)):
+
+1. **Quotas are session-attributed; departure only removes your own** —
+   `arriveAndDeregister` on a quota-less session throws `OpenLatchException`
+   (`INVALID_REQUEST`); a dead session's outstanding quotas are removed
+   implicitly (the obligation may trip on the spot — no stall) while
+   **counted arrivals are never rolled back**;
+2. **Quotas persist across phases; no one-shot typying** — unlike Barrier's
+   parties assertion, `register` is always legal, `bulkRegister(n)` simply
+   adds; when everyone departs the ledger **idles** (phase kept, quota 0) and
+   later registration revives it; **no termination surface** (no
+   `isTerminated`/`forceTerminated`; deliberately inverted from JDK);
+3. **No `onAdvance` hook** — discriminate "last arrival of the phase" from
+   the returned arrival phase (optionally cross-checking
+   `getArrivedParties()`) and run the action locally; **no ordering versus
+   other wake-ups** is promised (the barrier's two-phase action is
+   deliberately not adopted);
+4. **Return values and width** — phases are `long` (JDK `int` wraps at 2^31);
+   `awaitAdvance(long)` takes the phase **you have seen** and returns the
+   strictly-greater current phase at resolution;
+5. **Cost model** — every call is at least one RTT (mutations/reads 1; the
+   `arriveAndAwaitAdvance` journey = arrival 1 + post-wake reissue 1); the
+   wait uses chunked re-sends carrying keep-alive semantics — a lost wake
+   (e.g. leader change) is settled by the next re-send immediately:
+   **no loss window** (contrast the condition's uncompensated signal window;
+   here the predicate lives in the replicated ledger, self-heal is
+   structural). High-frequency `getPhase()` is high-frequency network —
+   throttle at the application;
+6. **Timeout discipline** — `awaitAdvance(long)` is bounded by the wait
+   budget (default 30 s, `OpenLatchTimeoutException`); loop to re-enter for
+   JDK's unbounded wait. `awaitAdvanceInterruptibly(phase, timeout, unit)`
+   throws `TimeoutException` after best-effort CANCEL (lost cancels are
+   reclaimed by the depth guardrail and three-way cleanup); interruption
+   follows the same path preserving the interrupt flag;
+7. **Not provided** — parent/child tiering (no `parent` ctor), termination,
+   `bulkArriveAndDeregister` (loop `arriveAndDeregister` instead); reads are
+   Leader-local zero-log and **not linearized** — the deliberate divergence
+   from v4's GET-commits precedent;
+8. **Guardrails and version gate** — `max-parties-per-phaser` (default 1024,
+   [1, 65536]) caps per-key registrations (overflow `OVERLOADED`, existing
+   quotas untouched); suspended waits share `max-queue-depth-per-key` (pure
+   `awaitAdvance` overflow `OVERLOADED`; `arriveAndAwaitAdvance`'s wait half
+   always registers). Requires a v10 handshake (server first): v≤9 sessions
+   sending `PHASER_OP` get an `INVALID_REQUEST` message-level rejection
+   without disconnect.
+
 ## Async usage
 
 ```java

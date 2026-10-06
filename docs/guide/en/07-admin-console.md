@@ -63,6 +63,14 @@ Topic keys (v8) render the subscriber count and a subscriber list (session id,
 subscription id, subscribed-at); the registry is Leader-local, so only Leader-sourced
 pages show topic rows (follower views are an honest NOT_HELD, never an empty-shell
 success) and delivered message content never leaves the observation surface.
+Phasers (v10) render the ledger's three counters (phase, registered, current
+arrivals), a per-session quota table, and a phase-waiters section (session, request,
+observed phase, registered-at). The ledger and quotas are replicated state, readable
+identically on every node (unlike topic keys, a phaser key's detail MATCHES on a
+Follower); the waiter bookkeeping is Leader-local, honestly empty on Followers under
+the same `wait_queue_leader_only` annotation — the "two-speed projection" (full
+ledger, waiters pending re-hang) MUST NOT mislead "nobody is waiting" from readable
+counters. Pure counts and identities: no content egress.
 Conditions (v9) add a "condition waiters" section on the lock detail page, rendered
 **beside — never double-counted with — the wait queue**: each row shows the condition
 name, session id, request id, thread id and registration time (the wait duration

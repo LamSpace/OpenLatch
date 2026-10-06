@@ -154,6 +154,14 @@ class RollingRestartDrillIT {
             OBlockingQueue qSeed = a.newBlockingQueue("roll-queue", 8);
             qSeed.put("roll-1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             qSeed.put("roll-2".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            // v10 phaser：A 注册两方配额并到场一发（相位 0、1/2）——条目与
+            // 相位为复制态跨滚动存续；配额绑会话，A 连接换代时会被隐式摘除
+            // （契约，区别于队列"元素绑 key"）——故滚动后的断言面是"条目
+            // 存续可读 + 存活侧续注册续到场后合拢照常推进"。
+            io.github.lamspace.openlatch.client.OPhaser pSeed = a.newPhaser("roll-phaser");
+            pSeed.register();
+            pSeed.register();
+            assertThat(pSeed.arrive()).isZero();
 
             // 全量滚动（leader 先序）：逐节点停止→重启→等端口与选主。
             Node leader0 = waitLeader(nodes);
@@ -210,6 +218,41 @@ class RollingRestartDrillIT {
             assertThat(new String(drained.get(1), java.nio.charset.StandardCharsets.UTF_8))
                     .isEqualTo("roll-2");
             assertThat(qProbe.size()).isZero();
+            // v10 phaser 跨滚动断言面（契约形）：①条目存续、读数 QUERY 经
+            // 换代重试后可得；②存活侧 B 续注册两方并循环到场——相位必然
+            // 严格前进（合拢照常，无空转；A 配额被隐式摘除后所需的到场数
+            // 随之缩小，B 逐发到满足应到为止）。
+            io.github.lamspace.openlatch.client.OPhaser pProbe = b.newPhaser("roll-phaser");
+            long pDeadline = System.currentTimeMillis() + 60_000;
+            for (;;) {
+                try {
+                    pProbe.bulkRegister(2);
+                    break;
+                } catch (OpenLatchException transientP) {
+                    if (System.currentTimeMillis() > pDeadline) {
+                        throw transientP;
+                    }
+                    Thread.sleep(500);
+                }
+            }
+            long advancedTo = -1;
+            long aDeadline = System.currentTimeMillis() + 60_000;
+            while (advancedTo < 0) {
+                if (System.currentTimeMillis() > aDeadline) {
+                    throw new AssertionError("phaser 跨滚动后 60s 内相位未推进");
+                }
+                try {
+                    long before = pProbe.getPhase();
+                    pProbe.arrive();
+                    long after = pProbe.getPhase();
+                    if (after > before) {
+                        advancedTo = after;
+                    }
+                } catch (OpenLatchException transientA) {
+                    Thread.sleep(500);
+                }
+            }
+            assertThat(advancedTo).as("滚动重启后合拢照常推进（相位严格前进）").isPositive();
             System.out.println("[drill-C] extended primitives survived rolling restart");
         } finally {
             if (a != null) {

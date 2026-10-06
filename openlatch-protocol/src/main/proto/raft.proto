@@ -35,6 +35,11 @@ enum RaftEntryType {
   // 零迁移，判例 ATOMIC GET）；等待挂起、唤醒推送与已通知时序是 Leader 本地态，
   // 不入日志与快照；应用点不可满足的回执 DENIED 为零迁移判定。
   QUEUE_OP_ENTRY            = 13;
+  // v10：相位器变异命令——注册/到场/离场逐条进日志（账簿为复制态，"到场是状态
+  // 迁移"沿 v5 BARRIER 判例）；等待登记、取消与查询读数 MUST NOT 产生条目
+  // （Leader 本地裁决——"等待是订阅不是状态"类目）。14 号位即 v10 编号证据：
+  // 13 之前各值语义逐项不变、MUST NOT 复用为 phaser 变体；本值仅 phaser 占用。
+  PHASER_OP_ENTRY           = 14;
 }
 
 // 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
@@ -117,6 +122,16 @@ message QueueOpPayload {
   openlatch.QueueOpRequest   request     = 3;
 }
 
+// v10：相位器变异命令载荷。request 携带 op/parties/expected_phase/await_request_id
+// （仅变异三族的字段会出现在条目中——AWAIT_ADVANCE/CANCEL/QUERY 不入日志）。
+// 到场的去重判定（(会话,请求) 在场槽）与配额扣减、合拢推进全在应用侧条目内状态
+// 完成，跨副本回放得出一致应答与一致 phaser_advanced_keys。
+message PhaserOpPayload {
+  int64                       session_id  = 1;
+  int64                       request_id  = 2;  // 原 PHASER_OP 信封 request_id（到场去重槽身份位、ARRIVE_AND_AWAIT 等待半程的关联键）
+  openlatch.PhaserOpRequest   request     = 3;
+}
+
 // LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
 // wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
 message ExpirePayload {
@@ -178,6 +193,19 @@ message ApplyResult {
   optional bytes queue_element_bytes = 20; // TAKE 交付 / PEEK 读数（缺省=无元素）
   repeated bytes queue_drained_bytes = 21; // DRAIN 按出队序交付列表
   sint64         queue_size          = 22; // SIZE 读数（驻留口径；其余 op 恒 0）
+  // v10：PHASER_OP_ENTRY 回执（status=OK/QUEUED/QUEUE_FULL/INVALID_REQUEST 时择用）。
+  // QUEUE_FULL 在此泛化为"服务端资源护栏"统一应用层码（v7 等待满既有映射骑
+  // OVERLOADED 线路）——parties 上限与合并等待深度上限两超限共码、由请求 op 在线路
+  // 侧分轨（register=配额、await 族=深度），不新增 ApplyStatus 词表值。
+  // phaser_phase 为到场相位回显（AWAIT 了结语义由 Leader 在预检/回执改写侧承载，
+  // 不占条目回执）；phaser_registered/phaser_arrived 为应用点后的账簿快照。
+  // phaser_advanced_keys：本条目应用使哪些 phaser key 的相位发生推进（含
+  // SESSION_CLOSE 配额摘除驱动的推进——判例 barrier_released_keys），Leader 据此
+  // 对相应 key 等待集执行"已见相位 < 新相位"的唤醒广播（非复制状态、仅 Leader 用）。
+  sint64         phaser_phase         = 23; // 到场相位回显（PHASER 条目外恒 0）
+  int32          phaser_registered    = 24; // 回执时刻注册总数快照
+  int32          phaser_arrived       = 25; // 回执时刻当前相位到场快照（推进后为 0）
+  repeated string phaser_advanced_keys = 26; // 本条目推进相位的 phaser key 集（唤醒广播依据）
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -239,6 +267,39 @@ message SnapshotLock {
   sint64 queue_capacity = 32;  // 定型容量（建条目非零主张的沉淀值）
   repeated SnapshotQueueElement queue_elements = 33;      // 元素列表（队首在前）
   repeated SnapshotQueueSlot    queue_dedup_slots = 34;   // 每会话去重槽表（会话 id 升序导出）
+  // v10 扩展（PHASER 家族，lock_type = LOCK_TYPE_PHASER；其余家族不出现）。
+  // 账簿只呈当前 (phase, registered, arrived, 在场槽, 了结窗)——相位历史零驻留、
+  // 不随推进轮次增长（尺寸有界的序列化面依据）。确定性导出序：配额表与会话
+  // 注册无关、按会话 id 升序；在场槽按 (会话, 请求) 升序；了结记录按登记到达序。
+  // 等待集与唤醒通知时序 MUST NOT 进入快照（Leader 易失，恢复即清空、客户端
+  // 重挂补登记——与 v9 条件集条款同构，差异在 phaser 的账簿本体是复制态）。
+  sint64  phaser_phase      = 35;  // 当前相位号（自 0 起单调递增，恢复不回退）
+  int32   phaser_registered = 36;  // registeredParties 注册总数
+  int32   phaser_arrived    = 37;  // 当前相位到场计数
+  repeated SnapshotPhaserParty    phaser_parties   = 38;  // 每会话注册配额（账簿插入序=注册先后，判例队列槽的确定性导出纪律但序取插入序——内部 sid 升序跨副本不可比）
+  repeated SnapshotPhaserArrival  phaser_arrivals  = 39;  // 当前相位在场去重槽（插入序=到场先后）
+  // 换代窗口（跨推进重发的终态回显判据，判例屏障完结世代账簿的计数形对偶）：
+  // prev_phase 用显式 presence——相位 0 的换代是合法值，proto3 缺省 0 无法与
+  // "尚无窗口"区分。
+  optional int64 phaser_prev_phase    = 40;  // 上一推进周期到场相位（缺省=无窗口）
+  repeated SnapshotPhaserArrival phaser_prev_arrivals = 41;  // 上一周期到场槽
+}
+
+// v10：phaser 每会话注册配额（死亡摘除与 arriveAndDeregister 扣减的归属域）。
+message SnapshotPhaserParty {
+  int64 session_id = 1;  // 逻辑会话 id
+  int32 parties    = 2;  // 该会话未离场的注册配额（>0，行存在即非零）
+  // 注册幂等槽（判例 v7 队列每会话去重槽）：该会话最近一次 REGISTER 的
+  // (请求 id, 到场相位)——同请求重发单计数回显；0=尚无注册。
+  int64 last_register_request_id = 3;
+  int64 last_register_phase      = 4;
+}
+
+// v10：phaser 在场到场身份（(会话, 请求) 二元组，当前相位去重槽列表项——
+// 相位推进即清空，与 barrier 世代到场账簿的"完结后滚动"形态对应但更简单）。
+message SnapshotPhaserArrival {
+  int64 session_id = 1;
+  int64 request_id = 2;  // 到场操作的 PHASER_OP 信封 request_id
 }
 
 // v7：队列元素（载荷 + 绝对到期时刻）。载荷为不透明字节且非 null——空串元素

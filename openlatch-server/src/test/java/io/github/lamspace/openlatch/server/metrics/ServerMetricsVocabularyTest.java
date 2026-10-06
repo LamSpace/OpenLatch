@@ -106,6 +106,27 @@ class ServerMetricsVocabularyTest {
         metrics.recordCondition(sig, StatusCode.NOT_LEADER);
         metrics.recordCondition(sig, StatusCode.INVALID_REQUEST);
         metrics.recordCondition(leave, StatusCode.SESSION_EXPIRED);
+        // v10：phaser 计数线（op 词表七值各一形态；两超限共码 OVERLOADED 以
+        // op 分轨——register 线=配额、await_advance 线=深度；QUEUED 可达面
+        // 与 condition 恒不可达恰成分轨对照）。
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER,
+                StatusCode.OK);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_REGISTER,
+                StatusCode.OVERLOADED);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                StatusCode.OK);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp
+                .PHASER_OP_ARRIVE_AND_AWAIT, StatusCode.QUEUED);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp
+                .PHASER_OP_ARRIVE_AND_DEREGISTER, StatusCode.OK);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp
+                .PHASER_OP_AWAIT_ADVANCE, StatusCode.OVERLOADED);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_CANCEL,
+                StatusCode.OK);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_QUERY,
+                StatusCode.INVALID_REQUEST);
+        metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
+                StatusCode.NOT_LEADER);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -163,6 +184,44 @@ class ServerMetricsVocabularyTest {
         // waiters 口径不含订阅者（三口径分离的负向守门）。
         assertThat(scrape).doesNotContain("topic_total_total");
         assertThat(scrape).doesNotContain("topic.dropped");
+    }
+
+    /**
+     * v10：phaser 两命名点线路名——{@code phaser.total{op,status}} 按七操作词表
+     * 归数、两超限 {@code OVERLOADED} 以 op 分轨（register 配额线 vs
+     * await_advance 深度线）；{@code phaser.parties.registered.max} gauge 为
+     * 注册 party 单键峰值（应到集合口径，非等待口径——五口径互引）。
+     * 恒不可达面负向守门：{@code DENIED}/{@code BARRIER_BROKEN}/
+     * {@code REJECT_SUBSCRIBERS}/{@code NOT_HELD} 对 phaser 无线（无立即式、
+     * 无破相、无持有概念）。
+     */
+    @Test
+    void phaserLineNames() {
+        assertThat(scrape)
+                .contains("openlatch_server_phaser_total{op=\"register\",status=\"OK\"} 1");
+        assertThat(scrape).contains(
+                "openlatch_server_phaser_total{op=\"register\",status=\"OVERLOADED\"} 1");
+        assertThat(scrape).contains(
+                "openlatch_server_phaser_total{op=\"await_advance\",status=\"OVERLOADED\"} 1");
+        assertThat(scrape).contains(
+                "openlatch_server_phaser_total{op=\"arrive_and_await\",status=\"QUEUED\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_phaser_total{op=\"arrive\",status=\"OK\"} 1");
+        assertThat(scrape).contains(
+                "openlatch_server_phaser_total{op=\"arrive_and_deregister\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_phaser_total{op=\"cancel\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_phaser_total{op=\"query\",status=\"INVALID_REQUEST\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_phaser_total{op=\"arrive\",status=\"NOT_LEADER\"} 1");
+        assertThat(scrape).contains("openlatch_server_phaser_parties_registered_max 0");
+        // 恒不可达面负向守门。
+        assertThat(scrape).doesNotContain("phaser_total{op=\"register\",status=\"DENIED\"");
+        assertThat(scrape).doesNotContain("phaser_total{op=\"register\",status=\"BARRIER_BROKEN\"");
+        assertThat(scrape).doesNotContain("phaser_total{op=\"register\",status=\"NOT_HELD\"");
+        assertThat(scrape).doesNotContain("phaser_total{op=\"register\",status=\"REJECT_SUBSCRIBERS\"");
+        assertThat(scrape).doesNotContain("phaser_total_total");
     }
 
     /**

@@ -36,6 +36,7 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.queue.ready-tick-ms` | `200` | delayed-queue ready-scan period (v7, Leader/standalone scheduler; affects wake-up latency precision only, never state adjudication), minimum 10ms |
 | `openlatch.server.limit.max-subscribers-per-key` | `64` | per-key topic subscriber ceiling (v8); an over-limit SUBSCRIBE is ingress-rejected (`REJECT_SUBSCRIBERS`, existing subscribers untouched), range [1, 1024]; bounds broadcast fan-out amplification |
 | `openlatch.server.limit.max-subscription-buffer` | `256` | server-side in-flight buffer depth per subscription (v8, drop-newest trigger line), range [1, 65536]; the SDK keeps a matching local tier (256) |
+| `openlatch.server.limit.max-parties-per-phaser` | `1024` | per-key phaser (v10) registration cap; an over-limit REGISTER is rejected at admission (`OVERLOADED`, existing quotas untouched), range [1, 65536]; checked only at admission (the entry never consultates it — config drift cannot split the ledger). Suspended waits instead share the existing `max-queue-depth-per-key` merged guardrail |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -173,6 +174,18 @@ availability is carried by the server-side self-healing watchdog, not by restart
   first on the way down). Before rolling back, confirm v9 clients have
   stepped down or are no longer active; in-flight awaits terminate with
   their sessions and waiters do not resurrect.
+- **v10 phaser rollback window (fourth caliber, same shape as barrier/queue)**:
+  the phaser ledger is persistent primitive state — registrations, arrivals and
+  departures each commit a `PHASER_OP_ENTRY` (entry type 14) and the ledger is
+  written to `phaser_*` snapshot fields; pre-v10 binaries cannot understand
+  them. Before rolling back, confirm no in-flight phaser traffic or accept
+  phaser keys being unavailable on the old binary (unknown-entry error path per
+  the standing rule). Unlike the queue there is nothing to drain — the ledger
+  *is* the state; the single prerequisite is zeroing in-flight traffic. Mixed
+  version rule as usual: v10 SDK clients are refused at HELLO by a rolled-back
+  v9 server (upgrade server-first, rollback client-first). Fourth caliber
+  alongside queue "drain first", topic/condition "clean by construction" —
+  never cross-read the four.
 
 ### Queue-dimension snapshot and log governance (v7)
 
@@ -223,7 +236,7 @@ availability is carried by the server-side self-healing watchdog, not by restart
 - **Zero persistent footprint**: the wait set is Leader process-volatile and
   never snapshotted (`SnapshotLock` gains nothing in v9 — the numbering
   evidence), SIGNAL/SIGNAL_ALL/LEAVE never log, and each await contributes
-  exactly **one entry of an existing type** (the `RaftEntryType`-stops-at-13
+  exactly **one entry of an existing type** (the `RaftEntryType`-zero-addition-for-condition
   evidence chain keeps holding in v9) — snapshot/log sizing needs no new
   condition term;
 - **Capacity and readouts**: a large population of pure condition waiters
@@ -238,6 +251,28 @@ availability is carried by the server-side self-healing watchdog, not by restart
   second; out-of-range clients fail at handshake (the rollback window's only
   condition constraint is exactly this pre-existing discipline surfacing —
   see the rollback section above).
+
+### Phaser-dimension entry-rate governance (v10)
+
+- The phaser is an all-logged primitive: registrations, arrivals and
+  departures each commit a `PHASER_OP_ENTRY` — the entry rate scales as
+  parties × phase frequency × arrivals per phase, with no topic/condition
+  zero-log exemption. The levers are arrival frequency and key splitting:
+  small hot phases (2–3 parties, seconds apart) are the design-intended
+  shape — the benchmark phaser phases publish single-arrival throughput and
+  two-party rendezvous latency as the baseline (`target/benchmark/` report);
+  sharding the phaser key by business slice is the primary relief, while
+  `max-parties-per-phaser` (default 1024) bounds per-key ledger size;
+- Snapshot side the ledger is **bounded and rolling**: only the current
+  (phase, registered, arrived, quota rows, in-phase arrival slots, previous-
+  generation window) persists — no phase history, slots clear on each trip,
+  snapshot bytes do not grow with rounds (guard assertion); wait bookkeeping
+  is Leader-volatile with zero snapshot footprint;
+- Observation: growth of `phaser.total{op,status}` on the two `OVERLOADED`
+  lines (register = quota guardrail; await_advance = merged depth) and the
+  `phaser.parties.registered.max` water mark; when entry rate or snapshot
+  duration becomes an operational concern, the WATCHLIST W14 row triggers the
+  batched-arrival / read-path evaluation (separate change).
 
 ### Payload snapshot & log size governance (v6)
 

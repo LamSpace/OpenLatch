@@ -95,6 +95,13 @@ public record CoreInspection(
      *                       非该家族为 0）
      * @param queueHeadPayload QUEUE 队首元素载荷克隆（不做到期可见性判定；
      *                       空队为 {@code null}；非该家族恒 {@code null}）
+     * @param phaserPhase    PHASER 当前相位号（非该家族为 0）
+     * @param phaserRegistered PHASER 注册总数（非该家族为 0）
+     * @param phaserArrived  PHASER 当前相位到场计数（非该家族为 0；挂起
+     *                       等待明细不入本快照的 {@code waiters} 区段——
+     *                       phaser 等待无位次/许可/线程语义，经
+     *                       {@code PhaserEntry.waitersSnapshot()} 独立
+     *                       视图导出，判例条件等待并列不并号）
      */
     public record KeySnapshot(
             String key,
@@ -126,7 +133,10 @@ public record CoreInspection(
             int queueDepth,
             long queueHeadExpiryMs,
             long queueTotalPayloadBytes,
-            byte[] queueHeadPayload) {
+            byte[] queueHeadPayload,
+            long phaserPhase,
+            int phaserRegistered,
+            int phaserArrived) {
     }
 
     /**
