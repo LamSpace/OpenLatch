@@ -462,6 +462,30 @@ public final class ShadowTable {
     }
 
     /**
+     * v9 await 折叠全量释放的镜像收口：归属条目整体摘除（重入计数一步清零，
+     * 与引擎 {@code awaitFoldRelease} 的释放半程对偶），条目无持有者时移除 key。
+     * 归属不在持有集时零操作（重放/非持有同形，确定性幂等）。
+     *
+     * @param sessionId 持有归属逻辑会话 id
+     * @param threadId  持有归属线程 id
+     * @param key       锁键
+     */
+    public void releaseFully(long sessionId, long threadId, String key) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            return;
+        }
+        l.holders.remove(new Holder(sessionId, threadId));
+        if (l.holders.isEmpty()) {
+            locks.remove(key);
+            heldIndex.remove(key);
+            adminView.remove(key);
+        } else {
+            adminView.put(key, viewOf(l));
+        }
+    }
+
+    /**
      * 续租登记（RENEW OK 应用点）：刷新到期时刻（凭证不变），同步无锁索引。
      *
      * @param key          锁键

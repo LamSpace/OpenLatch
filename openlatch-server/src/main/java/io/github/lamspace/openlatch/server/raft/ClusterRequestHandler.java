@@ -115,6 +115,8 @@ public final class ClusterRequestHandler {
     private final ServerMetrics metrics;
     /** v8 topic 登记表（Leader 本地态）；{@code null}=夹具无 topic 面。 */
     private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
+    /** v9 条件等待登记表（Leader 本地态）；{@code null}=夹具无条件面。 */
+    private final io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions;
 
     /**
      * 构造处理器（不埋点，既有测试夹具形态）。
@@ -148,7 +150,9 @@ public final class ClusterRequestHandler {
     }
 
     /**
-     * 构造集群请求处理器（v8 全参形态）。
+     * 构造集群请求处理器（v8 兼容形态：无条件面装配，等价 {@code conditions=null}
+     * ——CONDITION_OP 与带 {@code condition} 的 ACQUIRE 抵达时回同型
+     * {@code INTERNAL_ERROR}，判例 topics 同形态）。
      *
      * @param gateway       复制网关
      * @param kernel        状态机内核（会话预检与撞 key 影子读）
@@ -163,6 +167,30 @@ public final class ClusterRequestHandler {
                                  WaitQueue waitQueue, ServerConfig config,
                                  LeaderTracker leaderTracker, ServerMetrics metrics,
                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
+        this(gateway, kernel, waitQueue, config, leaderTracker, metrics, topics, null);
+    }
+
+    /**
+     * 构造集群请求处理器（v9 全参形态）。
+     *
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（会话预检、撞 key 影子读与 signal 权限权威读）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param topics        topic 登记表（Leader 本地态）；{@code null}=夹具
+     *                      无 topic 面（TOPIC_OP 抵达时回 {@code INTERNAL_ERROR}）
+     * @param conditions    条件等待登记表（Leader 本地态）；{@code null}=夹具
+     *                      无条件面（CONDITION_OP 与折叠 ACQUIRE 抵达时回同型
+     *                      {@code INTERNAL_ERROR}，判例 topics 同形态）
+     */
+    public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker, ServerMetrics metrics,
+                                 io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                 io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                         conditions) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
@@ -170,6 +198,7 @@ public final class ClusterRequestHandler {
         this.leaderTracker = leaderTracker;
         this.metrics = metrics;
         this.topics = topics;
+        this.conditions = conditions;
     }
 
     /**
@@ -205,6 +234,17 @@ public final class ClusterRequestHandler {
         StatusCode permitBad = RequestDispatcher.validateAcquirePermits(req);
         if (permitBad != null) {
             writeSync(ctx, session, startNanos, RequestDispatcher.errorResponse(msg, permitBad));
+            return;
+        }
+        // v9 门控：ACQUIRE 携带 condition 字段（await 折叠形态）仅对 v9 会话开放
+        // （v≤8 消息级拒绝、不断连，判例 v3-v8 门），先于折叠受理路径。
+        if (req.hasCondition()) {
+            if (session.protocolVersion() < 9) {
+                writeSync(ctx, session, startNanos,
+                        RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                return;
+            }
+            handleAcquireFold(session, msg, ctx, startNanos, req);
             return;
         }
         boolean queueWanted = req.getWaitMs() != 0;
@@ -258,6 +298,95 @@ public final class ClusterRequestHandler {
         gateway.submit(RaftEntryType.LOCK_ACQUIRE_ENTRY, payload)
                 .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
                         err == null ? mapAcquire(msg, r) : commitFailure(msg, err)));
+    }
+
+    /**
+     * await 折叠 ACQUIRE 的集群受理（v9，ACQUIRE 提交通道，无新条目类型）：
+     * 登记半程在 Leader 受理预检点先于提交完成——此刻持有归属仍是 awaiter，
+     * 任何第三方 SIGNAL 必被权限检查拒绝（"登记先于释放可见"不变式，丢唤醒窗
+     * 为零）；释放半程随 {@code LOCK_ACQUIRE_ENTRY} 条目经复制在各副本确定
+     * 重放（{@code LockStateMachineCore.applyAcquire} 折叠分支）。判定顺序：
+     * 折叠形状（复用接入层唯一裁决 {@link RequestDispatcher#acquireFoldShapeValid}，
+     * {@code condition} 另须非空且 UTF-8 字节数 ≤ {@code maxKeyLength}——空串/
+     * 超长属形状违例，判例"判定唯一在接入层"）→
+     * 装配守卫（无登记表=夹具形态，同型 {@code INTERNAL_ERROR}）→
+     * 合并深度护栏（等待队列深度 + 登记集合计达
+     * {@code max-queue-depth-per-key} 即 {@code OVERLOADED} 且登记零发生）→
+     * 幂等登记（同 (会话, request_id) 重挂跳过登记与护栏、保留原登记时刻）→
+     * 既有 {@code AcquirePayload} 提交通道。应答经 {@link #mapAcquireFold}
+     * 改写；提交失败按 {@link #commitFailure} 既有拆分（此时登记随换主/
+     * 会话生命周期收口，客户端重发同信封幂等命中）。
+     *
+     * @param session    已握手会话
+     * @param msg        请求信封（{@code acquire_request} 携带 {@code condition}）
+     * @param ctx        连接上下文
+     * @param startNanos 受理起始时刻（自 {@code handleAcquire} 入口透传）
+     * @param req        获取请求
+     */
+    private void handleAcquireFold(ServerSession session, Envelope msg,
+                                   ChannelHandlerContext ctx, long startNanos,
+                                   io.github.lamspace.openlatch.protocol.AcquireRequest req) {
+        if (!RequestDispatcher.acquireFoldShapeValid(req)
+                || !conditionNameValid(req.getCondition())) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (conditions == null) {
+            log.warn("folded ACQUIRE handled without condition registry assembly");
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR));
+            return;
+        }
+        String key = req.getKey();
+        if (!conditions.isRegistered(session.sessionId(), msg.getRequestId(), key)) {
+            // 合并深度护栏：本 key 等待项统一口径（等待队列 + 全部条件集）。
+            // 幂等重挂（应答丢失自愈/换主车道迁移）跳过护栏与登记——
+            // 同身份已在集，重发不得挤压位次或刷新登记时刻。
+            if (waitQueue.waitCount(key) + conditions.count(key)
+                    >= config.maxQueueDepthPerKey()) {
+                writeSync(ctx, session, startNanos,
+                        acquireErrorResponse(msg, StatusCode.OVERLOADED));
+                return;
+            }
+            conditions.register(session.sessionId(), msg.getRequestId(), req.getThreadId(),
+                    key, req.getCondition(), System.currentTimeMillis());
+        }
+        ByteString payload = AcquirePayload.newBuilder()
+                .setSessionId(session.sessionId())
+                .setRequestId(msg.getRequestId())
+                .setRequest(req)
+                .build().toByteString();
+        gateway.submit(RaftEntryType.LOCK_ACQUIRE_ENTRY, payload)
+                .whenComplete((r, err) -> respondAsync(ctx, session, startNanos,
+                        err == null ? mapAcquireFold(msg, r) : commitFailure(msg, err)));
+    }
+
+    /**
+     * {@link ApplyResult} → 折叠 await 应答改写（v9）：应用点 {@code OK} 表示
+     * 释放半程守卫通过（恒含非持有零操作的重挂形态），登记半程已在受理预检点
+     * 生效——回执改写为 {@code QUEUED}、位次=本 key 等待项合计读数（等待队列 +
+     * 条件集，与单机 {@code LockEntry.awaitFold} 的位次口径同型）；其余状态
+     * （会话失效/家族不匹配/内部）透传 {@link #mapAcquire} 既有映射。
+     * {@code AcquireResponse} 零新字段（协议 v9 增量纪律）。
+     *
+     * @param msg    原请求信封
+     * @param result 应用回执
+     * @return 应答信封
+     */
+    private Envelope mapAcquireFold(Envelope msg, ApplyResult result) {
+        if (result.getStatus() != ApplyStatus.OK) {
+            return mapAcquire(msg, result);
+        }
+        String key = msg.getAcquireRequest().getKey();
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.LOCK_ACQUIRE)
+                .setRequestId(msg.getRequestId())
+                .setAcquireResponse(AcquireResponse.newBuilder()
+                        .setStatus(StatusCode.QUEUED)
+                        .setQueuePosition(waitQueue.waitCount(key) + conditions.count(key)))
+                .build();
     }
 
     /**
@@ -811,6 +940,141 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * CONDITION_OP 集群路径（v9，<b>Leader 本地直裁决、零日志</b>——signal 家族
+     * 只搬运 Leader 本地条件等待集→本地等待队列、发本地推送，不触碰任何复制态，
+     * "signal 是事件不是状态"，判例 v8 topic 零日志豁免的类目化）：统一预检
+     * （角色门/载荷/键长/会话在场）后由 Leader 直接受理：v9 门、op×字段形状矩阵、
+     * {@code condition} 名非空与长度钳制逐层前置于搬运——全部拒绝态零搬运、
+     * 零摘除、零日志。判定顺序与裁决权威：SIGNAL/SIGNAL_ALL 先形态守卫
+     * （影子表该 key 有持有但其形态非互斥三型 REENTRANT/SIMPLE/FAIR 时
+     * {@code INVALID_REQUEST}——读侧尽力而为，与并发建条目存在竞态窗，判例
+     * topic 撞 key 探测），再权限权威检查（影子表 (会话,线程) 恰为持有归属，
+     * 否则 {@code NOT_HELD}——判例释放校验）；通过后按条件名搬运非调用归属
+     * 等待项入 {@link WaitQueue}（到达序；搬运恒发生于锁被持时点，唤醒由后续
+     * 释放/到期/会话关闭应用点的队首通知接力——事件驱动闭环，零新定时器）；
+     * 搬运项入队溢出仅记 WARN（等待者经重发自愈，判例 barrier 溢出臂）。
+     * LEAVE 幂等摘除（未存在的登记无错误态、恒 {@code OK}）。空集/无此条件/
+     * 无该 key 均 {@code OK} 无操作（JDK 对齐，ghost 无害面）。Follower 抵达的
+     * 请求在 {@code validateEnvelope} 角色门即被同型 {@code NOT_LEADER} 拒绝
+     * 且零副作用（无 leader 提示字段，判例 QUEUE/TOPIC 直发车道）。
+     *
+     * @param session 已握手会话
+     * @param msg     请求信封（{@code condition_op_request} 分支）
+     * @param ctx     连接上下文
+     */
+    public void handleConditionOp(ServerSession session, Envelope msg,
+                                  ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 9) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (conditions == null) {
+            log.warn("CONDITION_OP handled without condition registry assembly");
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR));
+            return;
+        }
+        io.github.lamspace.openlatch.protocol.ConditionOpRequest req = msg.getConditionOpRequest();
+        if (RequestDispatcher.conditionOpShapeInvalid(req)
+                || !conditionNameValid(req.getCondition())) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        String key = req.getKey();
+        StatusCode status;
+        switch (req.getOp()) {
+            case CONDITION_OP_SIGNAL, CONDITION_OP_SIGNAL_ALL -> {
+                // 形态守卫双源：heldRef（有写侧持有时可见）之外再查 adminEntry
+                // （全部条目观察视图，弱一致拒绝性读，判例撞 key 探测）——空闲的
+                // LATCH/ATOMIC/QUEUE/SEMAPHORE 形态 key 同判 INVALID_REQUEST，与
+                // 单机 core 门面家族判定对称；READ/WRITE 属 LOCK 家族、单机条目
+                // 不携带形态位，其 signal 拒绝面为集群 adminView 尽力而为
+                // （request 侧折叠形状两拓扑均已拒，SDK 对读/写锁 newCondition 抛
+                // UnsupportedOperationException，裸协议窗在此声明）。
+                var view = kernel.shadow().adminEntry(key);
+                int lt = view != null ? view.lockType()
+                        : (kernel.shadow().heldRef(key) != null
+                                ? kernel.shadow().heldRef(key).lockType() : -1);
+                if (lt >= 0 && lt != io.github.lamspace.openlatch.protocol
+                        .LockType.LOCK_TYPE_REENTRANT.getNumber()
+                        && lt != io.github.lamspace.openlatch.protocol
+                        .LockType.LOCK_TYPE_SIMPLE.getNumber()
+                        && lt != io.github.lamspace.openlatch.protocol
+                        .LockType.LOCK_TYPE_FAIR.getNumber()) {
+                    status = StatusCode.INVALID_REQUEST;
+                    break;
+                }
+                if (!kernel.shadow().isHeldBy(session.sessionId(), req.getThreadId(), key)) {
+                    status = StatusCode.NOT_HELD;
+                    break;
+                }
+                long now = System.currentTimeMillis();
+                java.util.List<io.github.lamspace.openlatch.server.condition
+                        .ConditionRegistry.Promoted> promoted =
+                        req.getOp() == io.github.lamspace.openlatch.protocol
+                                .ConditionOp.CONDITION_OP_SIGNAL
+                                ? conditions.promoteFirst(key, req.getCondition(),
+                                        session.sessionId(), req.getThreadId())
+                                        .map(java.util.List::of)
+                                        .orElse(java.util.List.of())
+                                : conditions.promoteAll(key, req.getCondition(),
+                                        session.sessionId(), req.getThreadId());
+                for (var p : promoted) {
+                    if (waitQueue.enqueue(p.sessionId(), p.requestId(), key, 1, now) < 0) {
+                        // 护栏合并口径下理论可撞等待队列独立上限：溢出仅记
+                        // WARN 不登记（该等待者经重发自愈，判例 barrier 溢出臂）。
+                        log.warn("condition promoted waiter enqueue overflow "
+                                + "(session={}, request={}, key={})",
+                                p.sessionId(), p.requestId(), key);
+                    }
+                }
+                status = StatusCode.OK;
+            }
+            case CONDITION_OP_LEAVE -> {
+                conditions.leave(session.sessionId(), req.getAwaitRequestId());
+                status = StatusCode.OK;
+            }
+            default -> {
+                writeSync(ctx, session, startNanos,
+                        RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                return;
+            }
+        }
+        if (metrics != null) {
+            metrics.recordCondition(req.getOp(), status);
+        }
+        writeSync(ctx, session, startNanos, Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.CONDITION_OP)
+                .setRequestId(msg.getRequestId())
+                .setConditionOpResponse(io.github.lamspace.openlatch.protocol
+                        .ConditionOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp()))
+                .build());
+    }
+
+    /**
+     * 条件名合法性（接入层唯一裁决的组成部分，判例键长纪律）：非空且 UTF-8
+     * 字节数不超过 {@code maxKeyLength}（与键同界，协议 v9 增量条款钉定）。
+     *
+     * @param condition 条件名（协议 {@code string} 字段值）
+     * @return 合法返回 {@code true}
+     */
+    private boolean conditionNameValid(String condition) {
+        return !condition.isEmpty()
+                && condition.getBytes(StandardCharsets.UTF_8).length <= config.maxKeyLength();
+    }
+
+    /**
      * BARRIER_AWAIT 集群路径（ACQUIRE 车道 + 复制提交）：到场改变复制状态
      * （到场账簿、合拢与执行者指定、世代号），MUST 经日志——与 Latch
      * "await 零日志"的边界差异系设计使然（屏障到场是状态迁移事件）。
@@ -1091,6 +1355,7 @@ public final class ClusterRequestHandler {
             case BARRIER_ACTION_DONE -> msg.hasBarrierActionDoneRequest();
             case QUEUE_OP -> msg.hasQueueOpRequest();
             case TOPIC_OP -> msg.hasTopicOpRequest();
+            case CONDITION_OP -> msg.hasConditionOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -1107,6 +1372,7 @@ public final class ClusterRequestHandler {
             case BARRIER_ACTION_DONE -> msg.getBarrierActionDoneRequest().getKey();
             case QUEUE_OP -> msg.getQueueOpRequest().getKey();
             case TOPIC_OP -> msg.getTopicOpRequest().getKey();
+            case CONDITION_OP -> msg.getConditionOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -1246,6 +1512,13 @@ public final class ClusterRequestHandler {
                     io.github.lamspace.openlatch.protocol.TopicOpResponse.newBuilder()
                             .setStatus(StatusCode.NOT_LEADER)
                             .setOp(msg.getTopicOpRequest().getOp()));
+            // v9：CONDITION_OP 同型拒绝——op 回显沿 TOPIC_OP 判例；默认实例的
+            // OK 会被成型为"signal 搬运成功/leave 摘除成功"伪成功，码形违例
+            // 在此杜绝（Follower 零副作用拒绝的线路可见面）。
+            case CONDITION_OP -> b.setConditionOpResponse(
+                    io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER)
+                            .setOp(msg.getConditionOpRequest().getOp()));
             default -> {
                 log.warn("NOT_LEADER reject has no same-shape case for type {} — "
                         + "add the matching payload branch on protocol extension "

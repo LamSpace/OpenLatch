@@ -155,6 +155,24 @@ availability is carried by the server-side self-healing watchdog, not by restart
   handshake against a rolled-back v7 server (server first on the way up,
   client first on the way down), and in-flight subscriptions naturally stop
   when connections drop (same loss semantics as a leader-change window).
+- **v9 condition rollback window (nothing to drain; the only constraint is
+  session convergence)**: the three primitives' rollback constraints are
+  **tracked per primitive and must not be conflated** — queue (drain keys or
+  accept unavailability), topic (zero persistence, clean by construction),
+  condition: the wait set and carried state are Leader process-volatile,
+  never logged and never snapshotted (pinned by standing zero-snapshot-delta
+  and zero-log-for-signal guard regressions); the await's release half rides
+  an **existing entry type** (`LOCK_ACQUIRE_ENTRY` — the `condition` field
+  flows through the request payload, so the Raft log and snapshot formats
+  gain nothing) — rolling back to v8 leaves **no condition-specific
+  persistent state to clear**. The sole constraint is **active v9 session
+  convergence**: a v9 SDK client against a rolled-back v8 server is rejected
+  at handshake (out-of-range handshakes failing fast is the pre-existing
+  discipline made visible, not a silent downgrade; the upgrade order for v8
+  and v9 is stated uniformly: servers first, clients second — and clients
+  first on the way down). Before rolling back, confirm v9 clients have
+  stepped down or are no longer active; in-flight awaits terminate with
+  their sessions and waiters do not resurrect.
 
 ### Queue-dimension snapshot and log governance (v7)
 
@@ -193,6 +211,33 @@ availability is carried by the server-side self-healing watchdog, not by restart
   subscribers × buffer depth × mean message bytes" on the Leader; topics
   carry no durable-delivery duty — use `OBlockingQueue` for event streams that
   must survive leader restarts.
+
+### Condition-dimension governance notes (v9)
+
+- **Zero new configuration keys**: conditions add none — waiters and the wait
+  queue share `max-queue-depth-per-key` under one merged "waiters on this key"
+  count (an over-limit await fails with `OVERLOADED`), and signal carries only
+  ever happen while the caller holds the lock, with wake-ups relayed by the
+  later release/expiry/session-close head-notify path: **zero new timers**
+  (contrast the v7 `ready-tick-ms` scan need; same immediacy as topics);
+- **Zero persistent footprint**: the wait set is Leader process-volatile and
+  never snapshotted (`SnapshotLock` gains nothing in v9 — the numbering
+  evidence), SIGNAL/SIGNAL_ALL/LEAVE never log, and each await contributes
+  exactly **one entry of an existing type** (the `RaftEntryType`-stops-at-13
+  evidence chain keeps holding in v9) — snapshot/log sizing needs no new
+  condition term;
+- **Capacity and readouts**: a large population of pure condition waiters
+  competes with normal acquisitions under the same merged guardrail — watch
+  `condition.waiters.max` (peak per-key condition-set size, carried items
+  excluded) together with `queue.depth.max` (wait-queue depth) and the
+  `waiters` gauge; watermarks pinned near the guardrail, or production
+  reports of "await never wakes" corroborated against a leader-change
+  timestamp (in-window signal loss is contract behavior) trigger the
+  WATCHLIST W13 evaluation path;
+- **Upgrade order stated uniformly for v8 and v9**: servers first, clients
+  second; out-of-range clients fail at handshake (the rollback window's only
+  condition constraint is exactly this pre-existing discipline surfacing —
+  see the rollback section above).
 
 ### Payload snapshot & log size governance (v6)
 

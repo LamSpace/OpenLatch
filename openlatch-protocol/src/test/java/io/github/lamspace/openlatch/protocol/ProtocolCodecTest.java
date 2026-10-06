@@ -816,6 +816,105 @@ class ProtocolCodecTest {
                 assertThat(t.name()).doesNotContain("TOPIC"));
     }
 
+    /**
+     * 场景：v9 条件变量折叠与 signal 家族消息对回环——{@code AcquireRequest.condition}
+     * presence 四形态（缺省=普通获取/空串=违例形/短名/恰限 256 字节长名）可判别且
+     * 字节级保真、折叠 ACQUIRE 信封（protocol 9）等值、{@code ConditionOpRequest}
+     * 三操作与形状违例形如实承载（编解码不裁决）、应答择用与零值形、管理面
+     * 条件字段（计数 + 五字段明细）回环，反向钉定 v9 的 raft 零条目类型与
+     * {@code SnapshotLock} 零扩展（编号证据纪律，判例 topic 零日志反向断言）。
+     */
+    @Test
+    void conditionOperationRoundTrip() throws InvalidProtocolBufferException {
+        // 折叠 presence 四形态：缺省（普通获取）/空串（违例形）/短名/恰限长名
+        AcquireRequest plain = AcquireRequest.newBuilder()
+                .setKey("lk").setLockType(LockType.LOCK_TYPE_REENTRANT)
+                .setThreadId(7L).setWaitMs(-1).build();
+        AcquireRequest emptyCond = plain.toBuilder().setCondition("").build();
+        AcquireRequest await = plain.toBuilder().setCondition("dataReady").build();
+        AcquireRequest bigName = plain.toBuilder().setCondition("c".repeat(256)).build();
+        assertThat(plain.hasCondition()).isFalse();
+        assertThat(emptyCond.hasCondition()).isTrue();
+        assertThat(emptyCond.getCondition()).isEmpty();
+        assertThat(await.hasCondition()).isTrue();
+        // 缺省与空串序列化互异（presence 可判别；违例仅承载，裁决在接入层）
+        assertThat(plain.toByteArray()).isNotEqualTo(emptyCond.toByteArray());
+
+        Envelope envAwait = Envelope.newBuilder().setProtocolVersion(9)
+                .setType(MessageType.LOCK_ACQUIRE).setRequestId(51L)
+                .setAcquireRequest(await).build();
+        Envelope parsedAwait = roundTrip(envAwait);
+        assertThat(parsedAwait.getAcquireRequest()).isEqualTo(await);
+        assertThat(parsedAwait.getAcquireRequest().getCondition()).isEqualTo("dataReady");
+        assertThat(AcquireRequest.parseFrom(bigName.toByteArray()).getCondition()).hasSize(256);
+
+        // signal 家族三操作与违例形：字节级等值往返
+        ConditionOpRequest signal = ConditionOpRequest.newBuilder()
+                .setKey("lk").setOp(ConditionOp.CONDITION_OP_SIGNAL)
+                .setCondition("dataReady").setThreadId(7L).build();
+        ConditionOpRequest signalAll = signal.toBuilder()
+                .setOp(ConditionOp.CONDITION_OP_SIGNAL_ALL).build();
+        ConditionOpRequest leave = ConditionOpRequest.newBuilder()
+                .setKey("lk").setOp(ConditionOp.CONDITION_OP_LEAVE)
+                .setCondition("dataReady").setAwaitRequestId(51L).build();
+        ConditionOpRequest violation = signal.toBuilder().setAwaitRequestId(51L).build();
+        assertThat(roundTrip(envCondition(signal)).getConditionOpRequest()).isEqualTo(signal);
+        assertThat(roundTrip(envCondition(signalAll)).getConditionOpRequest()).isEqualTo(signalAll);
+        assertThat(roundTrip(envCondition(leave)).getConditionOpRequest()).isEqualTo(leave);
+        ConditionOpRequest parsedViolation =
+                roundTrip(envCondition(violation)).getConditionOpRequest();
+        assertThat(parsedViolation).isEqualTo(violation);
+        assertThat(parsedViolation.getOp()).isEqualTo(ConditionOp.CONDITION_OP_SIGNAL);
+        assertThat(leave.getThreadId()).isZero();
+
+        // 应答：OK/NOT_HELD 择用与 op 回显
+        ConditionOpResponse ok = ConditionOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(ConditionOp.CONDITION_OP_SIGNAL_ALL).build();
+        ConditionOpResponse denied = ConditionOpResponse.newBuilder()
+                .setStatus(StatusCode.NOT_HELD).setOp(ConditionOp.CONDITION_OP_SIGNAL).build();
+        assertThat(parseConditionResponse(ok).getOp())
+                .isEqualTo(ConditionOp.CONDITION_OP_SIGNAL_ALL);
+        assertThat(parseConditionResponse(denied).getStatus()).isEqualTo(StatusCode.NOT_HELD);
+
+        // 管理面条件维：计数 + 五字段明细
+        AdminConditionWaiterInfo info = AdminConditionWaiterInfo.newBuilder()
+                .setCondition("dataReady").setSessionId(0x100000001L).setRequestId(51L)
+                .setThreadId(7L).setRegisteredAtMs(999L).build();
+        AdminKeyInfo keyInfo = AdminKeyInfo.newBuilder()
+                .setKey("lk").setFamily("lock").setConditionWaiters(3).build();
+        assertThat(AdminKeyInfo.parseFrom(keyInfo.toByteArray()).getConditionWaiters()).isEqualTo(3);
+        AdminKeyDetailResponse detail = AdminKeyDetailResponse.newBuilder()
+                .setStatus(StatusCode.OK).setFamily("lock").setConditionWaiters(1)
+                .addConditionWaitersInfo(info).build();
+        AdminKeyDetailResponse parsedDetail =
+                AdminKeyDetailResponse.parseFrom(detail.toByteArray());
+        assertThat(parsedDetail).isEqualTo(detail);
+        assertThat(parsedDetail.getConditionWaitersInfo(0).getCondition()).isEqualTo("dataReady");
+        assertThat(parsedDetail.getConditionWaitersInfo(0).getRegisteredAtMs()).isEqualTo(999L);
+
+        // v9 编号反向钉定：raft 无 CONDITION 条目类型（止于 13）、SnapshotLock 无 condition 字段
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.values()).allSatisfy(t ->
+                assertThat(t.name()).doesNotContain("CONDITION"));
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.QUEUE_OP_ENTRY.getNumber())
+                .isEqualTo(13);
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .getFields().stream().noneMatch(f -> f.getName().contains("condition"))).isTrue();
+    }
+
+    /** condition 请求信封包裹（复用 {@link #roundTrip(Envelope)} 于 CONDITION_OP 通道）。 */
+    private static Envelope envCondition(ConditionOpRequest req) {
+        return Envelope.newBuilder().setProtocolVersion(9)
+                .setType(MessageType.CONDITION_OP).setRequestId(52L)
+                .setConditionOpRequest(req).build();
+    }
+
+    /** condition 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 CONDITION_OP 通道）。 */
+    private static ConditionOpResponse parseConditionResponse(ConditionOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(9)
+                .setType(MessageType.CONDITION_OP).setRequestId(53L)
+                .setConditionOpResponse(resp).build()).getConditionOpResponse();
+    }
+
     /** topic 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 TOPIC_OP 通道）。 */
     private static TopicOpResponse parseTopicResponse(TopicOpResponse resp) {
         return roundTrip(Envelope.newBuilder().setProtocolVersion(8)

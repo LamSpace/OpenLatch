@@ -246,6 +246,72 @@ the subscription registry is Leader memory that lives and dies with a term.
   ingress-rejected on a best-effort read-only probe — "one key, one form" is
   an **application-side contract** for topics, not mechanical exclusion.
 
+## 11. Condition variables and wait sets
+
+`OLock.newCondition(name)` (protocol v9) is the coordination-plane counterpart
+of JDK `Condition`: a wait/notify channel under a lock key. The wait set is
+**Leader process-volatile state** — never in the replication log, never in a
+snapshot, destroyed at leader change and repaired by automatic client
+re-registration. It is the first primitive since tier 2 that opens no new
+infrastructure: awaits fold into the existing wait–notify–resend acquisition
+loop, and the signal family is pure Leader-local queue surgery.
+
+- **await = full release folded + re-acquire on wake** — accepting an await
+  atomically performs "reentrancy count zeroed in one step, lease cleared,
+  watchdog stopped + registration in the wait set" (registration becomes
+  visible before the release, so the critical section has no lost-wakeup
+  window); after a wake the client re-acquires under the wait–notify–resend
+  discipline and **returns holding the lock with exactly 1 reentrancy
+  level** (JDK-identical arithmetic: the N levels held before await were
+  zeroed by the await itself).
+- **Spurious wake-ups are allowed and never promised away (the JDK contract —
+  a fidelity, not a downgrade)** — wake sources include head-timeout sweep
+  promotions, predicate changes whose signal was lost in a leader-change
+  re-registration window, and LEAVE/SIGNAL race convergence. **The guard
+  loop is the caller's obligation**: always wrap await as
+  `while (!predicate) condition.await();` — a bare await is a defect.
+- **Named addressing replaces JDK handle identity (an adaptation, not a
+  loss)** — condition identity is (lock key, condition name): repeated
+  `newCondition("x")` calls in one process and same-name handles created by
+  different processes all bind to the **same server-side wait set**;
+  different names are isolated. JDK handle identity cannot cross processes;
+  named addressing buys cross-process equivalence instead.
+- **signal requires ownership (two-layer, split-track permissions)** —
+  `signal`/`signalAll` require the caller's (session, thread) to be exactly
+  the current holder: the SDK checks locally first (misuse throws
+  `IllegalMonitorStateException` with zero requests sent), and the server
+  re-checks authoritatively (line code `NOT_HELD` maps to the same
+  exception). **await permission is checked locally only** — the server does
+  not verify the registrant holds the lock (cross-leader-change
+  re-registration must pass: the old session's holding was already released
+  at session close); misused/malicious registrations become ghost waiters
+  bounded by the merged depth guardrail (shared `max-queue-depth-per-key`
+  with the wait queue) and reclaimed on three paths (LEAVE / session death /
+  leader change) — and ghosts are indistinguishable from predicate races,
+  which is JDK concurrency common sense.
+- **"Waiting is a promise, signal is an event" (the leader-change layering)**
+  — an await rides the replicated log: its release half replays
+  deterministically (the promise survives), and the emptied wait set is
+  refilled by the SDK **automatically re-registering** waiters; but
+  SIGNAL/SIGNAL_ALL are never logged and never compensated — **signals sent
+  inside a leader-change window are lost**, and a waiter at best re-registers
+  and waits for the next signal or its local timeout (timed await is the
+  application's self-rescue surface). Same precedent as the topic's
+  at-most-once/no-replay rule: the server does not custody event-shaped
+  state for the application.
+- **Waiters hold no lease; holder death never signals for you** — when the
+  holder's process dies or its lease expires, the server sweep releases the
+  lock and wakes the **wait-queue entrants only**; condition waiters are
+  untouched — with nobody signaling, they sleep forever (JDK-aligned;
+  **`await(timeout, unit)` is the recommended form**). Waiters themselves
+  have no lease and no renewal duty.
+- **Narrowed support surface** — only the REENTRANT/FAIR/SIMPLE exclusive
+  forms host conditions; `newCondition` on a read/write lock handle throws
+  `UnsupportedOperationException` (local verdict). Fair-lock extension:
+  carried waiters enter the FIFO **at carry time** — a signaled thread is
+  not prioritized over elders already queued (the JDK non-fair effect; the
+  fairness promise constrains enqueue order only).
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -261,6 +327,7 @@ the subscription registry is Leader memory that lives and dies with a term.
 | Cyclic barrier | — | N-party rendezvous, reusable generations; **leaving breaks the current generation** (death/timeout/interrupt/break — stronger than the JDK); no sticky broken state, no `reset()`; the last arriver runs the action (v5) |
 | Bounded queue | — | elements bound to the key, not the session (**producer death never swallows them** — stronger than the JDK); declared capacity, two "fulls" split (element-full = false/park, waiter-full = OVERLOADED); dedup slots: no double-insert, identical replay; elements never null; delay form folds expiry at the apply point, per-tie FIFO (v7) |
 | Broadcast topic | — | at-most-once; weak backpressure = drop-newest across two buffer tiers (never backpressures, never disconnects); per-subscription ascending seq within one term, rebased at leader change; dedup only same-Leader (cross-term retries may double-deliver — consumer idempotence required); **death unsubscribes** (the queue's inverse); "one key, one form" is an application contract (v8) |
+| Condition variable | host lock's | await folds a full release and re-acquires — **returns holding the lock** with reentrancy counting from 1; spurious wake-ups allowed, **the guard loop is the caller's obligation**; signal requires ownership (authoritative server check + local pre-check, two layers), await permission is local-only (an explicit downgrade); named addressing (key, name) is cross-process equivalent; **waiting is a promise, signal is an event** (auto re-registration across leader change, in-window signals uncompensated); waiters hold no lease and holder death never signals for you (prefer timed await); read/write forms unsupported; waiter count merges into the key's waiting guardrail (v9) |
 
 ## Next
 

@@ -14,7 +14,8 @@
             <table class="grid">
                 <tr>
                     <th>锁持有</th><th>Semaphore</th><th>Latch 条目</th><th>ATOMIC 条目</th><th>BARRIER 条目</th><th>QUEUE 条目</th><th>TOPIC 订阅键</th>
-                    <th>等待者</th><th>会话</th><th>角色</th><th>运行时长</th><th>版本</th>
+                    <!-- v9 口径注记：等待者数字含条件等待者（与指标能力口径互注；对照 topic 订阅者不计入） -->
+                    <th>等待者（含条件）</th><th>会话</th><th>角色</th><th>运行时长</th><th>版本</th>
                 </tr>
                 <tr>
                     <td th:text="${row.value.heldLocks}">0</td>

@@ -567,4 +567,48 @@ class SnapshotFamilyRoundTripTest {
         assertThat(topics.topicKeyCount()).isZero();
         assertThat(origin.snapshotState().toByteArray()).isEqualTo(before);
     }
+
+    /**
+     * v9 条件等待零快照增量守卫（snapshot-recovery 规格）：基座含互斥锁条目的
+     * 快照取字节后，对独立 {@code ConditionRegistry} 施全载荷（4 键 × 双条件 ×
+     * 8 等待者 × 搬运/撤登/授予收口/会话摘除/任期清零消解），核心再取快照 MUST
+     * 逐字节相等——等待集与搬运时序无进入快照的 API 通道（等待集不入快照、
+     * await 复制足迹仅为既有持有清零，任何误接线都会在此转红）。
+     */
+    @Test
+    void conditionLoadContributesZeroSnapshotDelta() {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(141, 1_000, 1).toByteArray());
+        for (int k = 0; k < 4; k++) {
+            origin.applyEntry(RaftEntrySamples.acquire(141, 2_000 + k, "ckey-" + k, 3_000 + k,
+                    io.github.lamspace.openlatch.protocol.LockType.LOCK_TYPE_REENTRANT,
+                    300L + k).toByteArray());
+        }
+        byte[] before = origin.snapshotState().toByteArray();
+
+        io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions =
+                new io.github.lamspace.openlatch.server.condition.ConditionRegistry();
+        for (int k = 0; k < 4; k++) {
+            String key = "cond-" + k;
+            for (int w = 0; w < 8; w++) {
+                assertThat(conditions.register(1_400 + w, 100L + w, 7L + w, key,
+                        w % 2 == 0 ? "a" : "b", 5_000L + w)).isTrue();
+            }
+            assertThat(conditions.count(key)).isEqualTo(8); // 负载真实建立（非空转）
+            // 搬运二人（含空转重登验证）+ 撤登二人 + 授予收口一人。
+            conditions.promoteFirst(key, "a", 1_400L, 7L);
+            conditions.promoteAll(key, "b", 1_400L, 7L);
+            conditions.register(1_400, 100L, 7L, key, "a", 5_000L); // 幂等重挂零变化
+            conditions.leave(1_401, 101L);
+            conditions.leave(1_402, 102L);
+            conditions.purgeOwner(1_403, 10L);
+        }
+        for (int w = 0; w < 8; w++) {
+            conditions.removeSession(1_400 + w);
+        }
+        conditions.clear();
+        assertThat(conditions.totalCount()).isZero();
+        // 全消解后登记归零，核心快照面与负载前逐字节相等。
+        assertThat(origin.snapshotState().toByteArray()).isEqualTo(before);
+    }
 }

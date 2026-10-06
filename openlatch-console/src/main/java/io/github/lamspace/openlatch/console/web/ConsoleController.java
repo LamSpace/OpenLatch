@@ -132,7 +132,10 @@ public final class ConsoleController {
     private static final int KEYS_PAGE_SIZE = 50;
 
     /**
-     * 锁详情页：持有明细、等待队列（Leader 标注）、剩余租约。
+     * 锁详情页：持有明细、等待队列（Leader 标注）、条件等待区段（v9，
+     * 与等待队列并列、Leader 口径随行标注）、剩余租约。渲染时刻以
+     * {@code nowMs} 入模型，供条件明细的"已等待时长"折算（应答仅携
+     * 登记时刻，观察折算不在服务端推进任何时序）。
      *
      * @param node  节点展示名
      * @param key   锁键
@@ -153,6 +156,7 @@ public final class ConsoleController {
         model.addAttribute("result", result);
         model.addAttribute("authBanner", result.authFailure());
         model.addAttribute("refreshSeconds", config.refreshSeconds());
+        model.addAttribute("nowMs", System.currentTimeMillis());
         return "key-detail";
     }
 

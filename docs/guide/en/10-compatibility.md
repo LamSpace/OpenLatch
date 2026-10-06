@@ -7,7 +7,7 @@
 | Java runtime/compile | **25** (only) | all artifacts build with `release=25`; 17/21 cannot load them |
 | Spring Boot starter | **4.x** | depends on Boot-4-only artifacts; Boot 3.x incompatible — wire the SDK manually ([03](03-client-sdk.md)) |
 | Spring Framework | whatever Boot 4 ships (Framework 7) | starter targets Boot 4 contexts only |
-| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6** (HELLO negotiation, range [1,6]) | out-of-range rejected at handshake — no implicit compatibility |
+| Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9** (HELLO negotiation, range [1,9]) | out-of-range rejected at handshake — no implicit compatibility |
 | Micrometer | host-provided (not transitive) | inject a `MeterRegistry` to enable client metrics |
 | Artifact delivery | client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on Maven Central (1.0.0+); server & console executable jars on GitHub Releases | client: use the coordinates directly; server/console: download a jar or build locally |
 
@@ -23,6 +23,7 @@
 | v6 | atomic reference (`OAtomicReference`): `optional bytes` payload fields on the ATOMIC message pair (no new `MessageType`), ingress `maxValueBytes` clamp, payload snapshot/preview |
 | v7 | bounded & delay queues (`OBlockingQueue`/`ODelayQueue`): the `QUEUE_OP` message pair, `LOCK_TYPE_QUEUE`/`LOCK_TYPE_DELAY_QUEUE` kinds, per-session dedup slots, two-fulls split (DENIED vs OVERLOADED), capacity/drain ingress clamps, apply-point expiry folding, queue snapshot fields |
 | v8 | broadcast pub/sub (`OTopic`): `TOPIC_OP` message pair + `TOPIC_MESSAGE` push, `REJECT_SUBSCRIBERS` in-band code, weak backpressure = drop-newest across two buffer tiers, per-session publish dedup at the accepting Leader, **zero log / zero snapshot contribution** (first zero-persistence primitive), `max-subscribers-per-key`/`max-subscription-buffer` ingress clamps |
+| v9 | condition variables (`OCondition`): the `CONDITION_OP` message pair (SIGNAL/SIGNAL_ALL/LEAVE — **AWAIT is not in the vocabulary**; awaits fold into the ACQUIRE loop via `AcquireRequest`'s `optional condition` presence), zero-log signal family / zero-snapshot-footprint wait sets, no new `StatusCode`/`LockType`/`RaftEntryType` values, waiter count merged into the `max-queue-depth-per-key` guardrail (zero new config) |
 
 Mixed-version rule: **server ≥ client**. Old clients (v1/v2) work fully against new servers;
 a newer client against an older server is rejected at handshake (explicit failure beats
@@ -32,10 +33,13 @@ rejection without disconnect), and reference-form payloads require server v6 (v�
 sending a reference-form `ATOMIC_OP` get an `INVALID_REQUEST` message-level rejection
 without disconnect — scalar atomics stay untouched), and queue operations require server
 v7 (v≤6 sessions sending `QUEUE_OP` get an `INVALID_REQUEST` message-level rejection
-without disconnect, every other primitive unaffected), and topic operations require
+without disconnect, every other primitive unaffected), topic operations require
 server v8 (v≤7 sessions sending `TOPIC_OP` get an `INVALID_REQUEST` message-level
-rejection without disconnect, every other primitive unaffected); after the server is
-upgraded, v≤7 clients keep their byte-for-byte behavior.
+rejection without disconnect, every other primitive unaffected), and condition
+operations require server v9 (v≤8 sessions sending `CONDITION_OP` or an ACQUIRE
+carrying the `condition` field get an `INVALID_REQUEST` message-level rejection
+without disconnect, every other primitive unaffected); after the server is
+upgraded, v≤8 clients keep their byte-for-byte behavior.
 
 ## Upgrade & rollback order
 
@@ -62,4 +66,12 @@ either confirm no such keys were written before rollback, or accept the state re
 **v8 topics are exempt from this rule**: topics produce no log entries and no snapshot
 fields at all (zero persistence, pinned by the zero-log and zero-snapshot-delta guard
 regressions), so rollback windows are independent of topic traffic (see
-[05 v8 rollback window](05-cluster-deployment.md)).
+[05 v8 rollback window](05-cluster-deployment.md)). **v9 conditions likewise produce no
+new persistent format**: the wait set is process-volatile, snapshots gain no
+condition-specific fields (`SnapshotLock` carries nothing new in v9), the signal family
+never logs, and each await rides the existing `LOCK_ACQUIRE_ENTRY` — rollback leaves
+**no keys to drain**, and the only constraint is active-v9-session convergence
+(out-of-range handshakes failing fast, the pre-existing discipline surfacing; the
+queue's "drain first", the topic's "clean by construction" and the condition's
+"nothing to drain, session convergence only" are three parallel per-primitive tracks —
+never conflate them; see [05 v9 rollback window](05-cluster-deployment.md)).

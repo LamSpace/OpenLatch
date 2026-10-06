@@ -390,6 +390,26 @@ public final class LockStateMachineCore {
         if (lockType == null) {
             return ApplyResult.newBuilder().setStatus(ApplyStatus.INTERNAL_ERROR).build();
         }
+        // v9：await 折叠应用点——仅执行释放半程（登记半程由 Leader 受理预检点
+        // 的本地结构承载，"登记先于释放可见"不变式；本应用面跨副本确定、零本地副作用）。
+        if (req.hasCondition()) {
+            io.github.lamspace.openlatch.core.result.AwaitReleaseResult ar =
+                    engine.awaitFoldRelease(new AcquireCommand(
+                            local, p.getRequestId(), req.getKey(), lockType,
+                            req.getThreadId(), req.getLeaseMs(), false,
+                            RequestDispatcher.normalizedPermits(req.getPermits()),
+                            req.getPermitsTotal(), req.getCondition()));
+            ApplyResult.Builder fb = ApplyResult.newBuilder().setStatus(switch (ar.outcome()) {
+                case GRANTED -> ApplyStatus.OK;
+                case REJECT_SESSION -> ApplyStatus.REJECT_SESSION;
+                default -> ApplyStatus.INVALID_REQUEST;
+            });
+            if (ar.released()) {
+                shadow.releaseFully(p.getSessionId(), req.getThreadId(), req.getKey());
+                fb.setFullyReleased(true).addFreedKeys(req.getKey());
+            }
+            return fb.build();
+        }
         AcquireResult r = engine.acquire(new AcquireCommand(
                 local, p.getRequestId(), req.getKey(), lockType,
                 req.getThreadId(), req.getLeaseMs(), false,

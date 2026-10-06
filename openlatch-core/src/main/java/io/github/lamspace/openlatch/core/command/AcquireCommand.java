@@ -37,6 +37,15 @@ import io.github.lamspace.openlatch.core.LockType;
  *                         （缺失回 {@code REJECT_SEMAPHORE_TOTAL}）；既有条目上
  *                         非零值须与定型值一致、{@code 0} 为不主张（纯加入）；
  *                         锁家族请求 MUST 为 0（server 层合法性预检）
+ * @param condition        v9 条件等待折叠分量：非 {@code null} 即 await 语义——
+ *                         应用点在同一关键区内执行"若 (sessionId, threadId) 恰为
+ *                         写侧持有归属则重入计数一步清零并清租约，否则释放半程
+ *                         零操作（跨换主重挂非持有者属常态，服务端权限降级面）"，
+ *                         随后以 (会话, 请求) 幂等登记入该 key 此条件名名下等待集，
+ *                         返回 {@code QUEUED}；{@code null} 时既有获取语义逐项不变。
+ *                         形状约束（非空串、长度上限、{@code queueIfBusy} 必真、
+ *                         形态限互斥三型）由 server 接入层唯一裁决，core 的折叠
+ *                         分支只消费已裁决的合法形态（防御兜底走类型不匹配拒绝）
  */
 public record AcquireCommand(
         long sessionId,
@@ -47,11 +56,34 @@ public record AcquireCommand(
         long requestedLeaseMs,
         boolean queueIfBusy,
         int permits,
-        int permitsTotal) {
+        int permitsTotal,
+        String condition) {
+
+    /**
+     * v9 前既有九参兼容构造：{@code condition} 取 {@code null}
+     * （普通获取语义，逐项不变）。
+     *
+     * @param sessionId        发起请求的会话
+     * @param requestId        请求 id
+     * @param key              锁键
+     * @param lockType         请求的锁类型
+     * @param threadId         发起请求的客户端线程标识
+     * @param requestedLeaseMs 期望租约时长（毫秒）
+     * @param queueIfBusy      无快路径时是否排队
+     * @param permits          请求许可数
+     * @param permitsTotal     许可总量断言
+     */
+    public AcquireCommand(long sessionId, long requestId, String key, LockType lockType,
+            long threadId, long requestedLeaseMs, boolean queueIfBusy,
+            int permits, int permitsTotal) {
+        this(sessionId, requestId, key, lockType, threadId, requestedLeaseMs,
+                queueIfBusy, permits, permitsTotal, null);
+    }
 
     /**
      * 锁家族便捷构造：许可参数取缺省
-     * （{@code permits = 1}、{@code permitsTotal = 0}），语义与锁请求一致。
+     * （{@code permits = 1}、{@code permitsTotal = 0}）、{@code condition} 取
+     * {@code null}，语义与锁请求一致。
      *
      * @param sessionId        发起请求的会话
      * @param requestId        请求 id

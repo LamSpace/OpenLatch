@@ -42,7 +42,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 控制台端到端冒烟（单机档，五页面只读呈现）：同 JVM 拉起真
  * 服务器（锁端口 0 + 指标端口 0 + admin-token 已配置）与真 Boot 控制台，
  * 以业务 client SDK 预置"重入锁持有+排队、Semaphore 部分许可+大请求排队、
- * Latch 等待者"，对五页面 HTML 逐项断言并覆盖轮询刷新后的曲线区。
+ * Latch 等待者"，并以裸协议 v9 折叠 ACQUIRE 预置条件等待（v9 条件区段与
+ * "持有已随 await 释放"形态的数据源，不依赖并行交付中的 SDK 门面），
+ * 对五页面 HTML 逐项断言并覆盖轮询刷新后的曲线区。
  */
 @SpringBootTest(classes = OpenLatchConsoleApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -67,6 +69,11 @@ class ConsoleStandaloneTest {
     private static OCountDownLatch gate;
     /** v8 订阅句柄（贯穿用例，防提前退订）。 */
     private static io.github.lamspace.openlatch.client.OTopicSubscription topicSub;
+    /**
+     * v9 条件等待预置连接（裸协议 v9 客户端：折叠 await 属协议面而非既有
+     * SDK 门面——条件区段的数据源须独立于并行交付的 OCondition）。
+     */
+    private static ConsoleRawClient condClient;
 
     /** 控制台实际监听端口（随机）。 */
     @Value("${local.server.port}")
@@ -161,11 +168,24 @@ class ConsoleStandaloneTest {
         });
         alerts.publish("console-payload-secret".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         awaitVisible("/keys", "alerts:topic");
+        // v9 条件等待（裸协议折叠 ACQUIRE 预置，独立于并行交付的 SDK OCondition）：
+        // 先持有再折叠 await——持有随 await 释放、条件等待者使条目在管理面持续
+        // 可见（详情页条件区段与"已随 await 释放"形态注记依赖此状态）。
+        condClient = new ConsoleRawClient();
+        condClient.connect("127.0.0.1", SERVER.port(), 9);
+        assertThat(condClient.acquire("cond:job", 7L, 0L, null))
+                .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.OK);
+        assertThat(condClient.acquire("cond:job", 7L, -1L, "gate"))
+                .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.QUEUED);
+        awaitVisible("/keys", "cond:job");
     }
 
     /** 关停服务器与客户端（daemon 阻塞线程随连接关闭自然脱队）。 */
     @AfterAll
     void tearDown() {
+        if (condClient != null) {
+            condClient.close();
+        }
         if (seedClient != null) {
             seedClient.close();
         }
@@ -207,11 +227,13 @@ class ConsoleStandaloneTest {
                 .contains(OpenLatchServer.serverVersion())
                 .doesNotContain("管理认证失败");
         // 持有 lock=1 / semaphore=1 / latch 条目=1 / barrier 条目=1 / queue 条目=1 /
-        // 等待者=5（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一）。
+        // 等待者=6（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一 + v9 条件
+        // 等待者一——v9 口径：等待者数字含条件等待者，表头随行注记）。
         assertThat(body).contains("<td>1</td>");
-        assertThat(body).contains("<td>5</td>");
-        // 会话数：业务客户端 + 控制台自身管理连接。
-        assertThat(body).contains("<td>2</td>");
+        assertThat(body).contains("<td>6</td>");
+        assertThat(body).contains("等待者（含条件）");
+        // 会话数：业务客户端 + 控制台自身管理连接 + v9 条件预置裸协议连接。
+        assertThat(body).contains("<td>3</td>");
         // sparkline 三线已渲染（指标区未降级）。
         assertThat(body).contains("<polyline");
         assertThat(body).doesNotContain("该节点指标不可用");
@@ -222,12 +244,16 @@ class ConsoleStandaloneTest {
         String body = get("/keys");
         assertThat(body).contains("order:1").contains("pool:db").contains("gate:boot")
                 .contains("stage:sync").contains("tasks:queue").contains("alerts:topic")
+                .contains("cond:job")
                 .contains("lock").contains("semaphore").contains("latch").contains("barrier")
                 .contains("queue").contains("topic");
-        // 六行 key（链接计数），总条数读数为 6（pager 的 <span>6</span>）。
+        // 七行 key（链接计数），总条数读数为 7（pager 的 <span>7</span>）——
+        // 含 v9 条件等待键（持有已随 await 释放、条件集使条目持续可见）。
         assertThat(org.springframework.util.StringUtils.countOccurrencesOf(
-                body, "/key?node=")).isEqualTo(6);
-        assertThat(body).contains("<span>6</span>");
+                body, "/key?node=")).isEqualTo(7);
+        assertThat(body).contains("<span>7</span>");
+        // v9 LOCK 行条件等待数随行呈现（Leader/单机来源非零如实）。
+        assertThat(body).contains("1 条件等待");
         // topic 行读数（订阅数；Leader 本地登记注记）。
         assertThat(body).contains("1 订阅（Leader 本地登记）");
         // 屏障行读数（parties · 世代 · 到场）。
@@ -271,6 +297,22 @@ class ConsoleStandaloneTest {
                 .doesNotContain("console-payload-secret");
         assertThat(get("/keys")).doesNotContain("console-payload-secret");
         assertThat(get("/")).doesNotContain("console-payload-secret");
+        // v9 条件等待区段（单机口径）：区段标题、条件名寻址明细、
+        // "持有已随 await 释放"形态注记（不以空壳掩盖）；等待队列区段
+        // 与之并列且搬运项不重复（当前无搬运，队列为"无人等待"）。
+        String cond = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=cond:job");
+        assertThat(cond).contains("<h3>条件等待</h3>").contains("<td>gate</td>")
+                .contains("持有已随 await 释放").doesNotContain("仅 Leader 可见")
+                .doesNotContain("无条件等待者");
+        // 无条件等待的 LOCK 键如实零呈现：区段在、明细空（不藏区段、不造假）。
+        String order = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=order:1");
+        assertThat(order).contains("<h3>条件等待</h3>").contains("无条件等待者");
+        // 非条件 LOCK 键同区段呈现但如实零（order:1 无搬运入集）。
+        assertThat(get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=order:1")).contains("<h3>条件等待</h3>")
+                .contains("无条件等待者");
     }
 
     @Test

@@ -7,7 +7,7 @@
 | `QUEUED` | 服务端 | 已入队，等通知重发 | 正常排队，无需动作 |
 | `LOCK_HELD` | 服务端 | 立即式获取时锁在他人手 | 按业务重试或走 `lock()` |
 | `NOT_LEADER` | 服务端（转发/角色道） | 本节点非 Leader，**可重试**，随附提示 | 交给客户端自动改道；持续出现看第 3 节 |
-| `NOT_HELD` | 服务端（权威裁决） | 该会话确未持有此锁（多数派提交后判定） | 视为失锁：中止提交、重新竞争 |
+| `NOT_HELD` | 服务端（权威裁决） | 该会话确未持有此锁（多数派提交后判定）；v9 起**双义**——释放/归还路径=失锁，`CONDITION_OP`（signal 家族）路径=signal 权限被拒，以**请求类型**判别 | 按请求类型分流：锁操作视为失锁（中止提交、重新竞争）；signal 映射为 `IllegalMonitorStateException`（修调用点） |
 | `INVALID_TOKEN` | 服务端（权威裁决） | 释放/续租凭据与当前归属不符（常见：failover 回滚/租约已过期） | 同上，走失锁处理 |
 | `SESSION_EXPIRED` | 服务端 | 会话已关闭 | 重连后重新竞争（客户端自动，业务收失锁回调） |
 | `BARRIER_BROKEN` | 服务端（在带裁决） | 等待项所属循环屏障世代已破障（他方离场/死亡/超时/`breakBarrier()`） | 视为会合失败：本方中止本轮协作，可择机重入新世代 |
@@ -17,7 +17,7 @@
 | `LockAcquisitionTimeoutException` | 客户端 | 等待预算（默认 30s）耗尽 | 视业务：加大预算/拆临界区/降级 |
 | `OpenLatchTimeoutException` | 客户端 | 单请求 5s 无应答（连接活着） | 检查节点负载/时钟；瞬时一次可容忍 |
 | `ServerUnavailableException` | 客户端 | 连接不可用（含切换窗口快速失败） | 重试；检查种子配置 |
-| `IllegalMonitorStateException` | 客户端 | 未持有而解锁/归还 | 修代码路径（生命周期管理） |
+| `IllegalMonitorStateException` | 客户端 | 未持有而解锁/归还/条件 signal（v9 起 signal 双源同型：本地先行，或服务端 `NOT_HELD` 映射） | 修代码路径（生命周期管理） |
 | `LockLostException`（回调） | 客户端 | 锁被剥夺 | 中止临界区提交——这是设计必答题 |
 
 ## 2. 故障转移行为基线（实测数据）
@@ -121,6 +121,37 @@ mvn -pl openlatch-server verify -Pdrill        # 停摆采样（仪器类）
 - **topic 在 Follower 上的管理读数**：订阅登记为 Leader 本地态——Follower 的
   SUMMARY `topic_entries` 恒 0、LIST_KEYS 无 topic 行、KEY_DETAIL 明确未命中，
   属如实呈现而非数据缺失。
+
+## 条件（v9）排查速查
+
+- **"await 不醒"的判别三分法**：① **signal 权限被拒**——查
+  `openlatch_server_condition_total{status="NOT_HELD"}` 线：signal 调用者当时
+  并非持有者（未持有时本地即抛、不产生请求；请求到了线路说明持有已丢的窗口，
+  如失锁后仍在 signal），修权限路径；② **换主窗 signal 丢失**——比对 await
+  重挂日志与换主时点：等待是承诺、signal 是事件，窗内 signal 不重放不补偿，
+  等待者重挂后等下一次 signal 或超时——吻合即属契约面而非故障，应用侧以
+  `await(timeout, unit)` 自救并按 WATCHLIST W13 观察丢失率与水位；③ **缺
+  guard loop**——虚假唤醒本就允许（队首超时清扫促醒、LEAVE/SIGNAL 竞态收敛），
+  裸 await 把唤醒误当谓词成立，外观像"丢了唤醒"：先审查调用方 `while (!谓词)`
+  守卫；
+- **`NOT_HELD` 的双义判别**：同码两性质——释放/归还路径上是**失锁**（中止提交、
+  重新竞争）；`CONDITION_OP` 路径上是 **signal 权限被拒**（映射
+  `IllegalMonitorStateException`，修调用点）。唯一判别面是请求类型，对照
+  `acquire.total` 与 `condition.total` 两条分线计数即可定位；
+- **await 抛 `OVERLOADED`**：条件等待者 + 等待队列合计达 `max-queue-depth-per-key`
+  （零新增配置、共用护栏）——与队列"等待满"同口径：减挂起量或上调限额；
+  注意该异常收束时调用线程**不持有**锁；
+- **持有者进程死亡、等待者仍在睡**：契约即如此——租约到期/死亡 sweep 只唤醒
+  等待队列入队者，**不代为 signal 条件等待者**；生产代码用 timed await
+  （见 [03 条件变量](03-client-sdk.md)）；
+- **`INVALID_REQUEST` / `UnsupportedOperationException` 的条件含义**：条件名空串或
+  超 `max-key-length`、读/写形态获取携带 `condition` 字段、非 LOCK 家族 key 上发
+  `CONDITION_OP`、形状矩阵违例（`thread_id`/`await_request_id` 与 op 不匹配）、
+  低版本会话（v≤8 发条件消息）——异常消息携带状态码名对照；读写锁句柄调
+  `newCondition` 为**本地** `UnsupportedOperationException`（零请求）；
+- **条件读数在 Follower 上为零**：等待集为 Leader 本地态——Follower 的
+  KEY_DETAIL 条件区段如实为零（与等待队列 Leader-only 口径同源），属如实呈现
+  而非数据缺失。
 
 ## 7. FAQ
 

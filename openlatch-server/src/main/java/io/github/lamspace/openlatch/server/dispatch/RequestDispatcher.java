@@ -265,6 +265,9 @@ public final class RequestDispatcher {
             case TOPIC_OP -> msg.hasTopicOpRequest()
                     ? dispatchTopicOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case CONDITION_OP -> msg.hasConditionOpRequest()
+                    ? dispatchConditionOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
@@ -1006,6 +1009,22 @@ public final class RequestDispatcher {
         if (session.protocolVersion() < 3 && isV3OnlyLockType(req.getLockType())) {
             return errorResponse(msg, StatusCode.INVALID_REQUEST);
         }
+        // v9 门控：ACQUIRE 携带 condition 字段仅对 v9 会话开放（v≤8 消息级拒绝、
+        // 不断连，判例 v3-v8 门；唤醒后的重发信封按协议纪律清除该字段，走普通获取）。
+        if (req.hasCondition() && session.protocolVersion() < 9) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        // v9 折叠形状唯一裁决（判定在接入层，判例 validateAcquirePermits）：
+        // 立即式携带 condition 违例；lock_type 限互斥三型；condition 名须非空
+        // 且 UTF-8 字节数 ≤ maxKeyLength（空串/超长同型拒绝、零扰动——与集群
+        // ClusterRequestHandler.handleAcquireFold 的接入层裁决逐字对称，core
+        // 折叠路径对条件名不做二次裁决）。
+        if (req.hasCondition() && (!acquireFoldShapeValid(req)
+                || req.getCondition().isEmpty()
+                || req.getCondition().getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                        .length > maxKeyLength)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
         StatusCode permitBad = validateAcquirePermits(req);
         if (permitBad != null) {
             return errorResponse(msg, permitBad);
@@ -1023,9 +1042,122 @@ public final class RequestDispatcher {
                 req.getLeaseMs(),
                 req.getWaitMs() != 0,   // wait_ms == 0 立即式；-1 与 >0 均可排队
                 normalizedPermits(req.getPermits()),
-                req.getPermitsTotal());
+                req.getPermitsTotal(),
+                req.hasCondition() ? req.getCondition() : null);   // v9 折叠形态
         AcquireResult result = core.acquire(cmd);
         return toAcquireResponse(msg, result, System.currentTimeMillis());
+    }
+
+    /**
+     * v9 await 折叠形状合法性（判定唯一在接入层，判例 {@link #validateAcquirePermits}）：
+     * {@code wait_ms == 0}（立即式）携带 condition 违例——await 恒为挂起形态，
+     * {@code >0} 的本地计时窗与 {@code -1} 对服务端同判；{@code lock_type} 限
+     * REENTRANT/SIMPLE/FAIR 三互斥形态（v1 支持面，读写形态与其余家族携带属违例）。
+     * 条件名非空与长度上限（UTF-8 字节数 ≤ {@code maxKeyLength}）由本类
+     * {@code dispatchAcquire} 门与集群 {@code ClusterRequestHandler.handleAcquireFold}
+     * 同点裁决（空串/超长同型 {@code INVALID_REQUEST}、零扰动；core 折叠路径
+     * 对条件名不再二次裁决——判定唯一在接入层）。
+     *
+     * @param req 获取请求（已确认 {@code hasCondition()}）
+     * @return 形状合法返回 true
+     */
+    public static boolean acquireFoldShapeValid(AcquireRequest req) {
+        if (req.getWaitMs() == 0) {
+            return false;
+        }
+        return switch (req.getLockType()) {
+            case LOCK_TYPE_REENTRANT, LOCK_TYPE_SIMPLE, LOCK_TYPE_FAIR -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * 分发条件 signal 家族操作（v9，单机形态=常驻权威）：门控与 op×字段携带矩阵
+     * 唯一裁决在接入层（违例同型 {@code INVALID_REQUEST}、等待集零扰动）；裁决后
+     * 交 core 门面即时回执（AWAIT 不经本通道——它是 ACQUIRE 携带 condition 的
+     * 折叠形态）。唤醒通知经既有队首监听器出口推送。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封（已确认携带 {@code ConditionOpRequest}）
+     * @return 协议响应信封（status + op 回显）
+     */
+    private Envelope dispatchConditionOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 9) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        var req = msg.getConditionOpRequest();
+        if (conditionOpShapeInvalid(req)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.core.result.ConditionOpResult result =
+                core.conditionOp(new io.github.lamspace.openlatch.core.command.ConditionOpCommand(
+                        session.sessionId(), req.getThreadId(), req.getKey(),
+                        req.getCondition(), toCoreConditionOp(req.getOp()),
+                        req.getAwaitRequestId()));
+        StatusCode status = toConditionStatus(result.status());
+        if (metrics != null) {
+            metrics.recordCondition(req.getOp(), status);
+        }
+        return envelope(msg, MessageType.CONDITION_OP, b -> b.setConditionOpResponse(
+                io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp())));
+    }
+
+    /**
+     * v9 signal 家族 op×字段携带矩阵违例判定（接入层唯一裁决，判例 topic 形状矩阵）：
+     * SIGNAL/SIGNAL_ALL 携非零 {@code await_request_id} 违例；LEAVE 必携非零
+     * {@code await_request_id} 且 {@code thread_id} 为 0、条件名非空；
+     * 矩阵外组合一律违例。
+     *
+     * @param req 条件操作请求
+     * @return 违例返回 true
+     */
+    public static boolean conditionOpShapeInvalid(
+            io.github.lamspace.openlatch.protocol.ConditionOpRequest req) {
+        return switch (req.getOp()) {
+            case CONDITION_OP_SIGNAL, CONDITION_OP_SIGNAL_ALL -> req.getAwaitRequestId() != 0;
+            case CONDITION_OP_LEAVE -> req.getAwaitRequestId() == 0 || req.getThreadId() != 0
+                    || req.getCondition().isEmpty();
+            default -> true;
+        };
+    }
+
+    /**
+     * 协议条件操作词 → core 词表。
+     *
+     * @param op 协议操作词
+     * @return core 操作词
+     */
+    static io.github.lamspace.openlatch.core.command.ConditionOp toCoreConditionOp(
+            io.github.lamspace.openlatch.protocol.ConditionOp op) {
+        return switch (op) {
+            case CONDITION_OP_SIGNAL -> io.github.lamspace.openlatch.core.command.ConditionOp.SIGNAL;
+            case CONDITION_OP_SIGNAL_ALL ->
+                    io.github.lamspace.openlatch.core.command.ConditionOp.SIGNAL_ALL;
+            case CONDITION_OP_LEAVE -> io.github.lamspace.openlatch.core.command.ConditionOp.LEAVE;
+            default -> throw new IllegalArgumentException("unknown condition op: " + op);
+        };
+    }
+
+    /**
+     * core 条件裁决状态 → 协议状态码（既有词表承载、零新增，判例
+     * {@code toLatchStatus} 的映射纪律）：key/条件名/家族违例统一
+     * {@code INVALID_REQUEST}，会话失效 {@code SESSION_EXPIRED}，
+     * signal 权限 {@code NOT_HELD} 原词送达。
+     *
+     * @param status core 裁决状态
+     * @return 协议状态码
+     */
+    static StatusCode toConditionStatus(
+            io.github.lamspace.openlatch.core.result.ConditionOpResult.Status status) {
+        return switch (status) {
+            case OK -> StatusCode.OK;
+            case NOT_HELD -> StatusCode.NOT_HELD;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG, REJECT_TYPE_MISMATCH ->
+                    StatusCode.INVALID_REQUEST;
+        };
     }
 
     /**
@@ -1286,6 +1418,12 @@ public final class RequestDispatcher {
             case TOPIC_OP -> b.setTopicOpResponse(TopicOpResponse.newBuilder()
                     .setStatus(status)
                     .setOp(request.getTopicOpRequest().getOp()));
+            // v9：CONDITION_OP 同规则——门控/形状/权限拒绝的状态码在线路可见且
+            // op 回显（判例 TOPIC_OP/QUEUE_OP；默认实例形态的 OK 伪成功违例）。
+            case CONDITION_OP -> b.setConditionOpResponse(
+                    io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
+                            .setStatus(status)
+                            .setOp(request.getConditionOpRequest().getOp()));
             default -> {
             }
         }

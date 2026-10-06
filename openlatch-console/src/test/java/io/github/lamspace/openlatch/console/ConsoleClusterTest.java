@@ -47,9 +47,11 @@ import static org.springframework.util.StringUtils.countOccurrencesOf;
  * 控制台端到端冒烟（集群三节点档，集群视角口径的页面投影）：
  * 同 JVM 拉起 3 台集群服务器（admin-token 已配置）与控制台，
  * 断言概览角色分布（恰一 LEADER、二 FOLLOWER）、锁详情等待队列的
- * "仅 Leader 可见"标注（Leader 有位次 / Follower 空区+标注）、节点视图
- * 成员表 Leader 标识。指标端口指向无监听口（单机全局指标口在集群多节点
- * 场景不可区分，此处专测其降级路径）。
+ * "仅 Leader 可见"标注（Leader 有位次 / Follower 空区+标注）、v9 条件
+ * 等待区段双视角（Leader 如实明细 / Follower 如实零读同口径标注）、
+ * 节点视图成员表 Leader 标识。指标端口指向无监听口（单机全局指标口在
+ * 集群多节点场景不可区分，此处专测其降级路径）。条件预置走裸协议折叠
+ * ACQUIRE（{@link ConsoleRawClient}），不依赖并行交付中的 SDK 条件门面。
  */
 @SpringBootTest(classes = OpenLatchConsoleApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -71,6 +73,10 @@ class ConsoleClusterTest {
     private static OLock holder;
     /** 排队者任务（诊断其异常去向）。 */
     private static java.util.concurrent.Future<?> waiterFuture;
+    /** v9 条件预置：持有者（裸协议、长租约——无看门狗，防断言窗口内到期清扫）。 */
+    private static ConsoleRawClient condHolder;
+    /** v9 条件预置：折叠 await 登记方（裸协议，条件集数据源）。 */
+    private static ConsoleRawClient condAwaiter;
 
     /** 控制台实际监听端口。 */
     @Value("${local.server.port}")
@@ -194,6 +200,17 @@ class ConsoleClusterTest {
                     9_001L, 0, 30_000));
             // 等待 Leader 侧队列登记（复制授予应用 + 本地入队完成）。
             awaitWaiterRegistered();
+            // v9 条件等待预置（裸协议折叠 ACQUIRE，独立于并行交付的 SDK 门面）：
+            // 持有者长租约持有 cs:cond（复制态行持续可见），第二会话折叠登记
+            // （换主重挂同形的非持有 ghost 登记——AWAIT 权限服务端降级面）。
+            condHolder = new ConsoleRawClient();
+            condHolder.connect("127.0.0.1", SERVERS[leaderIdx].port(), 9);
+            assertThat(condHolder.acquire("cs:cond", 5L, 1_800_000L, 0L, null))
+                    .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.OK);
+            condAwaiter = new ConsoleRawClient();
+            condAwaiter.connect("127.0.0.1", SERVERS[leaderIdx].port(), 9);
+            assertThat(condAwaiter.acquire("cs:cond", 6L, -1L, "ready"))
+                    .isEqualTo(io.github.lamspace.openlatch.protocol.StatusCode.QUEUED);
         } catch (Exception e) {
             throw new AssertionError("预置集群负载失败", e);
         }
@@ -256,6 +273,12 @@ class ConsoleClusterTest {
     /** 停全部服务器与客户端。 */
     @AfterAll
     static void shutdown() {
+        if (condAwaiter != null) {
+            condAwaiter.close();
+        }
+        if (condHolder != null) {
+            condHolder.close();
+        }
         if (seedClient != null) {
             seedClient.close();
         }
@@ -351,6 +374,34 @@ class ConsoleClusterTest {
         // 镜像收敛后 Follower 也有持有者明细（逻辑会话口径）。
         assertThat(get("/key?node=" + follower + "&key=cs:order"))
                 .contains("writer").contains("仅 Leader 可见");
+    }
+
+    /**
+     * v9 条件区段集群双视角：Leader 来源 LOCK 行条件等待数随行、详情五字段
+     * 明细如实呈现；Follower 来源如实零读并随"仅 Leader 可见"同口径标注
+     * （等待集不入复制态——不呈现伪明细，也不以缺区段掩盖）。
+     */
+    @Test
+    void conditionSectionLeaderPresentsDetailFollowerMarksLeaderOnly() {
+        String leader = DISPLAYS[leaderIndex()];
+        awaitVisible("/key?node=" + leader + "&key=cs:cond", "<h3>条件等待</h3>");
+        String leaderPage = get("/key?node=" + leader + "&key=cs:cond");
+        assertThat(leaderPage).contains("<td>ready</td>")
+                .doesNotContain("无条件等待者").doesNotContain("仅 Leader 可见");
+        // 列表页：Leader 来源块 LOCK 行条件等待数随行（Follower 来源块无该读数）。
+        assertThat(get("/keys")).contains("1 条件等待");
+
+        String follower = null;
+        for (int i = 0; i < NODES; i++) {
+            if (i != leaderIndex()) {
+                follower = DISPLAYS[i];
+                break;
+            }
+        }
+        awaitVisible("/key?node=" + follower + "&key=cs:cond", "仅 Leader 可见");
+        String followerPage = get("/key?node=" + follower + "&key=cs:cond");
+        assertThat(followerPage).contains("条件等待明细同等待队列")
+                .doesNotContain("<td>ready</td>");
     }
 
     @Test

@@ -58,7 +58,10 @@ import java.util.concurrent.TimeUnit;
  * 锁语义裁决（是否授予、是否可重入）全部由服务端完成，客户端仅做本地簿记。
  * v8 起承载广播订阅路由表（{@link OTopic}：(会话, subscription_id) →
  * 订阅句柄）与重挂保活周期——推送交付在网络线程按表分发、经订阅句柄自有
- * dispatcher 线程串行回调，不占用 EventLoop。
+ * dispatcher 线程串行回调，不占用 EventLoop。v9 起承载条件变量
+ * （{@link OLock#newCondition(String)}/{@link OCondition}）：await 折叠于
+ * 获取车道的 ACQUIRE（既有等待闭环复用），signal 家族经直发请求-应答
+ * 车道（判例 topic/queue 直发）。
  *
  * <p><b>连接车道</b>：稳态单连接（home 即 Leader，或单机
  * 服务）。集群形态下 home 握手提示或 {@code NOT_LEADER} 重定向驱动改道：
@@ -821,13 +824,66 @@ public final class OpenLatchClient implements AutoCloseable {
      * 看门狗机制提供。返回的 future 在网络/定时器线程上完成，
      * 链接其上的回调不得阻塞。
      *
+     * <p>{@code spec.condition()} 非 {@code null} 时本获取为折叠 await
+     * 形态（v9，{@link OCondition}）：信封携带 {@code condition} 字段入
+     * 既有等待闭环，唤醒通知到达时由跟踪器换形为无条件信封重发。
+     *
      * @param spec 获取参数
      * @return 授予结果 future
      */
     public CompletableFuture<LockGrant> acquireAsync(AcquireSpec spec) {
+        return submitAcquire(spec).future();
+    }
+
+    /**
+     * 获取提交结果：本次提交占用的请求 id 与授予 future。折叠 await 的
+     * {@code LEAVE} 以 {@code awaitRequestId} 关联原提交（v9）。
+     *
+     * @param awaitRequestId 获取请求 id（快速失败路径为 {@code -1}，
+     *                       表示未建立任何服务端登记、LEAVE 应跳过）
+     * @param future         授予结果 future
+     */
+    record AcquireSubmission(long awaitRequestId, CompletableFuture<LockGrant> future) {
+    }
+
+    /**
+     * {@link #acquireAsync(AcquireSpec)} 的实现体（等待总超时按
+     * {@link AcquireSpec#waitMs()} 推导形态）。
+     *
+     * @param spec 获取参数
+     * @return 提交结果（请求 id + 授予 future）
+     */
+    AcquireSubmission submitAcquire(AcquireSpec spec) {
+        java.util.Objects.requireNonNull(spec, "spec must not be null");
+        long totalTimeoutMs;
+        if (spec.waitMs() == 0) {
+            totalTimeoutMs = 0;
+        } else if (spec.waitMs() > 0) {
+            totalTimeoutMs = spec.waitMs();
+        } else {
+            totalTimeoutMs = config.defaultWaitTimeout().toMillis();
+        }
+        return submitAcquire(spec, totalTimeoutMs);
+    }
+
+    /**
+     * 获取提交的实现体：车道选择、信封装配（含折叠形态
+     * {@code condition} 字段）与跟踪器登记的公共收口。
+     *
+     * <p>等待总超时由调用点显式给定——折叠 await 的不限时形态
+     * （{@link OCondition#await()}）以 {@code -1} 请求真无限预算
+     * （JDK 保真：无 signal 则永睡，异常收束面见接口契约），其余
+     * 形态与 {@link #submitAcquire(AcquireSpec)} 推导一致。
+     *
+     * @param spec           获取参数
+     * @param totalTimeoutMs 等待总超时（毫秒）；非正表示不限时
+     * @return 提交结果（请求 id + 授予 future）
+     */
+    AcquireSubmission submitAcquire(AcquireSpec spec, long totalTimeoutMs) {
         java.util.Objects.requireNonNull(spec, "spec must not be null");
         if (closed) {
-            return failedFuture(new IllegalStateException("client is shut down"));
+            return new AcquireSubmission(-1L,
+                    failedFuture(new IllegalStateException("client is shut down")));
         }
         // 获取车道优先：存在指向 Leader 的车道时新获取以其会话
         // 发出；车道暂不可用（重连窗口）回落 home——home 若非 Leader 会以
@@ -840,35 +896,34 @@ public final class OpenLatchClient implements AutoCloseable {
             session = lane.cm.session();
         }
         if (session == null) {
-            return failedFuture(new ServerUnavailableException("connection is not active"));
+            return new AcquireSubmission(-1L,
+                    failedFuture(new ServerUnavailableException("connection is not active")));
         }
         long requestId = session.nextRequestId();
+        AcquireRequest.Builder acquireBody = AcquireRequest.newBuilder()
+                .setKey(spec.key())
+                .setLockType(spec.lockType().wireType())
+                .setThreadId(spec.threadId())
+                .setLeaseMs(spec.leaseMs())
+                .setWaitMs(spec.waitMs() == 0 ? 0 : -1)
+                // 许可参数：锁家族恒 permits=1 / total=0，
+                // 与服务端缺省归一一致（线路零扰动）。
+                .setPermits(spec.permits())
+                .setPermitsTotal(spec.permitsTotal());
+        if (spec.condition() != null) {
+            // 折叠 await 形态：presence 即 await 语义（受理=一步清零重入
+            // + 清租约 + 入等待集原子完成），等待恒为挂起形态（wait_ms=-1）。
+            acquireBody.setCondition(spec.condition());
+        }
         Envelope envelope = Envelope.newBuilder()
                 .setProtocolVersion(3)
                 .setType(MessageType.LOCK_ACQUIRE)
                 .setRequestId(requestId)
-                .setAcquireRequest(AcquireRequest.newBuilder()
-                        .setKey(spec.key())
-                        .setLockType(spec.lockType().wireType())
-                        .setThreadId(spec.threadId())
-                        .setLeaseMs(spec.leaseMs())
-                        .setWaitMs(spec.waitMs() == 0 ? 0 : -1)
-                        // 许可参数：锁家族恒 permits=1 / total=0，
-                        // 与服务端缺省归一一致（线路零扰动）。
-                        .setPermits(spec.permits())
-                        .setPermitsTotal(spec.permitsTotal()))
+                .setAcquireRequest(acquireBody)
                 .build();
-        long totalTimeoutMs;
-        if (spec.waitMs() == 0) {
-            totalTimeoutMs = 0;
-        } else if (spec.waitMs() > 0) {
-            totalTimeoutMs = spec.waitMs();
-        } else {
-            totalTimeoutMs = config.defaultWaitTimeout().toMillis();
-        }
         CompletableFuture<LockGrant> future = new CompletableFuture<>();
         tracker.startAcquire(requestId, envelope, spec, future, totalTimeoutMs);
-        return future;
+        return new AcquireSubmission(requestId, future);
     }
 
     /**
@@ -1821,6 +1876,34 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setRequestId(requestId)
                 .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
                         .setKey(key).setGeneration(generation))
+                .build();
+    }
+
+    /**
+     * 构造 CONDITION_OP 信封（v9，signal 家族直发车道与 LEAVE 尽力而为
+     * 共用；判例 topic/queue 直发——不设信封协议版本，会话门由握手
+     * 协商承载）。形状互斥矩阵由装配点保证：SIGNAL/SIGNAL_ALL 携
+     * 非零 {@code threadId} 且 {@code awaitRequestId = 0}；LEAVE 携非零
+     * {@code awaitRequestId} 且 {@code threadId = 0}。
+     *
+     * @param requestId      请求 id（直发车道每次新分配）
+     * @param op             条件操作
+     * @param key            锁键
+     * @param condition      条件名（恒必携非空）
+     * @param threadId       归属线程标识（仅 signal 家族）
+     * @param awaitRequestId 被摘除折叠 ACQUIRE 的请求 id（仅 LEAVE）
+     * @return 信封
+     */
+    static Envelope conditionEnvelope(long requestId,
+            io.github.lamspace.openlatch.protocol.ConditionOp op, String key, String condition,
+            long threadId, long awaitRequestId) {
+        return Envelope.newBuilder()
+                .setType(MessageType.CONDITION_OP)
+                .setRequestId(requestId)
+                .setConditionOpRequest(io.github.lamspace.openlatch.protocol
+                        .ConditionOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setCondition(condition)
+                        .setThreadId(threadId).setAwaitRequestId(awaitRequestId))
                 .build();
     }
 

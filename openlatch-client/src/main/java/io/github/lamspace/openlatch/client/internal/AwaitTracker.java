@@ -56,6 +56,15 @@ import java.util.function.BiConsumer;
  *   └─ 用户总超时 → future 失败（LockAcquisitionTimeoutException），等待结束
  * </pre>
  *
+ * <p><b>折叠 await 信封换形（v9）</b>：携带 {@code condition} 字段的折叠
+ * 形态获取（{@link io.github.lamspace.openlatch.client.OCondition} 的
+ * await 提交）同样参与上述闭环，仅重发信封形状随通知换形——收到唤醒
+ * 通知时条目就地清除 {@code condition} 字段并保持 {@code requestId}
+ * 不变（唤醒即终结 await 阶段、转入普通排队获取语义）；未获通知的自愈
+ * 重发（NOT_LEADER 接管原地重发、跨车道迁移）保持原折叠信封幂等重登记。
+ * 换形后的信封为后续通知与迁移所复用，普通形态（无 {@code condition}）
+ * 的条目全程逐字节原样重发，行为与本变更引入前一致。
+ *
  * <p><b>补偿归还</b>：等待以任何方式结束后，其 {@code requestId}
  * 在保留窗口内维持 {@code requestId → (key, threadId)} 映射；无挂起项匹配的
  * 授予响应（孤儿 OK）到达时发送补偿 {@code RELEASE} 归还，防止锁泄漏。
@@ -141,8 +150,13 @@ public final class AwaitTracker {
     private static final class WaitEntry {
         /** 请求 id，重发复用。 */
         private final long requestId;
-        /** 获取请求信封，重发原样复用（幂等前提：同 requestId）。 */
-        private final Envelope envelope;
+        /**
+         * 获取请求信封，重发原样复用（幂等前提：同 requestId）。
+         * 折叠形态条目在唤醒通知到达处被换为清除 {@code condition}
+         * 字段的形态（volatile 写于条目内置锁内，读于各重发/迁移点）；
+         * 普通形态条目恒不变。
+         */
+        private volatile Envelope envelope;
         /** 获取参数，补偿释放与授予回调使用。 */
         private final AcquireSpec spec;
         /** 用户 future，恰有一次终态。 */
@@ -222,7 +236,10 @@ public final class AwaitTracker {
 
     /**
      * 处理服务端队首通知：命中挂起项则以同一 {@code requestId} 重发；
-     * 未命中（等待已超时/失败/完成）则忽略。
+     * 未命中（等待已超时/失败/完成）则忽略。折叠形态条目（信封携带
+     * {@code condition}）在重发前就地换形为清除 {@code condition} 字段
+     * 的信封（唤醒终结 await 阶段、转入普通排队获取语义；同 id 纪律
+     * 不变），后续通知与迁移复用换形后的信封。
      *
      * @param notify 通知消息
      */
@@ -236,6 +253,13 @@ public final class AwaitTracker {
                 return;
             }
             entry.everQueued = true;
+            if (entry.envelope.hasAcquireRequest()
+                    && entry.envelope.getAcquireRequest().hasCondition()) {
+                entry.envelope = entry.envelope.toBuilder()
+                        .setAcquireRequest(entry.envelope.getAcquireRequest().toBuilder()
+                                .clearCondition())
+                        .build();
+            }
         }
         sendOrResend(entry);
     }

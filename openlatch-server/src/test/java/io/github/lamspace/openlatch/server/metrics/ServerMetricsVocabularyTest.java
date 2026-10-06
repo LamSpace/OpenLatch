@@ -89,6 +89,23 @@ class ServerMetricsVocabularyTest {
                 StatusCode.NOT_LEADER);
         // 丢弃计数经登记表监听器回发（drop-newest 不入拒绝面）。
         metrics.recordTopicDropped(1);
+        // v9：signal 家族计数线（op 词表三值 + NOT_HELD 权限线/NOT_LEADER/
+        // INVALID_REQUEST/SESSION_EXPIRED 在带可达码形）。await 折叠不记本线——
+        // 其计数落 acquire 既有线（折叠口径钉死，运行时归数由 gating 系用例以
+        // 真流量断言，本词表不重复记 acquire 臂以免扰动计时器样本基数）。
+        io.github.lamspace.openlatch.protocol.ConditionOp sig =
+                io.github.lamspace.openlatch.protocol.ConditionOp.CONDITION_OP_SIGNAL;
+        io.github.lamspace.openlatch.protocol.ConditionOp sigAll =
+                io.github.lamspace.openlatch.protocol.ConditionOp.CONDITION_OP_SIGNAL_ALL;
+        io.github.lamspace.openlatch.protocol.ConditionOp leave =
+                io.github.lamspace.openlatch.protocol.ConditionOp.CONDITION_OP_LEAVE;
+        metrics.recordCondition(sig, StatusCode.OK);
+        metrics.recordCondition(sig, StatusCode.NOT_HELD);
+        metrics.recordCondition(sigAll, StatusCode.OK);
+        metrics.recordCondition(leave, StatusCode.OK);
+        metrics.recordCondition(sig, StatusCode.NOT_LEADER);
+        metrics.recordCondition(sig, StatusCode.INVALID_REQUEST);
+        metrics.recordCondition(leave, StatusCode.SESSION_EXPIRED);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -146,6 +163,46 @@ class ServerMetricsVocabularyTest {
         // waiters 口径不含订阅者（三口径分离的负向守门）。
         assertThat(scrape).doesNotContain("topic_total_total");
         assertThat(scrape).doesNotContain("topic.dropped");
+    }
+
+    /**
+     * v9：condition 两命名点线路名——{@code condition.total{op,status}} 计数线
+     * 按三操作词表与在带可达码形归数（{@code NOT_HELD} 权限线单列）；
+     * {@code condition.waiters.max} gauge 为抓取时刻单键条件等待峰值（不含
+     * 搬运入队项）。恒不可达面负向守门：{@code QUEUED}/{@code DENIED}/
+     * {@code OVERLOADED} 对 condition 无线（等待满拒绝产生于 await 折叠侧，
+     * 计数落 {@code acquire_total{status="OVERLOADED"}} 既有线——折叠口径的
+     * 线路证据）。四口径（等待队深/元素/订阅/条件等待）命名互引防混读。
+     */
+    @Test
+    void conditionLineNames() {
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"signal\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"signal\",status=\"NOT_HELD\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"signal_all\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"leave\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"signal\",status=\"NOT_LEADER\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"signal\",status=\"INVALID_REQUEST\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_condition_total{op=\"leave\",status=\"SESSION_EXPIRED\"} 1");
+        assertThat(scrape).contains("openlatch_server_condition_waiters_max 0");
+        // await 折叠归线证据（负向面）：condition 线上永无等待满/挂起码形——
+        // 超限臂计数落 acquire 既有线（运行时归数由 gating 系用例真流量断言）。
+        assertThat(scrape)
+                .doesNotContain("openlatch_server_condition_total{op=\"signal\",status=\"QUEUED\"");
+        assertThat(scrape)
+                .doesNotContain("openlatch_server_condition_total{op=\"signal\",status=\"OVERLOADED\"");
+        assertThat(scrape)
+                .doesNotContain("openlatch_server_condition_total{op=\"signal\",status=\"DENIED\"");
+        assertThat(scrape).doesNotContain("condition_total_total");
+        // await op 值在 condition 线上不存在（折叠边界的计数面证据，防"条件自成
+        // 一线"口径漂移；barrier 线的 op="await" 为既有词表，不属本负向面）。
+        assertThat(scrape).doesNotContain("condition_total{op=\"await\"");
     }
 
     @Test

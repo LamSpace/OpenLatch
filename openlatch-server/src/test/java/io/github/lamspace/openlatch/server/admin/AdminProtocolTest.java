@@ -263,6 +263,77 @@ class AdminProtocolTest {
         assertThat(s.getVersion()).isEqualTo(OpenLatchServer.serverVersion());
     }
 
+    /**
+     * v9 条件等待单机管理维：LIST_KEYS LOCK 行 {@code condition_waiters}、
+     * KEY_DETAIL 五字段明细与等待队列区段互斥计数（搬运不入 waiters 时两区
+     * 各表其主）、"持有已随 await 释放"形态（持有读数如实零、行仍可见——
+     * 条件集使条目存活）、SUMMARY 等待者合计含条件、非 LOCK 键条件字段恒
+     * 零值/空列表、反复观察零扰动。
+     */
+    @Test
+    void conditionWaitersVisibleInSummaryListAndDetail() {
+        long other = core.sessionOpened();
+        // 持有者折叠 await：重入一步清零（无持有者形态），登记入条件集 "gate"。
+        core.acquire(new AcquireCommand(sessionId, 300, "job:q",
+                LockType.REENTRANT, 11, 30_000, false, 1, 0));
+        var fold = core.acquire(new AcquireCommand(sessionId, 301, "job:q",
+                LockType.REENTRANT, 11, 30_000, true, 1, 0, "gate"));
+        assertThat(fold.outcome()).isEqualTo(io.github.lamspace.openlatch.core.result.Outcome.QUEUED);
+        assertThat(core.conditionWaiterCount("job:q")).isEqualTo(1);
+        // 非持有者 ghost 登记（重挂形态同径，权限降级面）：第二条件集 "ready"。
+        core.acquire(new AcquireCommand(other, 302, "job:q",
+                LockType.REENTRANT, 12, 30_000, true, 1, 0, "ready"));
+        // Semaphore 对照键：非 LOCK 家族条件字段恒零。
+        core.acquire(new AcquireCommand(other, 303, "sem", LockType.SEMAPHORE,
+                12, 30_000, true, 1, 2));
+
+        AdminSummaryResponse s = admin(adminSummary(8, 3, TOKEN)).getAdminSummaryResponse();
+        assertThat(s.getTotalWaiters()).as("等待者合计含条件等待者").isEqualTo(2);
+
+        AdminKeyInfo row = admin(adminListKeys(9, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("job:q")).findFirst().orElseThrow();
+        assertThat(row.getFamily()).isEqualTo("lock");
+        assertThat(row.getHolders()).as("持有已随 await 释放").isZero();
+        assertThat(row.getRemainingLeaseMs()).isZero();
+        assertThat(row.getWaiterCount()).as("无搬运项，等待队列口径为 0").isZero();
+        assertThat(row.getConditionWaiters()).isEqualTo(2);
+        AdminKeyInfo semRow = admin(adminListKeys(10, TOKEN, 0, 10, ""))
+                .getAdminListKeysResponse().getItemsList().stream()
+                .filter(i -> i.getKey().equals("sem")).findFirst().orElseThrow();
+        assertThat(semRow.getFamily()).isEqualTo("semaphore");
+        assertThat(semRow.getConditionWaiters()).as("非 LOCK 键恒零").isZero();
+
+        AdminKeyDetailResponse d = admin(adminKeyDetail(11, TOKEN, "job:q"))
+                .getAdminKeyDetailResponse();
+        assertThat(d.getStatus()).isEqualTo(StatusCode.OK);
+        assertThat(d.getConditionWaiters()).isEqualTo(2);
+        assertThat(d.getWaitersList()).as("条件等待不在队，不并入位次编号").isEmpty();
+        assertThat(d.getConditionWaitersInfoList()).hasSize(2);
+        // 集建立序（gate 先建）→ 集内到达序；五字段齐备。
+        var first = d.getConditionWaitersInfoList().get(0);
+        assertThat(first.getCondition()).isEqualTo("gate");
+        assertThat(first.getSessionId()).isEqualTo(sessionId);
+        assertThat(first.getRequestId()).isEqualTo(301);
+        assertThat(first.getThreadId()).isEqualTo(11);
+        assertThat(first.getRegisteredAtMs()).isPositive();
+        var second = d.getConditionWaitersInfoList().get(1);
+        assertThat(second.getCondition()).isEqualTo("ready");
+        assertThat(second.getSessionId()).isEqualTo(other);
+        assertThat(second.getRequestId()).isEqualTo(302);
+        assertThat(second.getThreadId()).isEqualTo(12);
+
+        // 观察零扰动：反复查询后登记计数与到达序不变，业务侧 LEAVE 照常命中。
+        AdminKeyDetailResponse again = admin(adminKeyDetail(12, TOKEN, "job:q"))
+                .getAdminKeyDetailResponse();
+        assertThat(again.getConditionWaitersInfoList()).hasSize(2);
+        assertThat(again.getConditionWaitersInfoList().get(0).getRequestId()).isEqualTo(301);
+        core.conditionOp(new io.github.lamspace.openlatch.core.command
+                .ConditionOpCommand(other, 0, "job:q", "ready",
+                io.github.lamspace.openlatch.core.command.ConditionOp.LEAVE, 302));
+        assertThat(core.conditionWaiterCount("job:q")).isEqualTo(1);
+    }
+
     @Test
     void atomicEntriesVisibleInSummaryListAndDetail() {
         long w = core.sessionOpened();

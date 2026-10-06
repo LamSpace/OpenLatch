@@ -69,6 +69,32 @@
                     </tr>
                 </table>
             </th:block>
+            <!-- v9 条件等待区段：与等待队列并列（条件等待不在队，搬运后成为
+                 等待队列项、只在上表计位次，不在此重复出现）；按集合到达序
+                 呈现；Follower 来源如实零读并随等待队列同口径标注。 -->
+            <th:block th:if="${r.value.family == 'lock'}">
+                <h3>条件等待</h3>
+                <div th:if="${r.value.waitQueueLeaderOnly}" class="banner">
+                    条件等待明细同等待队列——仅 Leader 可见（当前来源节点为 Follower/未知角色，如实零读）。
+                </div>
+                <div th:if="${!r.value.waitQueueLeaderOnly and r.value.holdersList.isEmpty() and r.value.conditionWaiters > 0}" class="banner">
+                    当前无持有者——持有已随 await 释放（条件等待形态：等待者在条件集内，被 signal 搬运后经等待队列重新获取）。
+                </div>
+                <table class="grid" th:unless="${r.value.waitQueueLeaderOnly}">
+                    <tr><th>条件</th><th>会话</th><th>请求</th><th>线程</th><th>已等待</th><th>登记时刻（epoch ms）</th></tr>
+                    <tr th:each="c : ${r.value.conditionWaitersInfoList}">
+                        <td th:text="${c.condition}">x</td>
+                        <td th:text="${c.sessionId}">0</td>
+                        <td th:text="${c.requestId}">0</td>
+                        <td th:text="${c.threadId}">0</td>
+                        <td th:text="${(nowMs - c.registeredAtMs > 0 ? nowMs - c.registeredAtMs : 0)} + 'ms'">0ms</td>
+                        <td th:text="${c.registeredAtMs}">0</td>
+                    </tr>
+                    <tr th:if="${r.value.conditionWaitersInfoList.isEmpty()}">
+                        <td colspan="6" class="empty">无条件等待者</td>
+                    </tr>
+                </table>
+            </th:block>
             <th:block th:if="${r.value.family == 'topic'}">
                 <h3>订阅者</h3>
                 <table class="grid">

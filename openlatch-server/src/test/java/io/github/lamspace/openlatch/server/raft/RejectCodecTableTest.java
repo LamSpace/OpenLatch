@@ -88,7 +88,7 @@ class RejectCodecTableTest {
                     MessageType.LATCH_AWAIT, MessageType.ATOMIC_OP,
                     MessageType.BARRIER_AWAIT, MessageType.BARRIER_LEAVE,
                     MessageType.BARRIER_ACTION_DONE, MessageType.QUEUE_OP,
-                    MessageType.TOPIC_OP);
+                    MessageType.TOPIC_OP, MessageType.CONDITION_OP);
 
     /** 客户端接入车道全部请求类型（PING/AWAIT_NOTIFY 无拒绝应答语义，除外）。 */
     private static RejectCase[] allCases() {
@@ -149,6 +149,24 @@ class RejectCodecTableTest {
                     b -> b.setTopicOpRequest(TopicOpRequest.newBuilder()
                             .setKey("k").setOp(TopicOp.TOPIC_OP_SUBSCRIBE)),
                     Envelope::hasTopicOpResponse),
+            // v9：CONDITION_OP 同型拒绝——默认实例 OK 会被成型为"signal 搬运
+            // 成功/LEAVE 摘除成功"伪成功（判例 TOPIC_OP；恒即时回执无挂起形）。
+            new RejectCase(MessageType.CONDITION_OP, 9,
+                    b -> b.setConditionOpRequest(
+                            io.github.lamspace.openlatch.protocol.ConditionOpRequest
+                                    .newBuilder().setKey("k")
+                                    .setOp(io.github.lamspace.openlatch.protocol
+                                            .ConditionOp.CONDITION_OP_SIGNAL)
+                                    .setCondition("x").setThreadId(1L)),
+                    Envelope::hasConditionOpResponse),
+            // v9：带 condition 的折叠 ACQUIRE 同型拒绝行（门控/角色/形状三码形
+            // 恒经 acquire_response 自述——折叠不新建应答线，行内断言钉死
+            // "await 是 ACQUIRE 生命周期"的线路可见性）。
+            new RejectCase(MessageType.LOCK_ACQUIRE, 9,
+                    b -> b.setAcquireRequest(AcquireRequest.newBuilder()
+                            .setKey("k").setLockType(LockType.LOCK_TYPE_REENTRANT)
+                            .setThreadId(1L).setWaitMs(-1L).setCondition("x")),
+                    Envelope::hasAcquireResponse),
         };
     }
 
@@ -236,11 +254,17 @@ class RejectCodecTableTest {
         LeaderTracker.Snapshot unknown = new LeaderTracker.Snapshot(-1, "");
         for (RejectCase c : allCases()) {
             if (c.type() != MessageType.ATOMIC_OP && c.type() != MessageType.QUEUE_OP
-                    && c.type() != MessageType.TOPIC_OP) {
+                    && c.type() != MessageType.TOPIC_OP
+                    && c.type() != MessageType.CONDITION_OP) {
                 continue;
             }
             Envelope resp = ClusterRequestHandler.notLeaderEnvelope(request(c), unknown);
-            if (c.type() == MessageType.TOPIC_OP) {
+            if (c.type() == MessageType.CONDITION_OP) {
+                assertThat(resp.getConditionOpResponse().getOp())
+                        .as("CONDITION_OP 拒绝须回显 op（指标 recordCondition 消费同表达式）")
+                        .isEqualTo(io.github.lamspace.openlatch.protocol
+                                .ConditionOp.CONDITION_OP_SIGNAL);
+            } else if (c.type() == MessageType.TOPIC_OP) {
                 assertThat(resp.getTopicOpResponse().getOp())
                         .as("TOPIC_OP 拒绝须回显 op（指标 recordTopic 消费同表达式）")
                         .isEqualTo(TopicOp.TOPIC_OP_SUBSCRIBE);
@@ -322,6 +346,7 @@ class RejectCodecTableTest {
             case BARRIER_ACTION_DONE -> resp.getBarrierActionDoneResponse().getStatus();
             case QUEUE_OP -> resp.getQueueOpResponse().getStatus();
             case TOPIC_OP -> resp.getTopicOpResponse().getStatus();
+            case CONDITION_OP -> resp.getConditionOpResponse().getStatus();
             default -> throw new IllegalArgumentException("no codec: " + type);
         };
     }

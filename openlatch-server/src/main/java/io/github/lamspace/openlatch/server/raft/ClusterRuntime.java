@@ -74,13 +74,16 @@ public final class ClusterRuntime {
      * @param leaderTracker  Leader 提示视图
      * @param stallWatchdog  复制停摆自愈看门狗
      * @param topics         v8 topic 登记表（Leader 本地易失态）
+     * @param conditions     v9 条件等待登记表（Leader 本地易失态）
      */
     private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
                            ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
                            LeaseExpiryDriver expiryDriver, QueueReadyDriver queueReadyDriver,
                            ClusterRequestHandler requestHandler,
                            LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog,
-                           io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
+                           io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                           io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                   conditions) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
@@ -91,10 +94,14 @@ public final class ClusterRuntime {
         this.leaderTracker = leaderTracker;
         this.stallWatchdog = stallWatchdog;
         this.topics = topics;
+        this.conditions = conditions;
     }
 
     /** v8 topic 登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
     private final io.github.lamspace.openlatch.server.topic.TopicRegistry topics;
+
+    /** v9 条件等待登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
+    private final io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions;
 
     /**
      * v8 topic 登记表（管理面订阅维数据源；观察读数 Leader 视角口径）。
@@ -103,6 +110,16 @@ public final class ClusterRuntime {
      */
     public io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry() {
         return topics;
+    }
+
+    /**
+     * v9 条件等待登记表（管理面条件维数据源；观察读数 Leader 视角口径——
+     * 非 Leader 节点该表恒空，如实零读）。
+     *
+     * @return 登记表（与运行时同生命周期）
+     */
+    public io.github.lamspace.openlatch.server.condition.ConditionRegistry conditionRegistry() {
+        return conditions;
     }
 
     /**
@@ -161,19 +178,25 @@ public final class ClusterRuntime {
         if (metrics != null) {
             topics.setDropListener(metrics::recordTopicDropped);
         }
+        // v9：条件等待登记表（Leader 本地易失态，零复制日志——等待集无复制来源；
+        // 判例 TopicRegistry 装配位与换主清零，会话摘除/授予收口经网关钩子）。
+        io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions =
+                new io.github.lamspace.openlatch.server.condition.ConditionRegistry();
+        gateway.setConditionRegistry(conditions);
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
-                waitQueue, config, leaderTracker, metrics, topics);
+                waitQueue, config, leaderTracker, metrics, topics, conditions);
         if (metrics != null) {
             // 复制态 gauge 与角色指标绑定：抓取线程弱一致读，不触碰应用锁。
             metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
-                    clusterConfig.nodeId(), leaderTracker, topics);
+                    clusterConfig.nodeId(), leaderTracker, topics, conditions);
         }
         // 复制停摆自愈看门狗：装配末位——全部判据通道（division/gateway/
         // client 池）此时均已就绪；阈值由 election-timeout 折算钉死。
         ReplicationStallWatchdog stallWatchdog = ReplicationStallWatchdog.attach(subsystem);
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
-                expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog, topics);
+                expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog, topics,
+                conditions);
     }
 
     /**

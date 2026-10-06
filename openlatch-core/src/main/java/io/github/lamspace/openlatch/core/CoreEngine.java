@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.core;
 import io.github.lamspace.openlatch.core.command.AcquireCommand;
 import io.github.lamspace.openlatch.core.command.AtomicOpCommand;
 import io.github.lamspace.openlatch.core.command.AtomicRefOpCommand;
+import io.github.lamspace.openlatch.core.command.ConditionOp;
+import io.github.lamspace.openlatch.core.command.ConditionOpCommand;
 import io.github.lamspace.openlatch.core.command.BarrierActionDoneCommand;
 import io.github.lamspace.openlatch.core.command.BarrierAwaitCommand;
 import io.github.lamspace.openlatch.core.command.BarrierLeaveCommand;
@@ -42,6 +44,8 @@ import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
 import io.github.lamspace.openlatch.core.result.AcquireResult;
 import io.github.lamspace.openlatch.core.result.AtomicOpResult;
+import io.github.lamspace.openlatch.core.result.AwaitReleaseResult;
+import io.github.lamspace.openlatch.core.result.ConditionOpResult;
 import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
 import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
@@ -392,6 +396,14 @@ public final class CoreEngine {
                 || familyOf(cmd.lockType()) == KeyFamily.QUEUE) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
+        // v9：await 折叠形状守卫（接入层唯一裁决后的 core 防御兜底）——condition
+        // 仅承载于 REENTRANT/SIMPLE/FAIR 三互斥形态；READ/WRITE 或非 LOCK 家族
+        // 携带 condition 属类型不匹配，条目状态与会话触及集零扰动。
+        if (cmd.condition() != null && (cmd.lockType() == LockType.READ
+                || cmd.lockType() == LockType.WRITE
+                || familyOf(cmd.lockType()) != KeyFamily.LOCK)) {
+            return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
+        }
         KeyFamily family = familyOf(cmd.lockType());
         // Semaphore 建条目预检：条目不存在时总量主张必须 > 0。
         // 竞态良性：他者抢先建条目后本请求按"既有条目断言"规则处理。
@@ -403,6 +415,8 @@ public final class CoreEngine {
 
         while (true) {
             KeyEntry e = lockTable.computeIfAbsent(key, k -> newEntry(family, k, reentrant, cmd));
+            AcquireResult result;
+            List<Waiter> notifyToFire = null;
             synchronized (e) {
                 if (lockTable.get(key) != e) {
                     continue; // 条目在等待期间被移除，重试
@@ -418,10 +432,15 @@ public final class CoreEngine {
                     }
                     return new AcquireResult(Outcome.REJECT_SESSION, 0, 0, 0);
                 }
-                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集）。
-                AcquireResult result = switch (e) {
-                    case LockEntry le -> le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
-                            effectiveLeaseMs, config);
+                // 条目内规则按实现类分派（锁规则集 / Semaphore 规则集；v9 折叠
+                // 形态走 awaitFold——释放+登记同关键区，队首通知经 notify 收集）。
+                List<Waiter> foldNotify = cmd.condition() == null ? null : new ArrayList<>();
+                result = switch (e) {
+                    case LockEntry le -> cmd.condition() != null
+                            ? le.awaitFold(cmd, now, leaseTokenCounter::getAndIncrement,
+                                    effectiveLeaseMs, config, foldNotify)
+                            : le.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
+                                    effectiveLeaseMs, config);
                     case SemaphoreEntry se -> se.acquire(cmd, now, leaseTokenCounter::getAndIncrement,
                             effectiveLeaseMs, config);
                     // 家族判定已保证同族，此处为家族尚无实现条目时的收口分支。
@@ -433,8 +452,12 @@ public final class CoreEngine {
                 if (e.isEmpty()) {
                     lockTable.remove(key, e);
                 }
-                return result;
+                notifyToFire = foldNotify;
             }
+            if (notifyToFire != null && !notifyToFire.isEmpty()) {
+                fireNotify(notifyToFire, key);
+            }
+            return result;
         }
     }
 
@@ -1174,9 +1197,16 @@ public final class CoreEngine {
         int maxQueueDepth = 0;
         for (KeyEntry e : lockTable.values()) {
             int waiters;
+            int conditionWaiters = 0;
             boolean held;
             synchronized (e) {
                 waiters = e.waiterCount();
+                // v9 口径：条件等待者是等待者——计入等待总数合计；
+                // maxQueueDepth 保持"等待队列深度"纯口径不抬升（四口径互引，
+                // metrics-observability 能力条款）。
+                if (e instanceof LockEntry le) {
+                    conditionWaiters = le.conditionWaiterCount();
+                }
                 held = e.leaseToken() != 0;
             }
             if (held) {
@@ -1188,12 +1218,32 @@ public final class CoreEngine {
                     }
                 }
             }
-            totalWaiters += waiters;
+            totalWaiters += waiters + conditionWaiters;
             if (waiters > maxQueueDepth) {
                 maxQueueDepth = waiters;
             }
         }
         return new CoreStats(heldLocks, heldSemaphores, totalWaiters, maxQueueDepth, sessions.size());
+    }
+
+    /**
+     * 抓取时刻单键条件等待峰值（单机形态 {@code condition.waiters.max} gauge
+     * 口径；集群形态读 Leader 本地登记表 {@code ConditionRegistry.maxCountCurrent()}，
+     * 两形态同"单键峰值、抓取时刻采样"语义）。弱一致遍历、纯读零扰动。
+     *
+     * @return 各锁 key 条件等待数的最大值；无登记为 0
+     */
+    public int maxConditionWaiters() {
+        int max = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (e instanceof LockEntry le) {
+                int n = le.conditionWaiterCount();
+                if (n > max) {
+                    max = n;
+                }
+            }
+        }
+        return max;
     }
 
     /**
@@ -1362,6 +1412,148 @@ public final class CoreEngine {
      * 在条目锁之外统一触发收集到的队首通知事件。通知列表由条目内操作
      * （释放、到期、清扫等）在持锁期间填充，本方法负责出锁后逐个回调，
      * 避免回调实现中的任何行为反向影响条目锁的持有。
+     *
+     * 条件 signal 家族操作：condition 家族命令唯一门面（v9）。零复制日志——
+     * 三操作是纯 Leader 本地裁决的搬运/摘除（判例双源："等待不入日志"与 topic
+     * 零日志豁免，类目化为"signal 是事件不是状态"），MUST NOT 进入状态机提交
+     * 路径与提交通道（边界条款由 replicated-state-machine 能力承载；await 的
+     * 释放半程另经折叠 ACQUIRE 条目走既有提交通道，见 {@link #acquire}）。
+     * 判定顺序——会话存在 → key 合法 → 条件名合法（接入层唯一裁决，此处防御
+     * 兜底）→ 条目定位（无条目：LEAVE→OK 幂等无操作；SIGNAL/SIGNAL_ALL→
+     * NOT_HELD）→ 家族判定（非 LOCK→REJECT_TYPE_MISMATCH，LEAVE 同口径统一
+     * 家族门）→ 条目锁内分派 op → 通知列表在条目锁外统一触发。
+     *
+     * @param cmd signal 家族命令（形状已经接入层裁决）
+     * @return 即时回执（OK / NOT_HELD / REJECT_*），恒无挂起形态
+     */
+    public ConditionOpResult conditionOp(ConditionOpCommand cmd) {
+        long now = clock.nowMs();
+        ConditionOpResult.ConditionOpEcho echo = switch (cmd.op()) {
+            case SIGNAL -> ConditionOpResult.ConditionOpEcho.SIGNAL;
+            case SIGNAL_ALL -> ConditionOpResult.ConditionOpEcho.SIGNAL_ALL;
+            case LEAVE -> ConditionOpResult.ConditionOpEcho.LEAVE;
+        };
+        if (!sessions.contains(cmd.sessionId())) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_SESSION, echo);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return ConditionOpResult.rejected(keyBad == Outcome.REJECT_KEY_TOO_LONG
+                    ? ConditionOpResult.Status.REJECT_KEY_TOO_LONG
+                    : ConditionOpResult.Status.REJECT_KEY_EMPTY, echo);
+        }
+        if (cmd.condition() == null || cmd.condition().isEmpty()) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_KEY_EMPTY, echo);
+        }
+        if (cmd.condition().getBytes(StandardCharsets.UTF_8).length > config.maxKeyLength()) {
+            return ConditionOpResult.rejected(ConditionOpResult.Status.REJECT_KEY_TOO_LONG, echo);
+        }
+        KeyEntry e = lockTable.get(cmd.key());
+        if (e == null) {
+            // 无条目即无登记：LEAVE 幂等无操作；signal 家族权限前提（持有归属）不存在。
+            return cmd.op() == ConditionOp.LEAVE
+                    ? ConditionOpResult.ok(echo)
+                    : ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+        }
+        List<Waiter> notify = new ArrayList<>();
+        ConditionOpResult result;
+        synchronized (e) {
+            if (lockTable.get(cmd.key()) != e) {
+                // 条目竞态移除：与"无条目"同口径收束。
+                result = cmd.op() == ConditionOp.LEAVE
+                        ? ConditionOpResult.ok(echo)
+                        : ConditionOpResult.rejected(ConditionOpResult.Status.NOT_HELD, echo);
+            } else if (e.family() != KeyFamily.LOCK) {
+                result = ConditionOpResult.rejected(
+                        ConditionOpResult.Status.REJECT_TYPE_MISMATCH, echo);
+            } else {
+                LockEntry le = (LockEntry) e;
+                result = switch (cmd.op()) {
+                    case SIGNAL -> le.signal(cmd, now, config, notify);
+                    case SIGNAL_ALL -> le.signalAll(cmd, now, config, notify);
+                    case LEAVE -> le.leave(cmd);
+                };
+            }
+        }
+        if (!notify.isEmpty()) {
+            fireNotify(notify, cmd.key());
+        }
+        return result;
+    }
+
+    /**
+     * await 折叠的释放半程应用（集群形态 LOCK_ACQUIRE_ENTRY 携带 condition 的
+     * 应用点入口，v9）：跨副本确定地执行 {@link LockEntry#awaitFoldRelease}
+     * （持有归属一步清零并清租约+队首通知评估；无条目/非持有零操作幂等），
+     * 叠加会话/key/家族守卫。登记半程 MUST NOT 在此发生——它由 Leader 受理
+     * 预检点的本地结构承载（"登记先于释放可见"不变式，lock-server 能力条款），
+     * 应用面无本地副作用可分岔（digest 守卫由 replicated-state-machine 能力钉定）。
+     *
+     * @param cmd 折叠获取命令（{@code condition} 非空；形状已由接入层裁决）
+     * @return 守卫结果与是否发生释放；拒绝形态含会话失效/家族不匹配
+     */
+    public AwaitReleaseResult awaitFoldRelease(AcquireCommand cmd) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return new AwaitReleaseResult(Outcome.REJECT_SESSION, false);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return new AwaitReleaseResult(keyBad, false);
+        }
+        if (cmd.lockType() == LockType.READ || cmd.lockType() == LockType.WRITE
+                || familyOf(cmd.lockType()) != KeyFamily.LOCK) {
+            return new AwaitReleaseResult(Outcome.REJECT_TYPE_MISMATCH, false);
+        }
+        KeyEntry e = lockTable.get(cmd.key());
+        if (e == null) {
+            return new AwaitReleaseResult(Outcome.GRANTED, false);
+        }
+        List<Waiter> notify = new ArrayList<>();
+        boolean released;
+        synchronized (e) {
+            if (lockTable.get(cmd.key()) != e) {
+                return new AwaitReleaseResult(Outcome.GRANTED, false);
+            }
+            if (e.family() != KeyFamily.LOCK) {
+                return new AwaitReleaseResult(Outcome.REJECT_TYPE_MISMATCH, false);
+            }
+            released = ((LockEntry) e).awaitFoldRelease(cmd.sessionId(), cmd.threadId(),
+                    now, config, notify);
+        }
+        if (!notify.isEmpty()) {
+            fireNotify(notify, cmd.key());
+        }
+        return new AwaitReleaseResult(Outcome.GRANTED, released);
+    }
+
+    /**
+     * 单 key 条件等待者计数观察（管理/指标口径；无条目或非 LOCK 家族为 0，
+     * 弱一致读数）。与等待队列口径（{@link #stats}/{@code waiterCount}）互斥
+     * 不重复——已搬运项属队列口径。
+     *
+     * @param key 锁键
+     * @return 当前条件等待者数
+     */
+    public int conditionWaiterCount(String key) {
+        KeyEntry e = lockTable.get(key);
+        return e instanceof LockEntry le ? le.conditionWaiterCount() : 0;
+    }
+
+    /**
+     * 单 key 条件等待明细只读快照（各集按建立序、集内按到达序；无条目或非
+     * LOCK 家族为空列表，弱一致读数、零扰动）。
+     *
+     * @param key 锁键
+     * @return 条件等待者明细视图列表
+     */
+    public List<LockEntry.ConditionWaiterView> conditionWaiters(String key) {
+        KeyEntry e = lockTable.get(key);
+        return e instanceof LockEntry le ? le.conditionWaiterViews() : List.of();
+    }
+
+    /**
+     * 队首通知统一触发：在条目锁外逐项投递监听器。
      *
      * @param notify 待通知的队首等待者列表
      * @param key    锁键，随事件一并报告

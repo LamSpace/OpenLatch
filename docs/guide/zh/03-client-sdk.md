@@ -273,6 +273,75 @@ watch.close();                                               // = news.unsubscri
    （`INVALID_REQUEST`，尽力而为、无竞态保证）——"一 key 一形态"对 topic 是
    应用侧契约而非机制互斥。
 
+## 条件变量（OCondition，v9）
+
+与 `OLock` 配套的等待-通知通道，对应 JDK `Condition`。条件身份 = (锁 key,
+条件名)：句柄无状态、无需关闭，同名句柄跨进程绑定同一等待集。标准惯用法
+（guard loop 是调用方义务）：
+
+```java
+OLock lock = client.newReentrantLock("job:dispatch");
+OCondition ready = lock.newCondition("ready");            // 命名寻址，可重复创建
+
+lock.lock();
+try {
+    while (!hasWork()) {          // 永远以谓词复查包裹 await——虚假唤醒允许
+        ready.await();            // 受理即全量释放；唤醒返回时持锁、重入 1 级
+    }
+    takeWork();
+} finally {
+    lock.unlock();
+}
+
+lock.lock();                      // 生产者：signal 必须先持有本锁
+try {
+    enqueueWork();
+    ready.signal();               // 唤醒队首一个等待项（signalAll 全员搬运）
+} finally {
+    lock.unlock();
+}
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §11](01-concepts.md)）：
+
+1. **guard loop 是调用方义务**：虚假唤醒允许且不承诺杜绝（JDK 同契约），唤醒
+   来源含队首超时清扫促醒、换主重挂窗的已丢 signal、LEAVE/SIGNAL 竞态收敛——
+   返回不代表谓词为真，裸 `await()` 即缺陷；
+2. **返回时持锁与 1 级重入算术**：`await()`/`await(timeout, unit)` 无论被唤醒、
+   超时还是中断，返回（或抛出）前均已重新持有锁——`await(timeout, unit)` 返回
+   `false` 时同样持锁（可安全复查谓词再决策），中断在重新入锁后才抛
+   `InterruptedException`（JDK 保真）；await 前持有的 N 级重入被一步清零，返回后
+   从 1 级起——解锁按"持有 1 级"书写，多出的 N-1 次 `unlock()` 会抛
+   `IllegalMonitorStateException`。超时与唤醒同时收束时返回值按先收束者如实呈现
+   （返回值是 best-effort，谓词才是真相）；
+3. **双层权限异常**：`signal`/`signalAll` 在非持有线程上调用抛
+   `IllegalMonitorStateException`，两源同型——本地先行（未持有，零请求）与
+   服务端权威复查（持有已丢的窗口，如失锁后继续 signal，线路码 `NOT_HELD`）。
+   `await` 的权限**仅本地检查**：服务端不查 await 登记者持有状态（跨换主重挂
+   所必需），误用登记的 ghost 受合并护栏钳制、随会话死亡/LEAVE/换主三路回收
+   ——显式降级面。空集/无此 name/key 不存在的 signal = 无操作正常返回（JDK 对齐）；
+4. **成本模型**：折叠 await 完整闭环至少 2 次网络往返（挂起受理 1 次 + 唤醒后
+   重发 1 次；重发环未即授予继续轮转，每轮再加 1 次）；`signal`/`signalAll` 各
+   1 次往返即时回执。等待期间服务端仅一条登记，无长连接专属资源；
+5. **持有者死亡不代为唤醒（无人 signal 则永睡）**：租约到期/进程死亡的 sweep
+   只唤醒**等待队列入队者**，条件等待者不动；等待者自身无租约、无续租义务。
+   **生产代码推荐 `await(timeout, unit)` 形态自救**——无限 `await()` 在无人
+   signal 的拓扑里就是无限睡眠；
+6. **换主分层：等待是承诺、signal 是事件**：等待项随获取车道迁移**自动重挂**
+   （同请求标识幂等登记，对应用透明，新 Leader 上照常接收唤醒）；换主窗口内
+   发出的 signal 不重放、不补偿（有界窗）。对照 topic 同型句：承诺/登记侧由
+   重放与重挂兜底幸存，事件侧（signal/消息）丢失即丢失；
+7. **支持面与不提供**：仅 REENTRANT/FAIR/SIMPLE 三互斥形态可挂条件；读写锁
+   句柄（`OReadWriteLock` 所得）调 `newCondition` 抛 `UnsupportedOperationException`
+   （本地裁决、零请求）。**不提供 `awaitNanos`/`awaitUntil`/`awaitUninterruptibly`
+   及任何异步对偶**。FAIR 位次声明：搬运项按搬运时刻入队，被 signal 者不优先于
+   搬运前已入队的先辈；
+8. **合并护栏与版本门**：条件等待人数与等待队列按"本 key 等待项"合计口径共用
+   `max-queue-depth-per-key`——**v9 零新增配置**；超限时 await 收 `OVERLOADED`
+   （异常时不持锁，走失锁/重试惯例）。需 v9 握手（升级序先服务端后客户端）：
+   v≤8 会话发 `CONDITION_OP` 或携带 `condition` 字段的 ACQUIRE 得
+   `INVALID_REQUEST` 消息级拒绝、不断连。
+
 ## 异步用法
 
 ```java

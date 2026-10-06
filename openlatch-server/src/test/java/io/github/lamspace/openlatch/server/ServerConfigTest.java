@@ -127,6 +127,24 @@ class ServerConfigTest {
         }
     }
 
+    /**
+     * v9 条件变量零新配置行（复用裁决的机械防线）：await 折叠进 ACQUIRE 车道、
+     * 登记计入既有 {@code max-queue-depth-per-key} 合并护栏，signal 家族恒即时
+     * 零日志零定时器——配置表面上 MUST NOT 出现任何 {@code condition} 专属的
+     * 容量/时刻参数（如后续立 change 评估分轨限额，届时随新键同步改写本断言）。
+     */
+    @Test
+    void v9_condition_introduces_no_config_keys() {
+        assertThat(java.util.Arrays.stream(ServerConfig.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .filter(n -> n.toLowerCase().contains("condition")))
+                .as("v9 零新配置：ServerConfig 不得携带 condition 专属参数")
+                .isEmpty();
+        // 合并护栏沿用既有常量（等待队列 + 条件集同限额钳制，判例队列等待满分轨）。
+        assertThat(ServerConfig.defaults().maxQueueDepthPerKey())
+                .isEqualTo(ServerConfig.DEFAULT_MAX_QUEUE_DEPTH_PER_KEY);
+    }
+
     @Test
     void v7_queue_limits_out_of_range_fail_fast() throws IOException {
         // 逐界：容量 0/顶格上、drain 预算 0/顶格上、ready-tick 下限。

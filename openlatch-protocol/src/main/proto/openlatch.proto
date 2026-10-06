@@ -28,6 +28,8 @@ enum MessageType {
   QUEUE_OP         = 18;   // v7：队列操作（独立消息对，不走 ACQUIRE；读写皆全量经提交）
   TOPIC_OP         = 19;   // v8：topic 操作（独立消息对，不走 ACQUIRE；零复制日志——受理与 fan-out 全在 Leader 本地）
   TOPIC_MESSAGE    = 20;   // v8：服务器 → 订阅连接 广播交付推送（request_id=0、无 ref，按 subscription_id 关联）
+  CONDITION_OP     = 21;   // v9：条件变量操作（独立消息对；signal 家族零日志——Leader 本地等待集→等待队列搬运与摘除。
+                           // AWAIT 不在本词表——await 为 ACQUIRE 携带 condition 字段的折叠形态，见 AcquireRequest）
 }
 
 // 锁类型。
@@ -119,6 +121,8 @@ message Envelope {
     TopicOpRequest            topic_op_request             = 42;  // v8
     TopicOpResponse           topic_op_response            = 43;  // v8
     TopicMessage              topic_message                = 44;  // v8：广播交付推送（服务器→订阅者）
+    ConditionOpRequest        condition_op_request         = 45;  // v9
+    ConditionOpResponse       condition_op_response        = 46;  // v9
   }
 }
 
@@ -146,6 +150,15 @@ message AcquireRequest {
   int64    wait_ms       = 5;   // -1 = 排队；0 = 立即式；>0 由客户端本地计时，语义等价于 -1
   int32    permits       = 6;   // v3：请求许可数，仅 SEMAPHORE 有效；0 按 1 处理，非 SEMAPHORE 携带 >1 拒绝
   int32    permits_total = 7;   // v3：许可总量断言，仅 SEMAPHORE 有效；建条目必填 >0，既有条目非零须匹配，0=不主张
+  // v9：条件等待折叠——presence 即本 ACQUIRE 携带 await 语义：经复制的应用点在
+  // 同一关键区内执行"若 (session_id,thread_id) 恰为持有归属则重入计数一步清零
+  // 并清租约（否则释放半程零操作——跨换主重挂非持有者属常态，权限降级面见规格），
+  // 随后以 (会话, request_id) 幂等登记入该 key `condition` 名下等待集；唤醒经
+  // AWAIT_NOTIFY（ref=本请求 request_id），原信封同 request_id 重发兑现队首授予。
+  // 形状纪律：非空且 UTF-8 字节 ≤maxKeyLength；wait_ms=0（立即式）携带本字段违例；
+  // lock_type 限 REENTRANT/SIMPLE/FAIR，READ/WRITE 与其余家族携带违例；
+  // permits/permits_total 对本折叠无意义（0）。缺省 presence 时既有获取语义逐项不变。
+  optional string condition = 8;
 }
 
 message AcquireResponse {
@@ -295,6 +308,9 @@ message AdminKeyInfo {
   // v8：topic 订阅登记行的观察字段（Leader 视角合并呈现，family=topic；
   // 非 topic 行恒 0。已交付消息内容 MUST NOT 出现在任何管理应答）。
   int32  topic_subscribers        = 17; // 订阅数（非 topic 行恒 0）
+  // v9：锁键条件等待数（Leader 本地条件等待集人数，与 waiter_count 的等待队列
+  // 口径互斥不重复——已搬运入队者计入 waiter_count；Follower 恒 0 如实）。
+  int32  condition_waiters        = 18; // 条件等待数（非 LOCK 行恒 0）
 }
 
 message AdminListKeysResponse {
@@ -336,6 +352,17 @@ message AdminTopicSubscriberInfo {
   int64  session_id      = 1;  // 订阅会话（逻辑会话 id）
   uint64 subscription_id = 2;  // 登记表路由键（与 TOPIC_MESSAGE.subscription_id 同源）
   int64  subscribed_at_ms = 3; // 订阅建立时刻（epoch 毫秒，受理节点时钟）
+}
+
+// v9：条件等待明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空——等待集为
+// Leader 本地易失态，Follower 如实零读；在集身份=(会话,请求)，thread_id 为
+// 折叠 ACQUIRE 的归属线程读数。已搬运入队者不在本列表——见 waiters 区段）。
+message AdminConditionWaiterInfo {
+  string condition        = 1;  // 条件名（命名寻址文本，无内容面）
+  int64  session_id       = 2;  // 等待会话（逻辑会话 id）
+  int64  request_id       = 3;  // 原携带 condition 的 ACQUIRE 的 request_id（唤醒通知关联键）
+  int64  thread_id        = 4;  // 归属线程（折叠 ACQUIRE 的 thread_id 读数）
+  int64  registered_at_ms = 5;  // 登记时刻（受理节点应用时刻读数；换主重挂后重新计时）
 }
 
 message AdminKeyDetailResponse {
@@ -382,6 +409,11 @@ message AdminKeyDetailResponse {
   // 已交付消息内容零外发，计数与会程/序号/时刻三维为全部观察面）。
   int32  topic_subscribers = 29;  // 订阅数（非 topic 恒 0）
   repeated AdminTopicSubscriberInfo topic_subscribers_info = 30; // 订阅者明细（非 topic 恒空）
+  // v9：LOCK 专属条件等待维（非锁键恒 0/空列表；集合为 Leader 本地态——Follower
+  // 计数与明细如实零/空，与 wait_queue_leader_only 同口径标注；明细按集合到达序，
+  // 与 waiters 区段并列互斥计数、不重复；条件名即寻址文本，无内容外发面）。
+  int32  condition_waiters = 31;  // 条件等待数（非 LOCK 恒 0）
+  repeated AdminConditionWaiterInfo condition_waiters_info = 32; // 条件等待明细（非 LOCK 恒空）
 }
 
 // 本节点接入会话项。node_id 由 sessionId 高位导出（恒为受理节点自身）。
@@ -592,4 +624,40 @@ message TopicMessage {
   uint64 publisher_sid   = 4;
   int64  publish_ts_ms   = 5;
   bytes  payload_bytes   = 6;   // 恒存在的消息体（不透明字节）
+}
+
+// v9：条件变量操作类型（CONDITION_OP_REQUEST.op）。signal 家族三操作词表——
+// AWAIT 不在其中（await 折叠于 ACQUIRE，判例 LatchAwait/QueueOp 的挂起半程在
+// 本库恒经等待队列纪律，signal 的唤醒半程即队首通知）；SIGNAL/SIGNAL_ALL/LEAVE
+// 为纯 Leader 本地等待集→等待队列的位次搬运与摘除，零日志、不重放
+// （"signal 是事件不是状态"——v8 topic 零日志豁免判例的类目化）。
+enum ConditionOp {
+  CONDITION_OP_SIGNAL     = 0;  // 唤醒一人：该条件到达序集队首搬入等待队列尾；空集/无此名回 OK 无操作（JDK 对齐）
+  CONDITION_OP_SIGNAL_ALL = 1;  // 唤醒全员：按到达序全部搬运；授予经等待队列队首纪律串行兑现
+  CONDITION_OP_LEAVE      = 2;  // 撤登（客户端本地超时/中断路径）：按 (会话, await_request_id) 摘除；幂等回 OK
+}
+
+// v9：条件变量操作请求（CONDITION_OP）。key 沿用既有长度纪律；condition 恒必携
+// 非空且 ≤maxKeyLength（命名寻址——同名同等待集、跨进程句柄等价，对 JDK 句柄
+// 身份的本质适配）。形状互斥矩阵入口裁决：SIGNAL/SIGNAL_ALL 必携 thread_id
+// （权限检查的归属线程——服务端权威，非持有归属 NOT_HELD）、await_request_id
+// MUST 为 0；LEAVE 必携非零 await_request_id（指向原携带 condition 的 ACQUIRE
+// 的 request_id）、thread_id MUST 为 0；矩阵外组合一律同型 INVALID_REQUEST、
+// 等待集与队列零扰动。
+message ConditionOpRequest {
+  string      key              = 1;
+  ConditionOp op               = 2;
+  string      condition        = 3;  // 目标等待集名（命名寻址）
+  int64       thread_id        = 4;  // 仅 SIGNAL/SIGNAL_ALL：权限归属线程（其余携带或本字段为 0 的违例按矩阵判）
+  int64       await_request_id = 5;  // 仅 LEAVE：原折叠 ACQUIRE 的 request_id（非 LEAVE 携非零为违例）
+}
+
+// v9：条件变量操作应答。拒绝态字段为零值形。status 可达面
+// OK/NOT_HELD/NOT_LEADER/INVALID_REQUEST/SESSION_EXPIRED/INTERNAL_ERROR——
+// QUEUED/DENIED/OVERLOADED 恒不可达（signal 家族恒即时回执；await 的等待满拒绝
+// 产生于折叠 ACQUIRE 侧、计数归 acquire 线）。SIGNAL/SIGNAL_ALL 的 OK 仅表搬运
+// 已生效，不承诺唤醒效果（被搬运者的了结经等待-通知-重发闭环另行完成）。
+message ConditionOpResponse {
+  StatusCode  status = 1;
+  ConditionOp op     = 2;
 }

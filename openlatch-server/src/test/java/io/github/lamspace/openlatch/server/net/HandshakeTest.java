@@ -286,8 +286,8 @@ class HandshakeTest {
 
     @Test
     void wrong_protocol_version_rejected_and_disconnected() {
-        // v8 起接受区间为 [1,8]：越界版本（9）拒绝并断连。
-        ch.writeInbound(hello(1, 9, ""));
+        // v9 起接受区间为 [1,9]：越界版本（10）拒绝并断连。
+        ch.writeInbound(hello(1, 10, ""));
 
         Envelope resp = readOutboundEnvelope();
         assertThat(resp.getHelloResponse().getStatus()).isEqualTo(StatusCode.INVALID_REQUEST);

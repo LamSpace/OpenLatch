@@ -48,3 +48,11 @@
 | drop-newest | drop-newest | 缓冲溢出裁决：丢最新一条并计数，既有缓冲照常交付（区别于 JDK `SubmissionPublisher` 的 overflow-close 判例）（v8） |
 | gap 推断 | gap inference | 订阅侧丢弃计数：同 term 内 `topic_seq` 跳号数 + 本地缓冲溢出数，`droppedCount()` 的构成（v8） |
 | 死亡即退订 | death-as-unsubscribe | topic 订阅与存活会话绑定：订阅者进程死亡即回收登记、缓冲与去重槽（与队列"死亡不吞元素"刻意相反）（v8） |
+| 条件等待集 | condition wait set | 锁 key 之下按条件名分组的到达序等待者登记（v9）：Leader 进程易失、不入日志不入快照，三路回收（LEAVE/会话死亡/换主），与等待队列合并计数受 `max-queue-depth-per-key` 护栏 |
+| 命名寻址 | named addressing | 条件身份 = (锁 key, 条件名) 而非句柄身份（v9）：同名句柄进程内重复创建与跨进程创建均绑定同一服务端等待集——JDK 句柄身份的分布式适配，跨进程等价是能力面 |
+| 释放折叠 | release folding | await 的"全量释放 + 入等待集登记"两半程以一条既有 ACQUIRE 条目原子承载（v9）：登记先于释放可见，同关键区无丢唤醒窗 |
+| 搬运 | carry | SIGNAL/SIGNAL_ALL 将条件等待项按到达序从等待集移入锁等待队列的动作（v9）：搬运后走既有队首授予纪律，不再计入条件等待集读数 |
+| signal 事件性 | signal-as-event | signal 家族是事件不是状态（v9）：不入日志、不补偿、不重放——换主窗内发出的 signal 丢失，等待者以 timed await 自救 |
+| 返回时持锁 | returns holding the lock | await 无论唤醒、超时还是中断收束，返回（或抛出）前必须重新持有锁的 JDK 保真契约（v9）：重入计数从 1 级起 |
+| guard loop 义务 | guard-loop obligation | 虚假唤醒允许且调用方 MUST 以谓词复查循环包裹 await（v9）：唤醒不证明谓词为真，促醒来源清单属契约面 |
+| 等待是承诺、signal 是事件 | wait-as-promise, signal-as-event | 条件的换主分层语义（v9）：等待承诺经日志重放与客户端自动重挂幸存；signal 为即时事件，换主窗内丢失即丢失（与 topic"至多一次"同句不同域） |

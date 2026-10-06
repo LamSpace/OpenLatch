@@ -158,6 +158,7 @@ public final class ClientMetrics {
             case LOCK_ACQUIRE -> resp.getAcquireResponse().getStatus().name();
             case LOCK_RELEASE -> resp.getReleaseResponse().getStatus().name();
             case LEASE_RENEW -> resp.getLeaseRenewResponse().getStatus().name();
+            case CONDITION_OP -> resp.getConditionOpResponse().getStatus().name();
             case LATCH_COUNT_DOWN -> resp.getLatchCountDownResponse().getStatus().name();
             case LATCH_AWAIT -> resp.getLatchAwaitResponse().getStatus().name();
             case HELLO -> resp.getHelloResponse().getStatus().name();

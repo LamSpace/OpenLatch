@@ -7,7 +7,7 @@
 | `QUEUED` | server | enqueued, awaiting notify-resend | normal queueing, no action |
 | `LOCK_HELD` | server | immediate-mode try when someone else holds it | retry per business or use `lock()` |
 | `NOT_LEADER` | server (forward/role path) | this node is not the leader — **retryable**, hint attached | client reroutes automatically; if persistent see section 3 |
-| `NOT_HELD` | server (authoritative verdict) | this session provably does not hold the lock (post-quorum apply) | treat as lock loss: abort, re-compete |
+| `NOT_HELD` | server (authoritative verdict) | this session provably does not hold the lock (post-quorum apply); from v9 the code is **ambiguous by design** — on release/unlock paths it means lock loss, on `CONDITION_OP` (signal family) paths it means signal-without-ownership: discriminate by request type | split by request type: lock ops → treat as lock loss (abort, re-compete); signal → surfaces as `IllegalMonitorStateException` (fix the call site) |
 | `INVALID_TOKEN` | server (authoritative verdict) | credentials don't match current ownership (typical: failover rollback / lease expired) | same — lock-lost handling |
 | `SESSION_EXPIRED` | server | session closed | re-compete after reconnect (automatic; business gets the callback) |
 | `BARRIER_BROKEN` | server (in-band verdict) | the waited generation of a cyclic barrier was broken (a party left/died/timed out or `breakBarrier()`) | treat the rendezvous as failed: abort this round; a fresh generation opens on the next arrivals |
@@ -17,7 +17,7 @@
 | `LockAcquisitionTimeoutException` | client | wait budget (default 30s) exhausted | size budgets / shorten sections / degrade |
 | `OpenLatchTimeoutException` | client | one request unanswered for 5s (connection alive) | check node load/clocks; a lone blip is tolerable |
 | `ServerUnavailableException` | client | connection unavailable (incl. failover fast-fail) | retry; verify seed config |
-| `IllegalMonitorStateException` | client | unlock/release without holding | fix the lifecycle code path |
+| `IllegalMonitorStateException` | client | unlock/release/signal without holding (v9: signaling has two same-shaped sources — the local pre-check, or the server's `NOT_HELD` mapped to this exception) | fix the lifecycle code path |
 | `LockLostException` (callback) | client | the lock was taken away | abort the in-flight commit — by-design obligation |
 
 ## 2. Failover behavior baseline (measured)
@@ -138,6 +138,49 @@ auto-convergence after healing; sampler red only if all rounds ABORTED.
 - **Empty topic readouts on followers**: the registry is Leader-local — follower
   SUMMARY shows `topic_entries=0`, keys lists omit topic rows and details answer
   an honest NOT_HELD. This is faithful presentation, not data loss.
+
+## Condition (v9) triage quick sheet
+
+- **"Await never wakes" — split the diagnosis in three**: (1) **signal denied
+  by permission** — check the `openlatch_server_condition_total{status="NOT_HELD"}`
+  line: the signaler was not the holder at that moment (calling without holding
+  throws locally and sends nothing; a request that reached the wire means an
+  ownership-already-lost window, e.g. signaling after lock loss) — fix the
+  permission path; (2) **signal lost in a leader-change window** — compare the
+  await re-registration log against the leader-change timestamp: waiting is a
+  promise, signal is an event — in-window signals are never replayed or
+  compensated, and a re-registered waiter waits for the next signal or its
+  timeout. A match means contract behavior, not a fault: self-rescue with
+  `await(timeout, unit)` and observe per WATCHLIST W13; (3) **a missing guard
+  loop** — spurious wake-ups are allowed by contract (head-timeout sweep
+  promotions, LEAVE/SIGNAL race convergence), and a bare await mistakes a wake
+  for a true predicate, looking exactly like "the signal got lost": audit the
+  caller's `while (!predicate)` guard first;
+- **Discriminating the two faces of `NOT_HELD`**: one code, two natures — on
+  the release/unlock path it is **lock loss** (abort the commit, re-compete);
+  on the `CONDITION_OP` path it is **signal-without-ownership** (mapped to
+  `IllegalMonitorStateException`, fix the call site). The only discriminating
+  surface is the request type; cross-read the separate `acquire.total` and
+  `condition.total` lines to localize it;
+- **`OVERLOADED` on an await**: condition waiters + the wait queue together hit
+  the merged `max-queue-depth-per-key` (zero new config, one shared guardrail)
+  — same basis as the queue's "waiter-full": shed parked load or raise the
+  limit; note the throwing thread does **not** hold the lock;
+- **Holder died yet waiters keep sleeping**: by contract — lease-expiry and
+  death sweeps wake the wait-queue entrants only and **never signal for
+  condition waiters**; production code should use timed awaits
+  ([03 conditions](03-client-sdk.md));
+- **`INVALID_REQUEST` / `UnsupportedOperationException` on condition ops** means
+  one of: empty or over-`max-key-length` condition name, a read/write-form
+  acquisition carrying the `condition` field, `CONDITION_OP` on a non-LOCK
+  family key, a shape-matrix violation (`thread_id`/`await_request_id`
+  mismatched with the op), or a v≤8 session — the status text pinpoints which;
+  `newCondition` on a read/write lock handle is a **local**
+  `UnsupportedOperationException` (zero requests);
+- **Zero condition readouts on followers**: the wait set is Leader-local state,
+  so follower KEY_DETAIL condition sections honestly read zero (the same
+  Leader-only surface as the wait queue) — faithful presentation, not data
+  loss.
 
 ## 7. FAQ
 

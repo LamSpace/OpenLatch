@@ -63,3 +63,11 @@ Topic keys (v8) render the subscriber count and a subscriber list (session id,
 subscription id, subscribed-at); the registry is Leader-local, so only Leader-sourced
 pages show topic rows (follower views are an honest NOT_HELD, never an empty-shell
 success) and delivered message content never leaves the observation surface.
+Conditions (v9) add a "condition waiters" section on the lock detail page, rendered
+**beside — never double-counted with — the wait queue**: each row shows the condition
+name, session id, request id, thread id and registration time (the wait duration
+follows from it); waiters already carried by a signal leave this section (they then
+belong to the wait-queue counts). The wait set is Leader-local state, so condition
+detail is non-zero only from the Leader's view (followers read an honest zero — the
+same Leader-only surface as the topic registry); the condition name is addressing
+text itself and this surface ships no content.

@@ -113,6 +113,24 @@ public final class ServerMetrics {
      * MUST NOT 混名混义；订阅者 MUST NOT 计入 {@link #WAITERS}。
      */
     public static final String TOPIC_SUBSCRIBERS_MAX = "openlatch.server.topic.subscribers.max";
+    /**
+     * v9：条件 signal 家族操作计数（按操作/应答状态码维度），counter——
+     * await 不在本线（其生命周期落 {@link #ACQUIRE_TOTAL} 既有线，折叠边界的
+     * 计数面证据，防"条件自成一线"口径漂移）；{@code NOT_HELD} 权限拒绝线
+     * 单列可观测；status 可达面不含 {@code QUEUED}/{@code DENIED}/
+     * {@code OVERLOADED}（signal 家族恒即时回执，await 的等待满拒绝产生于
+     * 折叠侧、归 acquire 线）。
+     */
+    public static final String CONDITION_TOTAL = "openlatch.server.condition.total";
+    /**
+     * v9：锁 key 条件等待集人数最大值（抓取时刻采样），gauge——条件等待口径，
+     * 与 {@link #QUEUE_DEPTH_MAX}（等待队深）、{@link #ELEMENTS_DEPTH_MAX}
+     * （元素驻留）、{@link #TOPIC_SUBSCRIBERS_MAX}（订阅）并列为四条互不相干
+     * 的量纲线（"depth/elements/subscribers/conditions"四口径，注释互引），
+     * MUST NOT 混名混义；条件等待者 MUST 计入 {@link #WAITERS}
+     * （对照该线"订阅者不计入"的既有分轨——等待与订阅之别）。
+     */
+    public static final String CONDITION_WAITERS_MAX = "openlatch.server.condition.waiters.max";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -360,6 +378,32 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记录一次已受理（形状合法）的条件 signal 家族操作应答：计数线
+     * {@code condition_total{op,status}}。三操作恒立即回执（无 {@code QUEUED}
+     * 线）；{@code NOT_HELD} 权限拒绝单列可观测；LEAVE 幂等重放回执照常计
+     * {@code OK}。await 不经本线（折叠形态计数落 {@code acquire_total}，
+     * 判例 {@link #CONDITION_TOTAL} 常量注）。调用点在单机
+     * {@code RequestDispatcher.dispatchConditionOp} 与集群
+     * {@code ClusterRequestHandler.handleConditionOp}——两形态同一收口口径；
+     * 单机侧计数含搬运效果（搬运后授予归 acquire 线）。
+     *
+     * @param op     协议操作枚举（词表 signal/signal_all/leave）
+     * @param status 应答协议状态码
+     */
+    public void recordCondition(io.github.lamspace.openlatch.protocol.ConditionOp op,
+                                StatusCode status) {
+        Counter.builder(CONDITION_TOTAL)
+                .tag("op", switch (op) {
+                    case CONDITION_OP_SIGNAL -> "signal";
+                    case CONDITION_OP_SIGNAL_ALL -> "signal_all";
+                    case CONDITION_OP_LEAVE -> "leave";
+                    default -> "unknown";
+                })
+                .tag("status", status.name())
+                .register(registry).increment();
+    }
+
+    /**
      * 记录服务端侧 drop-newest 丢弃（登记表监听器逐条回调）。
      *
      * @param n 本次丢弃条数（{@code >= 1}；0/负数为空操作）
@@ -406,6 +450,10 @@ public final class ServerMetrics {
                     io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
                     .register(registry);
         }
+        // v9：条件等待口径（单机=core 条目等待集读数；四口径互引见常量注。
+        // totalWaiters 口径已含条件等待者——本线为单键峰值口径）。
+        Gauge.builder(CONDITION_WAITERS_MAX, core, CoreEngine::maxConditionWaiters)
+                .register(registry);
         bindSessionsGauge(sessions);
     }
 
@@ -433,16 +481,23 @@ public final class ServerMetrics {
      * @param tracker    Leader 提示单源视图
      * @param topics     本节点 topic 登记表（Leader 任期内非空；{@code null}=
      *                   夹具无 topic 面，不注册 {@code subscribers.max} gauge）
+     * @param conditions 本节点条件等待登记表（Leader 任期内非空；{@code null}=
+     *                   夹具无条件面，不注册 {@code condition.waiters.max} gauge，
+     *                   且 {@code waiters} 合计不含条件等待者）
      */
     public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
                                   ServerSessionRegistry sessions, int nodeId,
                                   LeaderTracker tracker,
-                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions) {
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[0])
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[1])
                 .tag("type", TYPE_SEMAPHORE).register(registry);
-        Gauge.builder(WAITERS, waitQueue, WaitQueue::totalWaiters).register(registry);
+        // v9 口径：waiters 合计加条件等待者（Leader 本地登记表读数；对照
+        // 单机 stats().totalWaiters 天然含集，两形态同"等待总数含条件"语义）。
+        Gauge.builder(WAITERS, waitQueue, q -> q.totalWaiters()
+                + (conditions == null ? 0 : conditions.totalCount())).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
         Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
         if (topics != null) {
@@ -452,8 +507,32 @@ public final class ServerMetrics {
                     io.github.lamspace.openlatch.server.topic.TopicRegistry::maxSubscribersCurrent)
                     .register(registry);
         }
+        if (conditions != null) {
+            // v9：条件等待口径（Leader 本地登记表单键峰值；非 Leader 恒空表
+            // 如实零读，判例 topic_subscribers.max 任期口径句）。
+            Gauge.builder(CONDITION_WAITERS_MAX, conditions,
+                    io.github.lamspace.openlatch.server.condition.ConditionRegistry::maxCountCurrent)
+                    .register(registry);
+        }
         bindSessionsGauge(sessions);
         bindClusterIsLeader(nodeId, () -> tracker.snapshot().leaderNodeId() == nodeId);
+    }
+
+    /**
+     * 集群形态 gauge（v8 六参兼容形态：无条件面装配，等价 conditions=null）。
+     *
+     * @param shadow    复制状态影子表
+     * @param waitQueue 本节点等待队列
+     * @param sessions  本节点会话注册表
+     * @param nodeId    本节点 id
+     * @param tracker   Leader 提示单源视图
+     * @param topics    topic 登记表
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, topics, null);
     }
 
     /**

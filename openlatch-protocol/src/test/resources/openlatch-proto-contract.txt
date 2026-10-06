@@ -22,6 +22,7 @@ enum MessageType
   QUEUE_OP 18
   TOPIC_OP 19
   TOPIC_MESSAGE 20
+  CONDITION_OP 21
 enum LockType
   LOCK_TYPE_REENTRANT 0
   LOCK_TYPE_SIMPLE 1
@@ -69,6 +70,10 @@ enum TopicOp
   TOPIC_OP_SUBSCRIBE 0
   TOPIC_OP_UNSUBSCRIBE 1
   TOPIC_OP_PUBLISH 2
+enum ConditionOp
+  CONDITION_OP_SIGNAL 0
+  CONDITION_OP_SIGNAL_ALL 1
+  CONDITION_OP_LEAVE 2
 message Envelope
   protocol_version 1
   type 2
@@ -108,6 +113,8 @@ message Envelope
   topic_op_request 42
   topic_op_response 43
   topic_message 44
+  condition_op_request 45
+  condition_op_response 46
 message HelloRequest
   client_protocol_version 1
   client_name 2
@@ -127,6 +134,7 @@ message AcquireRequest
   wait_ms 5
   permits 6
   permits_total 7
+  condition 8
 message AcquireResponse
   status 1
   lease_token 2
@@ -216,6 +224,7 @@ message AdminKeyInfo
   queue_head_payload_size 15
   queue_head_payload_preview 16
   topic_subscribers 17
+  condition_waiters 18
 message AdminListKeysResponse
   status 1
   total_matched 2
@@ -242,6 +251,12 @@ message AdminTopicSubscriberInfo
   session_id 1
   subscription_id 2
   subscribed_at_ms 3
+message AdminConditionWaiterInfo
+  condition 1
+  session_id 2
+  request_id 3
+  thread_id 4
+  registered_at_ms 5
 message AdminKeyDetailResponse
   status 1
   family 2
@@ -273,6 +288,8 @@ message AdminKeyDetailResponse
   queue_head_payload_preview 28
   topic_subscribers 29
   topic_subscribers_info 30
+  condition_waiters 31
+  condition_waiters_info 32
 message AdminSessionInfo
   session_id 1
   node_id 2
@@ -360,3 +377,12 @@ message TopicMessage
   publisher_sid 4
   publish_ts_ms 5
   payload_bytes 6
+message ConditionOpRequest
+  key 1
+  op 2
+  condition 3
+  thread_id 4
+  await_request_id 5
+message ConditionOpResponse
+  status 1
+  op 2

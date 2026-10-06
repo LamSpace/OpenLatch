@@ -132,4 +132,28 @@ public interface OLock {
      *         抛出）；恰为 -1 毫秒时转为排队式、受等待总超时兜底
      */
     CompletableFuture<Boolean> tryLockAsync(long waitTime, TimeUnit unit);
+
+    /**
+     * 在本锁上创建命名条件句柄（{@link OCondition}，协议 v9）。
+     *
+     * <p><b>命名寻址</b>：条件身份为 (锁键, name)——同 name 重复调用返回
+     * 绑定服务端同一等待集的等价句柄（跨进程可寻址，见 {@link OCondition}
+     * 接口级契约）。支持面：仅互斥形态（REENTRANT/FAIR/SIMPLE）的锁句柄
+     * 可创建条件；{@code OReadWriteLock} 所得读/写锁句柄调用本方法抛
+     * {@link UnsupportedOperationException}（本地裁决，不产生任何请求）。
+     *
+     * <p>默认实现抛 {@link UnsupportedOperationException}——接口对既有
+     * 实现方纯增量；远程互斥锁实现覆写本方法返回可用条件句柄。
+     *
+     * @param name 条件名（非空，UTF-8 字节数受服务端 maxKeyLength 钳制）
+     * @return 条件句柄（无状态、无需关闭）
+     * @throws NullPointerException             name 为 {@code null}
+     * @throws IllegalArgumentException         name 为空串
+     * @throws UnsupportedOperationException 本锁形态不支持条件（读/写锁
+     *         句柄与非远程实现；v1 支持面仅 REENTRANT/FAIR/SIMPLE）
+     */
+    default OCondition newCondition(String name) {
+        throw new UnsupportedOperationException(
+                "conditions are not supported on this lock implementation");
+    }
 }

@@ -33,6 +33,8 @@ import io.github.lamspace.openlatch.client.OAtomicReference;
 import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OBlockingQueue;
 import io.github.lamspace.openlatch.client.ODelayQueue;
+import io.github.lamspace.openlatch.client.OCondition;
+import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OTopic;
 import io.github.lamspace.openlatch.client.OTopicSubscription;
 import io.github.lamspace.openlatch.client.OLock;
@@ -150,6 +152,9 @@ public final class BenchmarkMain {
             // topic 相（v8）热身：发布受理 RTT（零订阅）与 1×8 扇出交付。
             runTopicPublish(client, WARMUP_MS / 2);
             runTopicFanout(client, server.port(), TOPIC_FANOUT_SUBSCRIBERS, WARMUP_MS / 2);
+            // 条件相（v9）热身：signal 受理 RTT（空集）与 await/signal 乒乓交接。
+            runConditionSignal(client, WARMUP_MS / 2);
+            runConditionHandoff(client, server.port(), WARMUP_MS / 2);
             List<long[]> queueHandoffThroughput = new ArrayList<>();
             List<double[]> queueHandoffLatencies = new ArrayList<>();
             List<long[]> queueFanoutThroughput = new ArrayList<>();
@@ -161,6 +166,10 @@ public final class BenchmarkMain {
             List<double[]> topicPublishLatencies = new ArrayList<>();
             List<long[]> topicFanoutThroughput = new ArrayList<>();
             List<double[]> topicFanoutLatencies = new ArrayList<>();
+            List<long[]> conditionSignalThroughput = new ArrayList<>();
+            List<double[]> conditionSignalLatencies = new ArrayList<>();
+            List<long[]> conditionHandoffThroughput = new ArrayList<>();
+            List<double[]> conditionHandoffLatencies = new ArrayList<>();
             List<long[]> refSmallThroughput = new ArrayList<>();
             List<double[]> refSmallLatencies = new ArrayList<>();
             List<long[]> refBigThroughput = new ArrayList<>();
@@ -254,6 +263,12 @@ public final class BenchmarkMain {
                         TOPIC_FANOUT_SUBSCRIBERS, SAMPLE_MS);
                 topicFanoutThroughput.add(new long[] {tf.opsPerSec});
                 topicFanoutLatencies.add(tf.latencies);
+                Result cs = runConditionSignal(client, SAMPLE_MS);
+                conditionSignalThroughput.add(new long[] {cs.opsPerSec});
+                conditionSignalLatencies.add(cs.latencies);
+                Result ch = runConditionHandoff(client, server.port(), SAMPLE_MS);
+                conditionHandoffThroughput.add(new long[] {ch.opsPerSec});
+                conditionHandoffLatencies.add(ch.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
@@ -266,6 +281,9 @@ public final class BenchmarkMain {
                     queueDrainLatencies, queueDelayOvershoot);
             report = report + renderTopicSection(topicPublishThroughput, topicPublishLatencies,
                     topicFanoutThroughput, topicFanoutLatencies);
+            report = report + renderConditionSection(conditionSignalThroughput,
+                    conditionSignalLatencies, conditionHandoffThroughput,
+                    conditionHandoffLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -1007,6 +1025,155 @@ public final class BenchmarkMain {
                 .append(medianOps(fanoutThroughput))
                 .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.5)))
                 .append(" | ").append(fmt(medianQuantile(fanoutLatencies, 0.99))).append(" |\n");
+        return sb.toString();
+    }
+
+    /**
+     * signal 受理相（v9）：持有者对空集条件的 signal hot loop——纯 Leader 本地
+     * 无操作裁决的 CONDITION_OP 往返 RTT 基线（零搬运、零日志贡献的入口面）。
+     *
+     * @param client 客户端（单连接持锁）
+     * @param millis 采样时长
+     * @return 结果（ops=signal 次数，延迟为单帧 RTT）
+     * @throws InterruptedException 采样被打断
+     */
+    private static Result runConditionSignal(OpenLatchClient client, long millis)
+            throws InterruptedException {
+        OLock lock = client.newReentrantLock("bench:cond:signal");
+        OCondition cond = lock.newCondition("tick");
+        lock.lock();
+        try {
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                long start = System.nanoTime();
+                cond.signal();
+                reservoir.record(System.nanoTime() - start);
+                ops.incrementAndGet();
+            }
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * await/signal 乒乓交接相（v9）：主连接（生产侧）与独立连接（消费侧）经
+     * 同 key 同条件 {@code "turn"} 交替持锁交接——每轮测"signal 发出→对侧从
+     * await 携锁返回"的唤醒全链路时延（折叠登记、搬运、释放接力通知、原 id
+     * 重发授予四段合计），吞吐为完成轮数。守卫循环用带预算 await 形态
+     * （guard loop 标准惯用法即用户面真实路径）。
+     *
+     * @param client 生产侧客户端
+     * @param port   服务端端口（消费侧另建连接）
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 建连/采样被打断
+     * @throws java.util.concurrent.ExecutionException 消费端建连失败
+     * @throws java.util.concurrent.TimeoutException 消费端建连超时
+     */
+    private static Result runConditionHandoff(OpenLatchClient client, int port, long millis)
+            throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        OLock pLock = client.newReentrantLock("bench:cond:ping");
+        OCondition pCond = pLock.newCondition("turn");
+        OpenLatchClient subClient = OpenLatchClient.builder()
+                .address("127.0.0.1:" + port)
+                .defaultWaitTimeout(Duration.ofSeconds(60))
+                .build();
+        subClient.connectAsync().get(10, TimeUnit.SECONDS);
+        try {
+            OLock cLock = subClient.newReentrantLock("bench:cond:ping");
+            OCondition cCond = cLock.newCondition("turn");
+            java.util.concurrent.atomic.AtomicInteger state =
+                    new java.util.concurrent.atomic.AtomicInteger();   // 0=生产轮 1=消费轮
+            java.util.concurrent.atomic.AtomicBoolean ended =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicLong signalTs =
+                    new java.util.concurrent.atomic.AtomicLong();
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            Thread consumer = new Thread(() -> {
+                try {
+                    while (!ended.get()) {
+                        cLock.lock();
+                        try {
+                            while (state.get() != 1 && !ended.get()) {
+                                cCond.await(1, TimeUnit.SECONDS);
+                            }
+                            if (ended.get()) {
+                                return;
+                            }
+                            reservoir.record(System.nanoTime() - signalTs.get());
+                            state.set(0);
+                            cCond.signal();
+                        } finally {
+                            cLock.unlock();
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "bench-cond-consumer");
+            consumer.setDaemon(true);
+            consumer.start();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                pLock.lock();
+                try {
+                    while (state.get() != 0) {
+                        pCond.await(1, TimeUnit.SECONDS);
+                    }
+                    state.set(1);
+                    signalTs.set(System.nanoTime());
+                    pCond.signal();
+                } finally {
+                    pLock.unlock();
+                }
+                ops.incrementAndGet();
+            }
+            // 收工唤醒：终结哨兵经消费侧守卫循环的 ended 分支生效，不留悬挂等待。
+            ended.set(true);
+            cLock.lock();
+            try {
+                state.set(1);
+                cCond.signal();
+            } finally {
+                cLock.unlock();
+            }
+            consumer.join(10_000);
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            subClient.shutdown();
+        }
+    }
+
+    /**
+     * 渲染条件相小节（v9），追加至统一基线报告。
+     *
+     * @param signalThroughput  signal 受理吞吐批
+     * @param signalLatencies   signal 受理 RTT 批
+     * @param handoffThroughput 乒乓交接吞吐批
+     * @param handoffLatencies  唤醒全链路时延批
+     * @return Markdown 小节
+     */
+    private static String renderConditionSection(List<long[]> signalThroughput,
+            List<double[]> signalLatencies, List<long[]> handoffThroughput,
+            List<double[]> handoffLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## 条件相（v9）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| signal 受理（空集 RTT 基线） | ").append(medianOps(signalThroughput))
+                .append(" | ").append(fmt(medianQuantile(signalLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(signalLatencies, 0.99))).append(" |\n");
+        sb.append("| await/signal 乒乓交接（唤醒全链路） | ")
+                .append(medianOps(handoffThroughput))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(handoffLatencies, 0.99))).append(" |\n");
         return sb.toString();
     }
 

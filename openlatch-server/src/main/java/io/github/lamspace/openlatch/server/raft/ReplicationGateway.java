@@ -52,7 +52,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p><b>Leader 侧应用副效应</b>（仅当本节点为当值 Leader）：
  * 授予出队、"需排队"竞态的排队登记与 QUEUED 改写、按
  * {@code freed_keys} 推进等待队首并推送 {@code AWAIT_NOTIFY}、会话关闭
- * 摘除。Follower 应用同一批条目但跳过全部副效应——等待队列非复制状态，
+ * 摘除（含 v9 条件登记与 topic 订阅）、授予应用点按 (会话,线程) 收口
+ * 陈旧条件登记（v9）。Follower 应用同一批条目但跳过全部副效应——等待队列非复制状态，
  * 副本一致性只由影子表/引擎的迁移维持。
  *
  * <p><b>Leadership 边界</b>：{@link #onLeaderChanged} 失去 Leadership 时把
@@ -134,6 +135,25 @@ public final class ReplicationGateway implements ApplyObserver {
      */
     public void setTopicRegistry(io.github.lamspace.openlatch.server.topic.TopicRegistry registry) {
         this.topicRegistry = registry;
+    }
+
+    /** v9 条件等待登记表（会话摘除、换主清零与授予侧收口钩子；可为未挂载）。 */
+    private volatile io.github.lamspace.openlatch.server.condition.ConditionRegistry
+            conditionRegistry;
+
+    /**
+     * 回挂条件等待登记表（v9，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
+     * 应用点摘除该会话的全部条件登记（死亡不吞锁——持有/租约/队列零触碰），
+     * 在当选事件清零登记表（等待集随换主清零、客户端 ACQUIRE 车道迁移重挂
+     * 补登记，判例 {@code WaitQueue}/{@code TopicRegistry}），并在
+     * {@code LOCK_ACQUIRE_ENTRY} 授予应用点按 (会话,线程) 收口陈旧登记
+     * （await 终结的授予侧摘除）。
+     *
+     * @param registry 登记表，可为 {@code null}（摘挂）
+     */
+    public void setConditionRegistry(
+            io.github.lamspace.openlatch.server.condition.ConditionRegistry registry) {
+        this.conditionRegistry = registry;
     }
 
     /** v7 队列就绪驱动（当选首扫钩子；可为未挂载）。 */
@@ -230,7 +250,8 @@ public final class ReplicationGateway implements ApplyObserver {
 
     /**
      * Leadership 变更（状态机事件线程）。失去：未决 future 全部可重试完成；
-     * 当选：清空上一任期等待队列并启动到期驱动首扫。
+     * 当选：清空上一任期等待队列、topic 登记表与条件等待登记表（进程本地态
+     * 不跨任期存续，等待项经客户端车道迁移重挂补登记）并启动到期驱动首扫。
      *
      * @param isLeader 本节点当前是否 Leader
      */
@@ -257,6 +278,14 @@ public final class ReplicationGateway implements ApplyObserver {
                 // v8：订阅登记随换主清零——客户端 home 迁移后自动重订阅
                 // （判例挂起者清零重挂；登记表无复制来源，新任期从零开始）。
                 tr.clear();
+            }
+            io.github.lamspace.openlatch.server.condition.ConditionRegistry cr =
+                    conditionRegistry;
+            if (cr != null) {
+                // v9：条件等待集随换主清零——进程本地态无快照/日志来源，
+                // 等待项经客户端 ACQUIRE 车道迁移重挂以重发折叠 ACQUIRE
+                // 补登记（幂等接纳；判例 WaitQueue/TopicRegistry 换主清零）。
+                cr.clear();
             }
             LeaseExpiryDriver driver = expiryDriver;
             if (driver != null) {
@@ -296,6 +325,20 @@ public final class ReplicationGateway implements ApplyObserver {
                         var p = entry.getCommandPayload().toByteArray();
                         var ap = io.github.lamspace.openlatch.protocol.raft.AcquirePayload.parseFrom(p);
                         waitQueue.onGranted(ap.getSessionId(), ap.getRequestId());
+                        if (!ap.getRequest().hasCondition()) {
+                            // v9 授予侧收口：普通/唤醒后重发（condition 已清除）的
+                            // 授予按 (会话,线程) 归属摘除该等待者可能残留的陈旧条件
+                            // 登记（同一线程不可能既持锁又条件等待，判例
+                            // LockEntry 授予侧 purge）。折叠 ACQUIRE 自身的 OK 是
+                            // "释放半程守卫通过"而非授予——其登记刚在受理预检点
+                            // 生效，MUST NOT 被本臂误摘（"登记先于释放可见"不变式）。
+                            io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                    cr = conditionRegistry;
+                            if (cr != null) {
+                                cr.purgeOwner(ap.getSessionId(),
+                                        ap.getRequest().getThreadId());
+                            }
+                        }
                     } catch (InvalidProtocolBufferException e) {
                         log.warn("acquire payload unparsable in side effects (seq={})", entry.getSeq());
                     }
@@ -461,6 +504,14 @@ public final class ReplicationGateway implements ApplyObserver {
                     // v8：死亡即退订——摘除该会话全部订阅登记、缓冲与去重槽
                     //（防泄漏三路回收之一；失联探针补发的 SESSION_CLOSE 同径）。
                     tr.removeSession(sp.getSessionId());
+                }
+                io.github.lamspace.openlatch.server.condition.ConditionRegistry cr =
+                        conditionRegistry;
+                if (cr != null) {
+                    // v9：死亡不吞锁——摘除该会话全部条件登记（三路回收之
+                    // SESSION_CLOSE 双路同径：本节点断连传播与失联探针补发）；
+                    // 锁持有/租约/等待队列由条目侧既有簿记各自收口。
+                    cr.removeSession(sp.getSessionId());
                 }
                 // 离场即破障经会话关闭传播：被破世代的存活等待者收放行通知。
                 for (String bkey : result.getBarrierReleasedKeysList()) {

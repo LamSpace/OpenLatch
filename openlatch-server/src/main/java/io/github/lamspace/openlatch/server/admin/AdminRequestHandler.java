@@ -79,7 +79,13 @@ import java.util.function.LongSupplier;
  * 集群读本节点 {@link ShadowTable#adminEntries()} 管理投影（应用点整体
  * 重发布的弱一致镜像、逻辑会话 id 口径）+ {@code WaitQueue} 明细
  * （等待队列非复制状态、Leader 权威——follower 应答等待区恒空并置
- * {@code wait_queue_leader_only}）。{@code ADMIN_LIST_SESSIONS} 两形态
+ * {@code wait_queue_leader_only}）。v9 条件等待读数两形态分源：单机读
+ * core 条目内条件等待集（{@code conditionWaiterCount}/{@code conditionWaiters}，
+ * 集内等待者使条目存活故行可见、持有读数如实无持有者）；集群读 Leader 本地
+ * {@code ConditionRegistry}（计数与明细仅 Leader 呈现，follower 恒零/空并随
+ * {@code wait_queue_leader_only} 同源标注——等待集不入复制态，如实零读），
+ * 且条件字段只挂 {@code family=lock} 行/详情（非 LOCK 键恒缺省零值/空列表，
+ * 条件骑 LOCK 家族）。{@code ADMIN_LIST_SESSIONS} 两形态
  * 均只覆盖受理节点自身接入的会话（{@link ServerSessionRegistry}），
  * 跨节点全景由控制台多节点聚合。
  *
@@ -186,6 +192,27 @@ public final class AdminRequestHandler {
                     .setSubscribedAtMs(sv.subscribedAtMs()).build());
         }
         return out;
+    }
+
+    /**
+     * v9 条件等待明细五字段装配（{@code {condition, session_id, request_id,
+     * thread_id, registered_at_ms}}）：单机条目视图与集群 Leader 登记表视图
+     * 两数据源共用同一构装口径——条件维无内容面可外发，条件名即寻址文本，
+     * 明细仅结构五字段（观察面防放大纪律的条件延伸）。
+     *
+     * @param condition       条件名（命名寻址）
+     * @param sessionId       逻辑会话 id
+     * @param requestId       折叠 ACQUIRE 的请求 id
+     * @param threadId        归属线程 id
+     * @param registeredAtMs  登记时刻（epoch 毫秒，受理节点应用时钟）
+     * @return 明细应答项
+     */
+    private static io.github.lamspace.openlatch.protocol.AdminConditionWaiterInfo
+            conditionWaiterInfo(String condition, long sessionId, long requestId,
+                                long threadId, long registeredAtMs) {
+        return io.github.lamspace.openlatch.protocol.AdminConditionWaiterInfo.newBuilder()
+                .setCondition(condition).setSessionId(sessionId).setRequestId(requestId)
+                .setThreadId(threadId).setRegisteredAtMs(registeredAtMs).build();
     }
 
     /**
@@ -297,7 +324,11 @@ public final class AdminRequestHandler {
 
     /**
      * 装配摘要应答：聚合读数单机取 {@code stats()} + 屏障/原子条目计数、
-     * 集群取影子表投影计数；角色/会话数按节点视角如实呈现。
+     * 集群取影子表投影计数；角色/会话数按节点视角如实呈现。等待者总数
+     * v9 口径含条件等待者——单机 {@code stats().totalWaiters()} 天然计入
+     * 条目条件集；集群 Leader 取等待队列合计 + {@code ConditionRegistry}
+     * 在册人数加数（Follower 无队列与集合来源，恒 0 如实，判例 topic 订阅
+     * 者不计入的相反口径：条件等待者是等待者）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -360,7 +391,12 @@ public final class AdminRequestHandler {
                     // v8：订阅登记键数仅 Leader 视角呈现（降级残留随下次当选
                     // 一并清零，非 Leader 恒 0——判例等待队列 Leader 门控）。
                     .setTopicEntries(leaderNow() ? cluster.topicRegistry().topicKeyCount() : 0)
-                    .setTotalWaiters(leaderNow() ? cluster.waitQueue().totalWaiters() : 0)
+                    // v9 等待者总数口径：等待队列合计 + 条件等待集在册人数
+                    //（Leader 本地登记表读数；Follower 两源皆无、恒 0 如实；
+                    // 单机侧 stats().totalWaiters() 已含条件集，两形态同口径）。
+                    .setTotalWaiters(leaderNow()
+                            ? cluster.waitQueue().totalWaiters()
+                                    + cluster.conditionRegistry().totalCount() : 0)
                     .setNodeRole(currentRole());
         }
         return envelope(msg, MessageType.ADMIN_SUMMARY, x -> x.setAdminSummaryResponse(b));
@@ -399,6 +435,9 @@ public final class AdminRequestHandler {
      * 装配 key 列表应答：全量视图 → 前缀过滤 → 字典序 → 切片。弱一致
      * 快照语义：并发增删 MAY 使相邻页漂移，同应答内自洽。参数越界
      * （page&lt;0、page_size∉[1,{@value #MAX_PAGE_SIZE}]）消息级拒绝。
+     * LOCK 行另列 {@code condition_waiters}（v9：单机读条目条件集、集群
+     * Leader 读本地登记表、Follower 恒 0 如实；已搬运入队项归
+     * {@code waiterCount} 口径不重复计数；非 LOCK 行恒缺省零值）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -418,6 +457,11 @@ public final class AdminRequestHandler {
                             .setHolders(k.holders().size())
                             .setRemainingLeaseMs(k.remainingLeaseMs())
                             .setWaiterCount(k.waiters().size());
+                    if (k.family() == KeyFamily.LOCK) {
+                        // v9：LOCK 行条件等待数读条目条件集（未搬运项口径；
+                        // 已搬运入队项归 waiterCount 等待队列口径，不重复计）。
+                        row.setConditionWaiters(standaloneCore.conditionWaiterCount(k.key()));
+                    }
                     if (k.family() == KeyFamily.ATOMIC) {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
                         row.setAtomicKind(atomicKindNameOfCore(k.atomicKind()))
@@ -457,12 +501,20 @@ public final class AdminRequestHandler {
                     continue;
                 }
                 ShadowTable.AdminEntryView v = en.getValue();
+                String family = familyNameOfLockType(v.lockType());
                 AdminKeyInfo.Builder row = AdminKeyInfo.newBuilder()
-                        .setKey(en.getKey()).setFamily(familyNameOfLockType(v.lockType()))
+                        .setKey(en.getKey()).setFamily(family)
                         .setHolders(v.holders().size())
                         .setRemainingLeaseMs(v.leaseToken() != 0
                                 ? Math.max(0, v.expiresAtMs() - now) : 0)
                         .setWaiterCount(leader ? cluster.waitQueue().waitCount(en.getKey()) : 0);
+                if ("lock".equals(family)) {
+                    // v9：LOCK 行另列条件等待数——Leader 读本地登记表合计，
+                    // Follower 无集合来源恒 0 如实（等待集不入复制态；已搬运
+                    // 入队项归 waiterCount 口径、不在本列重复计数）。
+                    row.setConditionWaiters(
+                            leader ? cluster.conditionRegistry().count(en.getKey()) : 0);
+                }
                 if (ShadowTable.isAtomicType(v.lockType())) {
                     row.setAtomicKind(atomicKindNameOf(v.lockType()))
                             .setAtomicValue(v.atomicValue());
@@ -534,7 +586,13 @@ public final class AdminRequestHandler {
     /**
      * 装配单 key 明细应答：未命中回 {@code NOT_HELD} 形态的完整明细响应
      * （MUST NOT 空壳成功）；等待队列 Leader 权威、follower 置
-     * {@code wait_queue_leader_only}。
+     * {@code wait_queue_leader_only}。v9 条件等待明细与等待队列区段并列：
+     * 单机读条目条件集（集内等待者使条目存活，故 LOCK 行在"持有已随 await
+     * 释放"形态下仍可见、持有读数如实无持有者）；集群读 Leader 本地登记表、
+     * follower 计数与明细恒零/空并随同一 {@code wait_queue_leader_only}
+     * 标注（等待集不入复制态——如实零读）；非 LOCK 家族键两字段恒缺省
+     * 零值/空列表；搬运入队项只在等待队列区段计位次、不在条件区段重复。
+     * 观察 MUST NOT 推进登记、搬运、通知或清扫时序（只读快照）。
      *
      * @param msg 请求信封
      * @return 应答信封
@@ -607,6 +665,18 @@ public final class AdminRequestHandler {
                             // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
                             .setQueueTrack(w.track()).build());
             }
+            if (snap.family() == KeyFamily.LOCK) {
+                // v9：LOCK 键条件等待明细（条目锁内只读快照，集建立序→
+                // 集内到达序；与等待队列区段并列——已搬运入队项只在上方
+                // waiters 区段呈现，两区互斥计数不重复；非 LOCK 键恒零/空）。
+                for (io.github.lamspace.openlatch.core.lock.LockEntry.ConditionWaiterView cw
+                        : standaloneCore.conditionWaiters(req.getKey())) {
+                    b.addConditionWaitersInfo(conditionWaiterInfo(cw.condition(),
+                            cw.sessionId(), cw.requestId(), cw.threadId(),
+                            cw.registeredAtMs()));
+                }
+                b.setConditionWaiters(standaloneCore.conditionWaiterCount(req.getKey()));
+            }
         } else {
             ShadowTable.AdminEntryView v = cluster.core().shadow().adminEntry(req.getKey());
             if (v == null) {
@@ -670,6 +740,21 @@ public final class AdminRequestHandler {
                             .setWaitedMs(w.waitedMs()).setNotified(w.notified())
                             // v7：队列轨道判别（1=等容量/2=等元素；非队列 0）。
                             .setQueueTrack(w.track()).build());
+                }
+                if ("lock".equals(familyNameOfLockType(v.lockType()))) {
+                    // v9：LOCK 键条件等待明细——Leader 本地登记表视图
+                    //（key 建立序→集内到达序）；与等待队列区段并列、
+                    // 搬运入队项不重复计数。非 Leader 分支不填两字段
+                    //（proto 缺省零值/空列表即如实零读，随上方
+                    // wait_queue_leader_only 同源标注）。
+                    io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                            registry = cluster.conditionRegistry();
+                    b.setConditionWaiters(registry.count(req.getKey()));
+                    for (var cv : registry.views(req.getKey())) {
+                        b.addConditionWaitersInfo(conditionWaiterInfo(cv.condition(),
+                                cv.sessionId(), cv.requestId(), cv.threadId(),
+                                cv.registeredAtMs()));
+                    }
                 }
             }
         }

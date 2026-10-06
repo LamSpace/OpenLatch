@@ -316,6 +316,102 @@ Semantic boundaries (details in [01 Concepts §10](01-concepts.md)):
    family is ingress-rejected (`INVALID_REQUEST`, best-effort, no race
    guarantee) — "one key, one form" is an application contract for topics.
 
+## Condition variables (`OCondition`, v9)
+
+The wait/notify channel paired with an `OLock`, the counterpart of JDK
+`Condition`. Condition identity is (lock key, condition name): handles are
+stateless, need no closing, and same-name handles from different processes
+bind the same server-side wait set. The standard idiom (the guard loop is the
+caller's obligation):
+
+```java
+OLock lock = client.newReentrantLock("job:dispatch");
+OCondition ready = lock.newCondition("ready");          // named addressing, re-creatable
+
+lock.lock();
+try {
+    while (!hasWork()) {        // always wrap await in a predicate check — spurious wake-ups are allowed
+        ready.await();          // parks with a full release; returns holding the lock, 1 reentrancy level
+    }
+    takeWork();
+} finally {
+    lock.unlock();
+}
+
+lock.lock();                    // producer: signal requires holding this lock
+try {
+    enqueueWork();
+    ready.signal();             // wakes the head waiter (signalAll carries everyone)
+} finally {
+    lock.unlock();
+}
+```
+
+Semantic boundaries (details in [01 Concepts §11](01-concepts.md)):
+
+1. **The guard loop is the caller's obligation**: spurious wake-ups are
+   allowed and never promised away (the JDK contract) — wake sources include
+   head-timeout sweep promotions, predicates whose signal was lost in a
+   leader-change re-registration window, and LEAVE/SIGNAL race convergence.
+   A return is not proof the predicate holds; a bare `await()` is a defect;
+2. **Returns holding the lock, and the 1-level reentrancy arithmetic**:
+   `await()`/`await(timeout, unit)` — woken, timed out or interrupted alike —
+   return (or throw) only after re-acquiring the lock: a `false` from
+   `await(timeout, unit)` still means you hold it (safely re-check the
+   predicate), and interruption throws `InterruptedException` only after the
+   lock is re-held (JDK fidelity). The N reentrancy levels held before the
+   await are zeroed in one step; on return the count starts at 1 — write the
+   unlocking for "holds 1 level", and the extra N-1 `unlock()` calls would
+   throw `IllegalMonitorStateException`. When timeout and wake-up settle
+   simultaneously the return value reports whichever settled first
+   (best-effort — the predicate, not the boolean, is the truth);
+3. **Two-layer permission exceptions**: calling `signal`/`signalAll` from a
+   thread that does not hold the lock throws `IllegalMonitorStateException`
+   from two sources with one shape — the local pre-check (not held: zero
+   requests sent) and the authoritative server re-check (ownership already
+   lost, e.g. signaling after lock loss; line code `NOT_HELD`). **await
+   permission is checked locally only**: the server never verifies that an
+   await registrant holds the lock (required for re-registration across
+   leader changes); ghosts from misuse are bounded by the merged guardrail
+   and reclaimed on three paths (session death / LEAVE / leader change) —
+   an explicit downgrade surface. Signaling an empty set, an unknown name or
+   a missing key is a no-op returning normally (JDK-aligned);
+4. **Cost model**: a folded await's full cycle costs at least 2 network
+   round-trips (park acceptance + post-wake resend; a resend not granted
+   immediately keeps rotating the wait–notify–resend loop, each rotation
+   adding one more). `signal`/`signalAll` are 1 round-trip with an immediate
+   reply. While parked, the server holds just one registration — no
+   dedicated connection resources;
+5. **Holder death never signals for you (sleep forever with nobody
+   signaling)**: lease-expiry/process-death sweeps wake the **wait-queue
+   entrants only**; condition waiters are untouched, and waiters themselves
+   hold no lease and have no renewal duty. **Production code should prefer
+   `await(timeout, unit)` as self-rescue** — an unbounded `await()` in a
+   topology where nobody signals simply sleeps forever;
+6. **Leader-change layering: waiting is a promise, signal is an event**:
+   waiters **re-register automatically** with the acquisition-lane migration
+   (same request id, idempotent, invisible to the application; wake-ups
+   arrive normally on the new Leader); signals emitted inside the
+   leader-change window are never replayed or compensated (a bounded
+   window). The same rule topics follow: the promise/registration side
+   survives via replay and re-registration, the event side (signals,
+   messages) is lost once lost;
+7. **Support surface and what is not provided**: only the REENTRANT/FAIR/
+   SIMPLE exclusive forms host conditions; calling `newCondition` on a lock
+   handle from `OReadWriteLock` throws `UnsupportedOperationException` (local
+   verdict, zero requests). **No `awaitNanos`/`awaitUntil`/
+   `awaitUninterruptibly`, and no async counterparts.** FAIR ordering:
+   carried waiters join the FIFO at carry time — being signaled does not
+   prioritize you over elders already queued;
+8. **Merged guardrail and version gate**: condition waiters and the wait
+   queue share `max-queue-depth-per-key` under one "waiters on this key"
+   count — **v9 adds zero configuration keys**; over the limit an await
+   fails with `OVERLOADED` (the thread then does NOT hold the lock —
+   lock-lost/retry conventions apply). Requires a **v9 handshake** (upgrade
+   servers first, then clients): v≤8 sessions sending `CONDITION_OP` or an
+   ACQUIRE carrying the `condition` field get an `INVALID_REQUEST`
+   message-level rejection without disconnect.
+
 ## Async usage
 
 ```java
