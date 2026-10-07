@@ -607,6 +607,9 @@ public final class ShadowTable {
      * 到期清扫（LEASE_EXPIRE_ENTRY 应用点）：移除全部到期时刻不晚于
      * {@code entryTimeMs} 的条目——与引擎 {@code expireDue()} 在条目时刻下的
      * 释放集合一致（两侧的状态迁移事件流相同），无需逐条目 token 判定。
+     * 无租约家族（{@link #isLeaselessFamilyType}）跳过判定——其到期字段恒 0
+     * 非"已到期"信号，MUST NOT 被误摘为幻影键进入释放集（管理面存续与
+     * 到期释放计数两面的守卫点）。
      *
      * @param entryTimeMs 条目携带时刻（"以该时刻为现在"求到期集）
      * @return 被移除的 key 列表（插入序；供 Leader 侧唤醒队首消费）
@@ -614,14 +617,12 @@ public final class ShadowTable {
     public List<String> expireUpTo(long entryTimeMs) {
         List<String> freed = new ArrayList<>();
         for (Map.Entry<String, SLock> en : locks.entrySet()) {
-            if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
-                    || en.getValue().lockType == LockType.LOCK_TYPE_BARRIER_VALUE
-                    || isQueueType(en.getValue().lockType)
-                    || isTimerType(en.getValue().lockType)
-                    || isAtomicFamily(en.getValue().lockType)) {
-                // 无租约家族（Latch/ATOMIC/BARRIER/QUEUE）到期时刻恒 0——非"已到期"
-                // 信号，永不由到期清扫回收（一次性护栏、常驻值、循环屏障世代存续与
-                // 队列元素驻留语义各自承载；判例：原子变更对影子表无租约家族到期误扫的修复）。
+            if (isLeaselessFamilyType(en.getValue().lockType)) {
+                // 无租约家族（LATCH/ATOMIC/BARRIER/QUEUE/PHASER/TIMER）到期时刻
+                // 恒 0——非"已到期"信号，永不由到期清扫回收（一次性护栏、常驻值、
+                // 循环屏障世代存续、队列元素驻留、phaser 相位账簿存续与 timer
+                // 账簿常驻语义各自承载；判例：原子变更对影子表无租约家族到期
+                // 误扫的修复）。
                 continue;
             }
             if (en.getValue().expiresAtMs <= entryTimeMs) {
@@ -634,6 +635,26 @@ public final class ShadowTable {
             adminView.remove(key);
         }
         return freed;
+    }
+
+    /**
+     * 协议 {@code LockType} 数值是否无租约（常驻）家族形态——到期清扫跳过
+     * 清单的单一判定点。判据来源：经获取路径入租约到期堆的形态为租约形态
+     * （REENTRANT/SIMPLE/READ/WRITE/FAIR/SEMAPHORE，数值 0–5），其余形态
+     * 不携租约、影子镜像条目到期字段恒 0。新增家族入册时 MUST 同步在此
+     * 判类，否则 LockType 全值矩阵绊线测试直接红（终结"每家族补一行"
+     * 的复发面）。
+     *
+     * @param lockTypeValue 协议枚举数值
+     * @return 无租约家族为 {@code true}
+     */
+    static boolean isLeaselessFamilyType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_LATCH_VALUE
+                || lockTypeValue == LockType.LOCK_TYPE_BARRIER_VALUE
+                || isQueueType(lockTypeValue)
+                || isPhaserType(lockTypeValue)
+                || isTimerType(lockTypeValue)
+                || isAtomicFamily(lockTypeValue);
     }
 
     /**
