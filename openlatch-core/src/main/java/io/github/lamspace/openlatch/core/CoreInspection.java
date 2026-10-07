@@ -102,6 +102,17 @@ public record CoreInspection(
      *                       phaser 等待无位次/许可/线程语义，经
      *                       {@code PhaserEntry.waitersSnapshot()} 独立
      *                       视图导出，判例条件等待并列不并号）
+     * @param timerGeneration TIMER 装载代次（非该家族为 0；挂起等待明细
+     *                       同 phaser 口径经 {@code TimerEntry.waitersSnapshot()}
+     *                       独立视图导出，不入 {@code waiters} 区段）
+     * @param timerArmed     TIMER 装载态（非该家族恒 {@code false}；
+     *                       {@code false} 兼表"从未装载"与"DISARMED 代终结"
+     *                       两读不可由本位区分——代次 &gt; 0 时才是代终结，
+     *                       判例 phaser 无破相位的读数自洽纪律）
+     * @param timerFireAtMs  TIMER 绝对到期时刻（非该家族为 0；DISARM 后
+     *                       保持历史值。**呈现面不折算 marked**——到期
+     *                       判定仅在 Leader 应答线发生，本读数为复制态原始值，
+     *                       各节点等值、无时钟歧义）
      */
     public record KeySnapshot(
             String key,
@@ -136,7 +147,10 @@ public record CoreInspection(
             byte[] queueHeadPayload,
             long phaserPhase,
             int phaserRegistered,
-            int phaserArrived) {
+            int phaserArrived,
+            long timerGeneration,
+            boolean timerArmed,
+            long timerFireAtMs) {
     }
 
     /**

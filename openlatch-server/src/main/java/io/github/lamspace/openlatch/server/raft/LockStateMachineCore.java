@@ -288,6 +288,7 @@ public final class LockStateMachineCore {
                     case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
                     case QUEUE_OP_ENTRY -> applyQueueOp(entry);
                     case PHASER_OP_ENTRY -> applyPhaserOp(entry);
+                    case TIMER_OP_ENTRY -> applyTimerOp(entry);
                     case NOOP -> ok(0).build();
                     default -> error("unknown entry type " + entry.getType(), entry);
                 };
@@ -939,6 +940,111 @@ public final class LockStateMachineCore {
     }
 
     /**
+     * 延时触发变异条目应用（v11）：SCHEDULE/DISARM 经 {@code timerApply}
+     * （复制通道——horizon 不复核、等待不住条目、唤醒排空在网关侧据回执
+     * 标记完成，判例 {@code applyPhaserOp} 双拓扑）。绝对到期时刻由条目
+     * 携带时刻（{@code EntryClock}）加 delay 在应用点折算——回放与 live
+     * 同值、跨副本 digest 逐字节一致；**回执无 marked 位驻留语义**——
+     * marked 是 Leader 应答线按判定时刻的折算读数。
+     *
+     * @param entry 已提交条目
+     * @return 回执（timer 三元组回显）
+     * @throws com.google.protobuf.InvalidProtocolBufferException 载荷不可解析
+     */
+    private io.github.lamspace.openlatch.protocol.raft.ApplyResult applyTimerOp(
+            io.github.lamspace.openlatch.protocol.raft.RaftLogEntry entry)
+            throws com.google.protobuf.InvalidProtocolBufferException {
+        io.github.lamspace.openlatch.protocol.raft.TimerOpPayload p =
+                io.github.lamspace.openlatch.protocol.raft.TimerOpPayload
+                        .parseFrom(entry.getCommandPayload());
+        Long local = sidMap.get(p.getSessionId());
+        if (local == null) {
+            return io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                    .setStatus(io.github.lamspace.openlatch.protocol.raft.ApplyStatus
+                            .REJECT_SESSION).build();
+        }
+        var req = p.getRequest();
+        io.github.lamspace.openlatch.core.TimerOpType op = toCoreTimerOp(req.getOp());
+        if (op == null) {
+            return io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                    .setStatus(io.github.lamspace.openlatch.protocol.raft.ApplyStatus
+                            .INVALID_REQUEST).build();
+        }
+        var r = engine.timerApply(new io.github.lamspace.openlatch.core.command
+                .TimerOpCommand(local, p.getRequestId(), req.getKey(), op,
+                req.hasDelayMs() ? req.getDelayMs() : null, req.getAwaitRequestId()));
+        return switch (r.outcome()) {
+            case GRANTED -> {
+                mirrorTimer(req.getKey(), null);
+                yield io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                        .setStatus(io.github.lamspace.openlatch.protocol.raft.ApplyStatus.OK)
+                        .setTimerGeneration(r.generation())
+                        .setTimerArmed(r.armed())
+                        .setTimerFireAtMs(r.fireAtMs())
+                        .build();
+            }
+            case REJECT_SESSION -> io.github.lamspace.openlatch.protocol.raft.ApplyResult
+                    .newBuilder().setStatus(io.github.lamspace.openlatch.protocol.raft
+                            .ApplyStatus.REJECT_SESSION).build();
+            case REJECT_KEY_EMPTY, REJECT_KEY_TOO_LONG, REJECT_TYPE_MISMATCH,
+                    REJECT_TIMER_NO_ENTRY, REJECT_TIMER_DELAY_OVER ->
+                    io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                            .setStatus(io.github.lamspace.openlatch.protocol.raft
+                                    .ApplyStatus.INVALID_REQUEST).build();
+            default -> io.github.lamspace.openlatch.protocol.raft.ApplyResult.newBuilder()
+                    .setStatus(io.github.lamspace.openlatch.protocol.raft
+                            .ApplyStatus.INTERNAL_ERROR).build();
+        };
+    }
+
+    /**
+     * 镜像指定 key 的延时触发账簿（判例 {@code mirrorPhaser}——引擎
+     * {@code replicatedState} 导出经 {@code sidMap} 反向折算逻辑 id 后整体
+     * 重发布；去重槽按会话 id 升序即确定性导出序，digest 跨副本可比）。
+     *
+     * @param key         延时触发键
+     * @param toLogicalBy 预置折算表，可为 {@code null}（现场自 sidMap 构建）
+     */
+    private void mirrorTimer(String key, Map<Long, Long> toLogicalBy) {
+        var st = engine.timerReplicatedState(key);
+        if (st == null) {
+            return;
+        }
+        Map<Long, Long> toLogical = toLogicalBy != null ? toLogicalBy : new HashMap<>();
+        if (toLogicalBy == null) {
+            for (var en : sidMap.entrySet()) {
+                toLogical.put(en.getValue(), en.getKey());
+            }
+        }
+        var slots = st.slots().stream()
+                .map(sl -> new ShadowTable.TimerSlotRef(
+                        toLogical.getOrDefault(sl.sessionId(), sl.sessionId()),
+                        sl.requestId(), sl.scheduleOp(), sl.echoGeneration(),
+                        sl.echoFireAtMs()))
+                .toList();
+        shadow.timerMirror(key, new ShadowTable.TimerMirrorData(
+                st.generation(), st.armed(), st.fireAtMs(), slots));
+    }
+
+    /**
+     * 协议 timer 操作词 → core 判别（0–4）；界外回 {@code null}。
+     *
+     * @param wireOp 协议操作词
+     * @return core 操作判别或 {@code null}
+     */
+    public static io.github.lamspace.openlatch.core.TimerOpType toCoreTimerOp(
+            io.github.lamspace.openlatch.protocol.TimerOp wireOp) {
+        return switch (wireOp) {
+            case TIMER_OP_SCHEDULE -> io.github.lamspace.openlatch.core.TimerOpType.SCHEDULE;
+            case TIMER_OP_DISARM -> io.github.lamspace.openlatch.core.TimerOpType.DISARM;
+            case TIMER_OP_AWAIT -> io.github.lamspace.openlatch.core.TimerOpType.AWAIT;
+            case TIMER_OP_CANCEL -> io.github.lamspace.openlatch.core.TimerOpType.CANCEL;
+            case TIMER_OP_QUERY -> io.github.lamspace.openlatch.core.TimerOpType.QUERY;
+            default -> null;
+        };
+    }
+
+    /**
      * 协议队列形态数值 → core 枚举（12/13）；其余回 {@code null}。
      *
      * @param number 协议 {@code LockType} 数值
@@ -1400,10 +1506,31 @@ public final class LockStateMachineCore {
                             arrived, java.util.List.copyOf(keptParties), java.util.List.copyOf(cur),
                             prevPhase, java.util.List.copyOf(prev));
                 }
+                CoreStateRestore.TimerState timer = null;
+                if (ShadowTable.isTimerType(l.getLockTypeValue())) {
+                    // v11 timer 条目回灌：三元组原样恢复（代次不回退、到期时刻不改判）；
+                    // 去重槽仅保会话仍在新登记表者——死会话的槽无重发方，跨副本按同一
+                    // 快照会话集过滤，滤后序仍为会话 id 升序（确定性不受影响）。
+                    java.util.List<io.github.lamspace.openlatch.core.lock.TimerEntry.Slot>
+                            keptSlots = new java.util.ArrayList<>();
+                    for (var ts : l.getTimerDedupSlotsList()) {
+                        Long internal = newSidMap.get(ts.getSessionId());
+                        if (internal == null) {
+                            continue;
+                        }
+                        keptSlots.add(new io.github.lamspace.openlatch.core.lock
+                                .TimerEntry.Slot(internal, ts.getRequestId(),
+                                ts.getOp() == io.github.lamspace.openlatch.protocol.TimerOp
+                                        .TIMER_OP_SCHEDULE,
+                                ts.getEchoGeneration(), ts.getEchoFireAtMs()));
+                    }
+                    timer = new CoreStateRestore.TimerState(l.getTimerGeneration(),
+                            l.getTimerArmed(), l.getTimerFireAtMs(), keptSlots);
+                }
                 entries.add(new CoreStateRestore.Entry(l.getKey(), type, l.getLeaseToken(),
                         l.getLeaseMs(), l.getExpiresAtMs(), holders,
                         l.getPermitsTotal(), l.getLatchTotal(), l.getLatchCount(),
-                        atomic, barrier, atomicRef, queue, phaser));
+                        atomic, barrier, atomicRef, queue, phaser, timer));
             }
             // 发号水位：老快照缺字段（值为 0）按"继承最大凭证 +1"兜底，自洽校验
             // 在 CoreStateRestore 构造内完成（水位不大于任何凭证即拒绝）。

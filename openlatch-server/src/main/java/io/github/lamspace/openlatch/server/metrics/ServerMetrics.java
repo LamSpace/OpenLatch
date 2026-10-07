@@ -152,6 +152,25 @@ public final class ServerMetrics {
      */
     public static final String PHASER_PARTIES_REGISTERED_MAX =
             "openlatch.server.phaser.parties.registered.max";
+    /**
+     * v11：延时触发操作计数线 {@code op ∈ (schedule/disarm/await/cancel/query)}。
+     * {@code status} 可达面 {@code OK/DENIED/QUEUED/OVERLOADED/NOT_LEADER/
+     * INVALID_REQUEST/SESSION_EXPIRED/INTERNAL_ERROR}——{@code QUEUED}/
+     * {@code OVERLOADED} 仅 {@code await} op 可达（登记回执与合并深度超限）；
+     * {@code DENIED} 经 timer AWAIT 终态首次回到可达面（"当代已撤销装载、等待
+     * 不可再满足"——与队列元素不可满足的立即式同构语义，v11 既有码值新可达线）；
+     * {@code BARRIER_BROKEN}/{@code REJECT_SUBSCRIBERS}/{@code NOT_HELD} 对
+     * timer 恒不可达（无破相、无订阅、无持有概念）。判例 {@link #PHASER_TOTAL}。
+     */
+    public static final String TIMER_TOTAL = "openlatch.server.timer.total";
+    /**
+     * v11："timer 到期唤醒集合事件数"counter（Leader 侧扫描到点且当批收集到
+     * ≥1 名在集等待项时按 (key, 代) 计一次，无等待者的静默到期不计——本线是
+     * <b>唤醒面</b>非<b>到期面</b>，与 {@link #TIMER_TOTAL} 的
+     * {@code {await,OK}} 终态计数互注防混读）。timer 装载态二值、无单键峰值
+     * 量纲，故不入"五口径"集（"为何无 timer.*.max"的避让注记随命名点）。
+     */
+    public static final String TIMER_FIRED_TOTAL = "openlatch.server.timer.fired.total";
 
     /** 锁家族 held 线的 type 标签值。 */
     public static final String TYPE_LOCK = "lock";
@@ -483,6 +502,51 @@ public final class ServerMetrics {
     }
 
     /**
+     * 记一次 timer 操作（v11）。线路操作枚举映射为标签词表小写蛇形
+     * （{@code TIMER_OP_SCHEDULE → schedule}）；判例 {@link #recordPhaser}。
+     *
+     * @param op     协议操作枚举
+     * @param status 应答状态码
+     */
+    public void recordTimer(io.github.lamspace.openlatch.protocol.TimerOp op,
+            StatusCode status) {
+        Counter.builder(TIMER_TOTAL)
+                .tags("op", timerOpLabel(op), "status", status.name())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * 记一批 timer 到期唤醒事件（{@code timer.fired.total}，唤醒面计数；
+     * 参数为本轮收集到等待者的键数，零不注册线）。判例 {@link #recordLeaseExpired}
+     * 的"到期计数走扫描返回值"口径。
+     *
+     * @param events 本轮到期唤醒集合事件数
+     */
+    public void recordTimerFired(int events) {
+        if (events > 0) {
+            Counter.builder(TIMER_FIRED_TOTAL).register(registry).increment(events);
+        }
+    }
+
+    /**
+     * timer 操作词标签（去前缀小写）。
+     *
+     * @param op 协议操作枚举
+     * @return 标签词
+     */
+    private static String timerOpLabel(io.github.lamspace.openlatch.protocol.TimerOp op) {
+        return switch (op) {
+            case TIMER_OP_SCHEDULE -> "schedule";
+            case TIMER_OP_DISARM -> "disarm";
+            case TIMER_OP_AWAIT -> "await";
+            case TIMER_OP_CANCEL -> "cancel";
+            case TIMER_OP_QUERY -> "query";
+            default -> "unknown";
+        };
+    }
+
+    /**
      * 绑定单机形态 gauge（弱一致回调读数，抓取时实时计算）：
      * {@code locks.held{type}} 两线、{@code waiters}、{@code queue.depth.max}、
      * {@code sessions}。仅单机装配调用（集群形态见 {@link #bindClusterGauges}）。
@@ -573,6 +637,33 @@ public final class ServerMetrics {
                                   io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
                                   io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions,
                                   io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers) {
+        bindClusterGauges(shadow, waitQueue, sessions, nodeId, tracker, topics, conditions,
+                phasers, null);
+    }
+
+    /**
+     * 集群形态 gauge（v11 全参形态：追加 timer 等待簿计入 {@code waiters}
+     * 合计——"等待就是等待"合并口径经 v10/v11 延伸；timer 无单键峰值线，
+     * 见 {@link #TIMER_FIRED_TOTAL} 避让注记）。
+     *
+     * @param shadow     复制状态影子表（本副本）
+     * @param waitQueue  本节点等待队列（Leader 任期内非空）
+     * @param sessions   本节点会话注册表
+     * @param nodeId     本节点 id
+     * @param tracker    Leader 提示单源视图
+     * @param topics     topic 登记表，可为 {@code null}
+     * @param conditions 条件等待登记表，可为 {@code null}
+     * @param phasers    phaser 等待簿记，可为 {@code null}
+     * @param timers     timer 等待簿记，可为 {@code null}（无 timer 面时
+     *                   {@code waiters} 合计不含 timer 等待项）
+     */
+    public void bindClusterGauges(ShadowTable shadow, WaitQueue waitQueue,
+                                  ServerSessionRegistry sessions, int nodeId,
+                                  LeaderTracker tracker,
+                                  io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                  io.github.lamspace.openlatch.server.condition.ConditionRegistry conditions,
+                                  io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers,
+                                  io.github.lamspace.openlatch.server.timer.TimerRegistry timers) {
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[0])
                 .tag("type", TYPE_LOCK).register(registry);
         Gauge.builder(LOCKS_HELD, shadow, s -> s.heldFamilyCounts()[1])
@@ -581,7 +672,8 @@ public final class ServerMetrics {
         // 单机 stats().totalWaiters 天然含集，两形态同"等待总数含条件"语义）。
         Gauge.builder(WAITERS, waitQueue, q -> q.totalWaiters()
                 + (conditions == null ? 0 : conditions.totalCount())
-                + (phasers == null ? 0 : phasers.totalCount())).register(registry);
+                + (phasers == null ? 0 : phasers.totalCount())
+                + (timers == null ? 0 : timers.totalCount())).register(registry);
         Gauge.builder(QUEUE_DEPTH_MAX, waitQueue, WaitQueue::maxQueueDepth).register(registry);
         Gauge.builder(ELEMENTS_DEPTH_MAX, shadow, ShadowTable::maxElementsDepth).register(registry);
         if (topics != null) {

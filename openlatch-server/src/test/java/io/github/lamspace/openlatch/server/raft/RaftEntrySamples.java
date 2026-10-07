@@ -244,6 +244,25 @@ final class RaftEntrySamples {
                 .build();
     }
 
+    /** timer 变异条目样本（delay=null 即不主张——DISARM/AWAIT 等词形）。 */
+    static RaftLogEntry timerSample(long sessionId, long requestId, String key,
+            io.github.lamspace.openlatch.protocol.TimerOp op, Long delay,
+            long awaitRequestId, long wallMs, long seq) {
+        io.github.lamspace.openlatch.protocol.TimerOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.TimerOpRequest.newBuilder()
+                        .setKey(key).setOp(op).setAwaitRequestId(awaitRequestId);
+        if (delay != null) {
+            rb.setDelayMs(delay);
+        }
+        return RaftLogEntry.newBuilder().setType(RaftEntryType.TIMER_OP_ENTRY).setSeq(seq)
+                .setWallClockMs(wallMs)
+                .setCommandPayload(io.github.lamspace.openlatch.protocol.raft.TimerOpPayload
+                        .newBuilder()
+                        .setSessionId(sessionId).setRequestId(requestId).setRequest(rb)
+                        .build().toByteString())
+                .build();
+    }
+
     static RaftLogEntry release(long sessionId, String key, long token, long wallMs, long seq) {
         return release(sessionId, key, token, wallMs, seq, 7);
     }

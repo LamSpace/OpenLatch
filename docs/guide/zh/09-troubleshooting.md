@@ -169,6 +169,18 @@ mvn -pl openlatch-server verify -Pdrill        # 停摆采样（仪器类）
   （既有配额零扰动，处置为拆键或调上限）；AWAIT_ADVANCE 线=挂起等待达
   `max-queue-depth-per-key` 合并口径（`arriveAndAwaitAdvance` 的挂起半程不受拒）——
   看请求类型即知是哪道闸；
+- **"定时标记不生效"的判别三分法**（`await` 久候不响或 `isFired` 恒假）：
+  ① **tick 滞后与门控拒绝**——到期唤醒以 `timer-ready-tick-ms`（默认 200ms）为
+  精度窗，刚过点在等者未醒属契约内（判读 `timer.total` 线：v≤10 会话的
+  `TIMER_OP` 计入 `INVALID_REQUEST` 门控线——确认双端 ≥ v11；`{await,OVERLOADED}`
+  高=合并深度护栏在挡新等待）；② **改期换代**——以管理面三元组原始读数核对：
+  `timer_generation` 已前进而 `timer_fire_at_ms` 晚于预期 = 有人重装载推后了钟
+  （"以最新代为准"契约；"从未装载"的形态是键未命中/代次 0，二者判别不同）；
+  `timer_armed=false` = 当代已 `disarm`（新 `await` 即刻 DENIED/异常收束，不存在
+  "永睡已撤钟"形态）；③ **换主窗重挂**——唤醒谓词在复制账簿、重挂自愈（对照
+  条件 signal 丢失窗：timer 的"不生效"根因在"钟被改了/精度窗"而非"事件丢失"）；
+  两台机器醒来先后不一 = 节点钟偏移声明面（判据取管理面原始 `fire_at_ms`，
+  非各机 `isFired` 瞬时值；v11）；
 - **换代窗口迟到重发按新到场计**：应答丢失很迟（跨两次推进）才重发的到场会计入
   新相位——显式声明竞态（窗口同屏障了结记录口径），重发要快（SDK 自动重发在
   `requestTimeout` 量级内）；应用不应以"到场必然恰好一次"编排正确性——以

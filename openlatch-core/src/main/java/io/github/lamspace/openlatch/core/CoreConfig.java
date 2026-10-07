@@ -28,6 +28,8 @@ package io.github.lamspace.openlatch.core;
  * @param maxPartiesPerPhaser 单相位器注册总数上限（v10；判定唯一在受理点
  *                            ——条目应用侧不消费，配置漂移不撕裂账簿，见
  *                            {@code PhaserEntry} 类注"护栏分界"）
+ * @param maxTimerHorizonMs   单装载相对延迟上限（v11，毫秒；判定唯一在受理点
+ *                            ——条目应用侧不消费，判例 maxPartiesPerPhaser）
  */
 public record CoreConfig(
         long defaultLeaseMs,
@@ -36,7 +38,8 @@ public record CoreConfig(
         long headReplyTimeoutMs,
         int maxKeyLength,
         int maxQueueDepthPerKey,
-        int maxPartiesPerPhaser) {
+        int maxPartiesPerPhaser,
+        long maxTimerHorizonMs) {
 
     /** 默认租约时长（毫秒）。 */
     public static final long DEFAULT_LEASE_MS = 30_000L;
@@ -52,17 +55,19 @@ public record CoreConfig(
     public static final int MAX_QUEUE_DEPTH_PER_KEY = 4096;
     /** 单相位器注册总数上限（v10，与 server 侧 {@code max-parties-per-phaser} 默认对齐）。 */
     public static final int MAX_PARTIES_PER_PHASER = 1024;
+    /** 单装载相对延迟上限（v11，默认 24h，与 server 侧 {@code max-timer-horizon-ms} 对齐）。 */
+    public static final long MAX_TIMER_HORIZON_MS = 86_400_000L;
 
     /** 全默认配置。 */
     public CoreConfig() {
         this(DEFAULT_LEASE_MS, MIN_LEASE_MS, MAX_LEASE_MS,
                 HEAD_REPLY_TIMEOUT_MS, MAX_KEY_LENGTH, MAX_QUEUE_DEPTH_PER_KEY,
-                MAX_PARTIES_PER_PHASER);
+                MAX_PARTIES_PER_PHASER, MAX_TIMER_HORIZON_MS);
     }
 
     /**
-     * v10 之前的六参形态：相位器配额上限取默认值（既有调用与测试的
-     * 兼容通道——新维参数不迫使历史构造点逐一改写）。
+     * v10 之前的六参形态：相位器配额上限与 timer 延迟上限取默认值（既有调用
+     * 与测试的兼容通道——新维参数不迫使历史构造点逐一改写）。
      *
      * @param defaultLeaseMs      默认租约时长（毫秒）
      * @param minLeaseMs          租约下限（毫秒）
@@ -74,6 +79,27 @@ public record CoreConfig(
     public CoreConfig(long defaultLeaseMs, long minLeaseMs, long maxLeaseMs,
             long headReplyTimeoutMs, int maxKeyLength, int maxQueueDepthPerKey) {
         this(defaultLeaseMs, minLeaseMs, maxLeaseMs, headReplyTimeoutMs,
-                maxKeyLength, maxQueueDepthPerKey, MAX_PARTIES_PER_PHASER);
+                maxKeyLength, maxQueueDepthPerKey, MAX_PARTIES_PER_PHASER,
+                MAX_TIMER_HORIZON_MS);
+    }
+
+    /**
+     * v11 之前的七参形态：timer 延迟上限取默认值（相位器配额显式给定的
+     * 既有调用与测试兼容通道）。
+     *
+     * @param defaultLeaseMs      默认租约时长（毫秒）
+     * @param minLeaseMs          租约下限（毫秒）
+     * @param maxLeaseMs          租约上限（毫秒）
+     * @param headReplyTimeoutMs  已通知队首响应超时（毫秒）
+     * @param maxKeyLength        锁键长度上限
+     * @param maxQueueDepthPerKey 单 key 等待深度上限
+     * @param maxPartiesPerPhaser 单相位器注册总数上限
+     */
+    public CoreConfig(long defaultLeaseMs, long minLeaseMs, long maxLeaseMs,
+            long headReplyTimeoutMs, int maxKeyLength, int maxQueueDepthPerKey,
+            int maxPartiesPerPhaser) {
+        this(defaultLeaseMs, minLeaseMs, maxLeaseMs, headReplyTimeoutMs,
+                maxKeyLength, maxQueueDepthPerKey, maxPartiesPerPhaser,
+                MAX_TIMER_HORIZON_MS);
     }
 }

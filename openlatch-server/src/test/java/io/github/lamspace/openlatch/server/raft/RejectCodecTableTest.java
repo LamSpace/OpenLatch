@@ -89,7 +89,7 @@ class RejectCodecTableTest {
                     MessageType.BARRIER_AWAIT, MessageType.BARRIER_LEAVE,
                     MessageType.BARRIER_ACTION_DONE, MessageType.QUEUE_OP,
                     MessageType.TOPIC_OP, MessageType.CONDITION_OP,
-                    MessageType.PHASER_OP);
+                    MessageType.PHASER_OP, MessageType.TIMER_OP);
 
     /** 客户端接入车道全部请求类型（PING/AWAIT_NOTIFY 无拒绝应答语义，除外）。 */
     private static RejectCase[] allCases() {
@@ -171,6 +171,17 @@ class RejectCodecTableTest {
                                             .PhaserOp.PHASER_OP_REGISTER)
                                     .setParties(1)),
                     Envelope::hasPhaserOpResponse),
+            // v11：TIMER_OP 同型拒绝——默认实例 OK 会被成型为"装载成功（代次 0）/
+            // 等待登记成功/空账簿读数"伪成功（判例 PHASER_OP；DENIED/QUEUED 亦是
+            // 状态码自述面，timer 线上 DENIED 首次可达更须码形同型）。
+            new RejectCase(MessageType.TIMER_OP, 11,
+                    b -> b.setTimerOpRequest(
+                            io.github.lamspace.openlatch.protocol.TimerOpRequest
+                                    .newBuilder().setKey("k")
+                                    .setOp(io.github.lamspace.openlatch.protocol
+                                            .TimerOp.TIMER_OP_SCHEDULE)
+                                    .setDelayMs(1000L)),
+                    Envelope::hasTimerOpResponse),
             // v9：带 condition 的折叠 ACQUIRE 同型拒绝行（门控/角色/形状三码形
             // 恒经 acquire_response 自述——折叠不新建应答线，行内断言钉死
             // "await 是 ACQUIRE 生命周期"的线路可见性）。
@@ -268,11 +279,17 @@ class RejectCodecTableTest {
             if (c.type() != MessageType.ATOMIC_OP && c.type() != MessageType.QUEUE_OP
                     && c.type() != MessageType.TOPIC_OP
                     && c.type() != MessageType.CONDITION_OP
-                    && c.type() != MessageType.PHASER_OP) {
+                    && c.type() != MessageType.PHASER_OP
+                    && c.type() != MessageType.TIMER_OP) {
                 continue;
             }
             Envelope resp = ClusterRequestHandler.notLeaderEnvelope(request(c), unknown);
-            if (c.type() == MessageType.PHASER_OP) {
+            if (c.type() == MessageType.TIMER_OP) {
+                assertThat(resp.getTimerOpResponse().getOp())
+                        .as("TIMER_OP 拒绝须回显 op（指标 recordTimer 消费同表达式）")
+                        .isEqualTo(io.github.lamspace.openlatch.protocol
+                                .TimerOp.TIMER_OP_SCHEDULE);
+            } else if (c.type() == MessageType.PHASER_OP) {
                 assertThat(resp.getPhaserOpResponse().getOp())
                         .as("PHASER_OP 拒绝须回显 op（指标 recordPhaser 消费同表达式）")
                         .isEqualTo(io.github.lamspace.openlatch.protocol
@@ -366,6 +383,7 @@ class RejectCodecTableTest {
             case TOPIC_OP -> resp.getTopicOpResponse().getStatus();
             case CONDITION_OP -> resp.getConditionOpResponse().getStatus();
             case PHASER_OP -> resp.getPhaserOpResponse().getStatus();
+            case TIMER_OP -> resp.getTimerOpResponse().getStatus();
             default -> throw new IllegalArgumentException("no codec: " + type);
         };
     }

@@ -40,6 +40,14 @@ enum RaftEntryType {
   // （Leader 本地裁决——"等待是订阅不是状态"类目）。14 号位即 v10 编号证据：
   // 13 之前各值语义逐项不变、MUST NOT 复用为 phaser 变体；本值仅 phaser 占用。
   PHASER_OP_ENTRY           = 14;
+  // v11：延时触发变异命令——装载/撤销逐条进日志（代次与到期时刻为复制态，
+  // "装载是状态迁移"沿 v5/v10 判例）；等待登记、取消与查询读数 MUST NOT 产生
+  // 条目；**到期本身 MUST NOT 产生条目**（marked 为账簿与判定时刻的派生谓词，
+  // "到期不是迁移，是时间的兑现"——与 LEASE_EXPIRE_ENTRY"到期是状态迁移故入日志"
+  // 构成判例族两端）。15 号位即 v11 编号证据：14 之前各值语义逐项不变、
+  // MUST NOT 复用为 timer 变体；本值仅 timer 占用；既有"止于 14"守卫基线随本代
+  // 更替为"止于 15"（版本相对口径，两代上界证据 MUST NOT 同时锚死绝对值）。
+  TIMER_OP_ENTRY            = 15;
 }
 
 // 复制条目外壳（详设 §4.2）。command_payload 为下列 *Payload 之一按 type 的序列化。
@@ -132,6 +140,17 @@ message PhaserOpPayload {
   openlatch.PhaserOpRequest   request     = 3;
 }
 
+// v11：延时触发变异命令载荷。request 携带 op/delay_ms（仅 SCHEDULE/DISARM 两族出现在
+// 条目中——AWAIT/CANCEL/QUERY 不入日志，到期亦不入日志）。SCHEDULE 的绝对到期时刻在
+// 应用点以条目外壳 wall_clock_ms + delay 折算（判例 v7 队列延时形态——回放与 live
+// 同值、换主与追赶不改判）；装载去重判定（每会话单槽）与换代清钟全在应用侧条目内
+// 状态完成，跨副本回放得出一致应答与一致账簿终态。
+message TimerOpPayload {
+  int64                      session_id  = 1;
+  int64                      request_id  = 2;  // 原 TIMER_OP 信封 request_id（装载去重槽身份位；重挂 MUST 以原 id 重发——v10 真缺陷教训的 v11 护栏）
+  openlatch.TimerOpRequest   request     = 3;
+}
+
 // LEASE_EXPIRE_ENTRY 载荷（§4.3：到期判断只在 Leader，回放侧按 token 幂等校验）。
 // wall_clock_ms（条目外壳）携带 Leader 发现到期的时刻，回放以该时刻为"现在"。
 message ExpirePayload {
@@ -206,6 +225,15 @@ message ApplyResult {
   int32          phaser_registered    = 24; // 回执时刻注册总数快照
   int32          phaser_arrived       = 25; // 回执时刻当前相位到场快照（推进后为 0）
   repeated string phaser_advanced_keys = 26; // 本条目推进相位的 phaser key 集（唤醒广播依据）
+  // v11：TIMER_OP_ENTRY 回执（status=OK/DENIED/INVALID_REQUEST 时择用）。代次与绝对
+  // 到期时刻为应用点折算后的终值回显（同槽重放即重放本组——回声三元组的 armed 由
+  // 条目 op 推导：SCHEDULE=true、DISARM=false）。DISARM 的等待唤醒不在此列广播——
+  // 唤醒目标即本条目 key 自身、Leader 侧据 op 直发（对照 phaser_advanced_keys 的
+  // 跨键推进形态，timer 无代际级联键）。无 marked 回执位——到期是读面谓词，应用点
+  // 不产生任何"已响"迁移（派生裁决的条目面证据）。
+  sint64         timer_generation     = 27; // 装载代次回显（TIMER 条目外恒 0）
+  int64          timer_fire_at_ms     = 28; // 绝对到期时刻回显（DISARM 回执=撤销前保持值）
+  bool           timer_armed          = 29; // 回执时刻装载态（SCHEDULE=true、DISARM=false）
 }
 
 // 快照一致性状态（详设 §7.1；S2 仅定义骨架，生成/加载归 S4）。
@@ -283,6 +311,18 @@ message SnapshotLock {
   // "尚无窗口"区分。
   optional int64 phaser_prev_phase    = 40;  // 上一推进周期到场相位（缺省=无窗口）
   repeated SnapshotPhaserArrival phaser_prev_arrivals = 41;  // 上一周期到场槽
+  // v11 扩展（TIMER 家族，lock_type = LOCK_TYPE_TIMER；其余家族不出现）。
+  // 账簿只呈当前 (generation, armed, fire_at_ms, 每会话最近槽)——代次历史零驻留、
+  // 到期无标记位（marked 是读面谓词不入任何持久形态——"到期零条目"的快照侧对偶，
+  // "已到期"不使两份同终态快照产生字节差）。确定性导出序：去重槽表按账簿插入序
+  // （该会话首装先后，判例 v10 配额表——内部 sid 随机跨副本不可比；每会话至多
+  // 一条、覆盖式替换原位不改序，尺寸与会话数有界、与装载轮次解耦）。
+  // 等待集与唤醒通知时序 MUST NOT 进入快照（Leader 易失，恢复即清空、客户端重挂补
+  // 登记——与 v10 phaser 等待集条款同构）。
+  sint64  timer_generation = 42;  // 装载代次（自 1 起单调递增，恢复不回退）
+  bool    timer_armed      = 43;  // 装载态（true=PENDING、false=DISARMED 代终结）
+  int64   timer_fire_at_ms = 44;  // 绝对到期时刻（应用点折算值原样承载；DISARM 后保持历史值不重写）
+  repeated SnapshotTimerSlot timer_dedup_slots = 45;  // 每会话装载去重槽表（账簿插入序；从未装载的会话无槽）
 }
 
 // v10：phaser 每会话注册配额（死亡摘除与 arriveAndDeregister 扣减的归属域）。
@@ -300,6 +340,18 @@ message SnapshotPhaserParty {
 message SnapshotPhaserArrival {
   int64 session_id = 1;
   int64 request_id = 2;  // 到场操作的 PHASER_OP 信封 request_id
+}
+
+// v11：timer 每会话装载去重槽（判例 v7 队列交付槽的覆盖式单槽语义——同 (会话, 请求)
+// 重发回放 echo 三元组不双换代；新装载覆盖旧槽，旧请求迟到重发按新变异执行=声明竞态）。
+// op 区分回声形态：SCHEDULE 回声 armed=true、DISARM 回声 armed=false（armed 不入槽，
+// 由 op 推导——少一个可漂移字段）。
+message SnapshotTimerSlot {
+  int64 session_id     = 1;  // 逻辑会话 id
+  int64 request_id     = 2;  // 该会话最近一次装载/撤销的 TIMER_OP 信封 request_id
+  openlatch.TimerOp op = 3;  // 槽内操作（仅 SCHEDULE/DISARM 两值——本地操作无槽）
+  sint64 echo_generation = 4;  // 首次回执的代次回显（重发回放用）
+  int64  echo_fire_at_ms = 5;  // 首次回执的绝对到期时刻回显（DISARM 回声=撤销前保持值）
 }
 
 // v7：队列元素（载荷 + 绝对到期时刻）。载荷为不透明字节且非 null——空串元素

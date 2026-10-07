@@ -43,11 +43,15 @@
                                 ? item.queueCapacity + ' 容量 · 深度 ' + item.queueDepth + ' · 队首 ' + item.queueHeadPayloadSize + 'B ' + item.queueHeadPayloadPreview
                                 : (item.family == 'phaser'
                                     ? item.phaserRegistered + ' registered · 相位 ' + item.phaserPhase + ' · 到场 ' + item.phaserArrived
+                                    : (item.family == 'timer'
+                                    ? '代次 ' + item.timerGeneration + (item.timerArmed
+                                        ? ' · 在装（到期时刻 ' + item.timerFireAtMs + '，呈现不折算已否到期）'
+                                        : ' · 已撤销（代终结）')
                                     : (item.family == 'topic'
                                     ? item.topicSubscribers + ' 订阅（Leader 本地登记）'
                                     : (item.family == 'lock' and item.conditionWaiters > 0
                                         ? item.conditionWaiters + ' 条件等待'
-                                        : '')))))}">long = 0</td>
+                                        : ''))))))}">long = 0</td>
                 </tr>
                 <tr th:if="${row.value.itemsList.isEmpty()}">
                     <td colspan="6" class="empty">无条目</td>

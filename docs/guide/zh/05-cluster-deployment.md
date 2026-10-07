@@ -36,6 +36,8 @@
 | `openlatch.server.limit.max-subscribers-per-key` | `64` | 单键 topic（v8）订阅数上限；超限的 SUBSCRIBE 入口拒绝（`REJECT_SUBSCRIBERS`，既有订阅零扰动），取值 [1, 1024]；钳广播 fan-out 放大面 |
 | `openlatch.server.limit.max-subscription-buffer` | `256` | 每订阅服务端在途缓冲条数（v8，drop-newest 触发线），取值 [1, 65536]；SDK 本地另有二级缓冲（256 条）同策略 |
 | `openlatch.server.limit.max-parties-per-phaser` | `1024` | 单键相位器（v10）注册总数上限；超限的 REGISTER 入口拒绝（`OVERLOADED`，既有配额零扰动），取值 [1, 65536]；判定唯一在受理点（条目应用侧不复核，配置漂移不撕裂账簿）。挂起等待另受 `max-queue-depth-per-key` 合并口径（既有行，v9 起三原语共用） |
+| `openlatch.server.timer.max-horizon-ms` | `86400000` | 单装载相对延迟上限（v11，默认 24h）；超限的 SCHEDULE 入口拒绝（`INVALID_REQUEST` 参数线——租约越界判例，非资源护栏码，既有账簿零扰动），取值 [1000, 604800000]（1s–7d）；判定唯一在受理点（条目应用侧不复核）。防「永远不响的钟」占驻账簿。挂起等待受 `max-queue-depth-per-key` 合并口径（v11 起四原语共用） |
+| `openlatch.server.timer.ready-tick-ms` | `200` | timer 到期唤醒扫描周期（v11，Leader/单机调度消费；仅影响唤醒延迟精度，MUST NOT 参与状态判定），下限 10ms；与队列 `ready-tick-ms` **分名分值分轨**（两原语唤醒精度独立可调、互不耦合调参） |
 | `openlatch.server.metrics.enabled` | `true` | 指标管理端点开关（Prometheus 抓取 `http://host:port/metrics`） |
 | `openlatch.server.metrics.port` | `9412` | 指标管理端口（`0`=临时）；绑定冲突即启动失败——同机多节点须互异 |
 | `openlatch.server.admin.token` | 未配置 | 只读 `ADMIN_*` 管理令牌；未配置 ⇒ 一切管理请求被拒 |
@@ -163,6 +165,15 @@ OpenLatchClient client = OpenLatchClient.builder()
   驻留数据（账簿即状态本体），只有"在途流量清零"一条前置动作。混布规则同前：
   v10 SDK 客户端连已回退的 v9 服务端握手即拒（升级序服务端先行、回退序客户端先行）。
 
+- **v11 延时触发的回滚窗口（屏障/队列/phaser 同型并列口径）**：timer 是持久态
+  原语——装载/撤销逐条经 `TIMER_OP_ENTRY` 入日志并写快照字段（`timer_*`，15 号
+  条目类型），早于 v11 的二进制无法理解——降级前确认无在途 timer 流量（等待簿记
+  Leader 易失无需处理），或接受 timer key 在旧二进制上不可用（条目按未知类型
+  error 路径现行口径处置）。**「到期零条目」不等于「零持久态」**：账簿三元组与去重
+  槽仍是持久足迹，回滚口径与 topic/condition「天然干净」严格分轨、互不混读；与
+  队列/phaser 同属「降级前在途清零」一族。混布规则同前：v11 SDK 客户端连已回退的
+  v10 服务端握手即拒（升级序服务端先行、回退序客户端先行）。
+
 ### 载荷下的快照与日志尺寸治理（v6）
 
 - 载荷通道把"条目数"维度的快照膨胀引入"字节数"维度：单条有值引用条目快照占用
@@ -222,6 +233,20 @@ OpenLatchClient client = OpenLatchClient.builder()
   配额、`{await_advance,OVERLOADED}` 深度）、`phaser.parties.registered.max`
   水位；条目率/快照时长成为运维压力时按 WATCHLIST W14 行触发评估批量到场
   合并或读路径折案（另立 change）。
+
+### timer 维度的装载率与唤醒滞后治理（v11）
+
+- 延时触发是**半入日志**原语：仅装载/撤销逐条 `TIMER_OP_ENTRY`，**到期本身
+  零条目**（marked 为账簿与判定时刻的派生谓词）——条目率恒等于用户显式装载
+  频率，与 W14（phaser 到场条目率随 parties×相位频率增长）构成刻意对照：
+  timer 没有「系统自触」的常驻变异面（周期重挂被显式列为 Non-Goal 的原因之一）；
+- 唤醒精度：到期到全体了结的滞后以一个 `timer-ready-tick-ms` 窗口为量级
+  （基准 timer 相给出滞后分布基线）；每轮扫描成本随在等键数线性——滞后或扫描
+  开销成为运维压力时按 WATCHLIST W15 行触发评估（时间轮/最小堆升级方向，另立
+  change）；
+- 账簿足迹：每 timer 键常驻条目 = 三元组 + 每会话至多一行去重槽（覆盖式、
+  死亡随会话摘除）——不随装载轮次累积（代次历史与「已响」位零驻留，有快照
+  零足迹与尺寸有界回归钉死）；horizon 上限是唯一防「永不响的钟」堆积的闸门。
 
 ### 条件维度的治理注记（v9）
 

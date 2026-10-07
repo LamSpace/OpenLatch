@@ -82,12 +82,12 @@ public final class OpenLatchServer {
 
     /**
      * 服务器自身协议版本（握手响应 {@code server_protocol_version} 回此值）。
-     * v10 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
+     * v11 起握手接受 {@value #MIN_CLIENT_PROTOCOL_VERSION}–
      * {@value #PROTOCOL_VERSION} 的客户端版本；应答信封的 {@code protocol_version}
      * 回显客户端请求版本，低版本客户端因此看到与既有阶段同形的响应。
      * 各版本专属语义（新锁类型/新消息）由接入层按会话握手版本门控。
      */
-    public static final int PROTOCOL_VERSION = 10;
+    public static final int PROTOCOL_VERSION = 11;
 
     /** 握手可接受的最小客户端协议版本（v1 客户端在集群模式下持续可用）。 */
     public static final int MIN_CLIENT_PROTOCOL_VERSION = 1;
@@ -369,6 +369,7 @@ public final class OpenLatchServer {
                         + "maxQueueDepthPerKey={}, maxInflightPerConnection={}, maxValueBytes={}, "
                         + "maxQueueCapacity={}, maxDrainBytes={}, maxSubscribersPerKey={}, "
                         + "maxSubscriptionBuffer={}, maxPartiesPerPhaser={}, "
+                        + "maxTimerHorizonMs={}, timerReadyTickMs={}, "
                         + "defaultLeaseMs={}, clusterEnabled={}, clusterNodeId={}, metricsPort={}, "
                         + "adminEnabled={}, authEnabled={}, tlsEnabled={}, mTls={}",
                 port(), PROTOCOL_VERSION, config.maxKeyLength(), config.maxQueueDepthPerKey(),
@@ -376,6 +377,7 @@ public final class OpenLatchServer {
                 config.maxQueueCapacity(), config.maxDrainBytes(),
                 config.maxSubscribersPerKey(), config.maxSubscriptionBuffer(),
                 config.maxPartiesPerPhaser(),
+                config.maxTimerHorizonMs(), config.timerReadyTickMs(),
                 config.defaultLeaseMs(),
                 clusterConfig.enabled(), clusterConfig.nodeId(), metricsPort(),
                 adminConfig.isConfigured(), authConfig.isEnabled(), tlsConfig.enabled(),
@@ -559,6 +561,17 @@ public final class OpenLatchServer {
                 log.error("queue ready sweep failed", e);
             }
         }, readyTick, readyTick, TimeUnit.MILLISECONDS);
+        // v11：单机 timer 到期唤醒扫描（判例队列就绪臂与集群 TimerReadyDriver）
+        // ——独立周期 timer-ready-tick-ms，零状态变更的纯提示。
+        long timerTick = config.timerReadyTickMs();
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                int events = core.wakeTimerReady();
+                metrics.recordTimerFired(events);
+            } catch (RuntimeException e) {
+                log.error("timer ready sweep failed", e);
+            }
+        }, timerTick, timerTick, TimeUnit.MILLISECONDS);
     }
 
     /**

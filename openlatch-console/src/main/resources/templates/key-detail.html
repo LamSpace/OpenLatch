@@ -30,6 +30,8 @@
                       th:text="|（容量 ${r.value.queueCapacity} · 深度 ${r.value.queueDepth} · 驻留 ${r.value.queueTotalPayloadBytes}B · 队首 ${r.value.queueHeadPayloadSize}B ${r.value.queueHeadPayloadPreview}${r.value.queueHeadExpiryMs > 0 ? ' · 队首到期 ' + r.value.queueHeadExpiryMs : ''}）|"></span>
                 <span th:if="${r.value.family == 'phaser'}"
                       th:text="|（相位 ${r.value.phaserPhase} · registered ${r.value.phaserRegistered} · 当前到场 ${r.value.phaserArrived} · 注册跨相位存续，离场/死亡才减员）|"></span>
+                <span th:if="${r.value.family == 'timer'}"
+                      th:text="|（代次 ${r.value.timerGeneration} · ${r.value.timerArmed ? '在装' : '已撤销（代终结）'} · 绝对到期时刻 ${r.value.timerFireAtMs} · 呈现面不折算已否到期（时钟无关原始读数）|"></span>
                 <span th:if="${r.value.family == 'topic'}"
                       th:text="|（订阅 ${r.value.topicSubscribers} · Leader 本地登记，无持有/等待/租约语义）|"></span>
             </div>
@@ -45,7 +47,7 @@
                 </tr>
                 <tr th:if="${r.value.holdersList.isEmpty()}">
                     <td colspan="4" class="empty"
-                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : (r.value.family == 'queue' ? '无持有者（队列元素绑定 key 不绑定会话，无持有语义）' : (r.value.family == 'topic' ? '无持有者（广播订阅不持有 key，无持有语义）' : (r.value.family == 'phaser' ? '无持有者（相位器按注册/到场合拢裁决，无持有语义）' : '无持有者'))))}">无持有者</td>
+                        th:text="${r.value.family == 'atomic' ? '无持有者（原子家族的值为跨会话共享状态，无持有语义）' : (r.value.family == 'barrier' ? '无持有者（循环屏障按到场合拢裁决，无持有语义）' : (r.value.family == 'queue' ? '无持有者（队列元素绑定 key 不绑定会话，无持有语义）' : (r.value.family == 'topic' ? '无持有者（广播订阅不持有 key，无持有语义）' : (r.value.family == 'phaser' ? '无持有者（相位器按注册/到场合拢裁决，无持有语义）' : (r.value.family == 'timer' ? '无持有者（延时触发绑定 key 不绑定会话，装载者死亡钟照响，无持有语义）' : '无持有者')))))}">无持有者</td>
                 </tr>
             </table>
 
@@ -67,7 +69,7 @@
                     </tr>
                     <tr th:if="${r.value.waitersList.isEmpty()}">
                         <td colspan="7" class="empty"
-                            th:text="${r.value.family == 'phaser' ? '无人等待（相位等待区段独立呈现，不占队首位次）' : (r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : (r.value.family == 'queue' ? '无人等待（队列挂起者经等容量/等元素双轨承载）' : (r.value.family == 'topic' ? '无人等待（广播交付经服务端推送通道，无等待队列）' : '无人等待')))}">无人等待</td>
+                            th:text="${r.value.family == 'phaser' ? '无人等待（相位等待区段独立呈现，不占队首位次）' : (r.value.family == 'atomic' ? '无人等待（原子操作全部即时完成，无等待队列）' : (r.value.family == 'queue' ? '无人等待（队列挂起者经等容量/等元素双轨承载）' : (r.value.family == 'topic' ? '无人等待（广播交付经服务端推送通道，无等待队列）' : (r.value.family == 'timer' ? '无人等待（延时触发等待区段独立呈现，不占队首位次）' : '无人等待'))))}">无人等待</td>
                     </tr>
                 </table>
             </th:block>
@@ -128,6 +130,37 @@
                     </tr>
                     <tr th:if="${r.value.phaserWaitersInfoList.isEmpty()}">
                         <td colspan="5" class="empty">无挂起等待者（唤醒即出集，无"已通知待重发"位）</td>
+                    </tr>
+                </table>
+            </th:block>
+            <!-- v11 timer 等待区段：三元组账簿为复制态（各节点一致、原始读数
+                 不折算 marked——"已否到期"由读侧以 armed 与 fire_at 自行判定）；
+                 等待明细 Leader-only 如实零读（双速呈现沿 phaser 型）；
+                 代终结钟以 armed=false 如实呈现非缺行。 -->
+            <th:block th:if="${r.value.family == 'timer'}">
+                <h3>装载账簿</h3>
+                <table class="grid">
+                    <tr><th>代次</th><th>装载态</th><th>绝对到期时刻（epoch ms）</th></tr>
+                    <tr>
+                        <td th:text="${r.value.timerGeneration}">0</td>
+                        <td th:text="${r.value.timerArmed ? '在装（PENDING/已共见）' : '已撤销（代终结）'}">在装</td>
+                        <td th:text="${r.value.timerFireAtMs}">0</td>
+                    </tr>
+                </table>
+                <h3>到期等待</h3>
+                <div th:if="${r.value.waitQueueLeaderOnly}" class="banner">
+                    到期等待明细仅 Leader 可见（当前来源为 Follower/未知角色，如实零读；三元组账簿为复制态，照常呈现）。
+                </div>
+                <table class="grid" th:unless="${r.value.waitQueueLeaderOnly}">
+                    <tr><th>会话</th><th>请求</th><th>已等待</th><th>登记时刻（epoch ms）</th></tr>
+                    <tr th:each="w : ${r.value.timerWaitersInfoList}">
+                        <td th:text="${w.sessionId}">0</td>
+                        <td th:text="${w.requestId}">0</td>
+                        <td th:text="${(nowMs - w.armedAtMs > 0 ? nowMs - w.armedAtMs : 0)} + 'ms'">0ms</td>
+                        <td th:text="${w.armedAtMs}">0</td>
+                    </tr>
+                    <tr th:if="${r.value.timerWaitersInfoList.isEmpty()}">
+                        <td colspan="4" class="empty">无挂起等待者（唤醒即出集，了结由谓词重评自决）</td>
                     </tr>
                 </table>
             </th:block>

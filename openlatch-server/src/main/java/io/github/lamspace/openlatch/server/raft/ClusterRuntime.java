@@ -113,6 +113,41 @@ public final class ClusterRuntime {
                            io.github.lamspace.openlatch.server.condition.ConditionRegistry
                                    conditions,
                            io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers) {
+        this(subsystem, waitQueue, gateway, sessionCoordinator, expiryDriver, queueReadyDriver,
+                requestHandler, leaderTracker, stallWatchdog, topics, conditions, phasers,
+                null, null);
+    }
+
+    /**
+     * v11 全参装配：追加 timer 等待簿记与就绪驱动（判例 phasers/queueReadyDriver
+     * 同位）。
+     *
+     * @param subsystem         Raft 子系统
+     * @param waitQueue         本节点等待队列
+     * @param gateway           复制网关
+     * @param sessionCoordinator 会话协调器
+     * @param expiryDriver      租约到期驱动
+     * @param queueReadyDriver  队列就绪驱动
+     * @param requestHandler    集群请求处理器
+     * @param leaderTracker     Leader 提示单源
+     * @param stallWatchdog     复制停摆看门狗
+     * @param topics            topic 登记表
+     * @param conditions        条件等待登记表
+     * @param phasers           phaser 等待簿记
+     * @param timers            timer 等待簿记（Leader 本地易失态）
+     * @param timerDriver       timer 就绪驱动（Leader 到期唤醒扫描）
+     */
+    private ClusterRuntime(RaftSubsystem subsystem, WaitQueue waitQueue,
+                           ReplicationGateway gateway, SessionCoordinator sessionCoordinator,
+                           LeaseExpiryDriver expiryDriver, QueueReadyDriver queueReadyDriver,
+                           ClusterRequestHandler requestHandler,
+                           LeaderTracker leaderTracker, ReplicationStallWatchdog stallWatchdog,
+                           io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                           io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                   conditions,
+                           io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers,
+                           io.github.lamspace.openlatch.server.timer.TimerRegistry timers,
+                           TimerReadyDriver timerDriver) {
         this.subsystem = subsystem;
         this.waitQueue = waitQueue;
         this.gateway = gateway;
@@ -125,6 +160,8 @@ public final class ClusterRuntime {
         this.topics = topics;
         this.conditions = conditions;
         this.phasers = phasers;
+        this.timers = timers;
+        this.timerDriver = timerDriver;
     }
 
     /** v8 topic 登记表（Leader 本地易失态；管理观察与测试断言入口）。 */
@@ -135,6 +172,12 @@ public final class ClusterRuntime {
 
     /** v10 phaser 等待簿记（Leader 本地易失态；管理观察与测试断言入口）。 */
     private final io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers;
+
+    /** v11 timer 等待簿记（Leader 本地易失态；管理观察与测试断言入口）。 */
+    private final io.github.lamspace.openlatch.server.timer.TimerRegistry timers;
+
+    /** v11 timer 就绪驱动（Leader 到期唤醒扫描；关停逆序消费）。 */
+    private final TimerReadyDriver timerDriver;
 
     /**
      * v8 topic 登记表（管理面订阅维数据源；观察读数 Leader 视角口径）。
@@ -163,6 +206,16 @@ public final class ClusterRuntime {
      */
     public io.github.lamspace.openlatch.server.phaser.PhaserRegistry phaserRegistry() {
         return phasers;
+    }
+
+    /**
+     * v11 timer 等待簿记（管理面 timer 等待明细数据源；Leader 视角口径——
+     * 非 Leader 节点簿记恒空，如实零读；账簿三元组走影子表复制态）。
+     *
+     * @return 簿记（与运行时同生命周期）
+     */
+    public io.github.lamspace.openlatch.server.timer.TimerRegistry timerRegistry() {
+        return timers;
     }
 
     /**
@@ -231,12 +284,21 @@ public final class ClusterRuntime {
         io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers =
                 new io.github.lamspace.openlatch.server.phaser.PhaserRegistry();
         gateway.setPhaserRegistry(phasers);
+        // v11：timer 等待簿记 + 就绪驱动（Leader 本地易失态簿记 + 零日志到期扫描；
+        // 账簿本体经复制状态机——判例 phasers/queueReadyDriver 装配位与换主清零）。
+        io.github.lamspace.openlatch.server.timer.TimerRegistry timers =
+                new io.github.lamspace.openlatch.server.timer.TimerRegistry();
+        gateway.setTimerRegistry(timers);
+        TimerReadyDriver timerDriver = new TimerReadyDriver(subsystem, gateway,
+                config.timerReadyTickMs(), metrics);
+        gateway.setTimerReadyDriver(timerDriver);
+        timerDriver.start();
         ClusterRequestHandler handler = new ClusterRequestHandler(gateway, subsystem.core(),
-                waitQueue, config, leaderTracker, metrics, topics, conditions, phasers);
+                waitQueue, config, leaderTracker, metrics, topics, conditions, phasers, timers);
         if (metrics != null) {
             // 复制态 gauge 与角色指标绑定：抓取线程弱一致读，不触碰应用锁。
             metrics.bindClusterGauges(subsystem.core().shadow(), waitQueue, registry,
-                    clusterConfig.nodeId(), leaderTracker, topics, conditions, phasers);
+                    clusterConfig.nodeId(), leaderTracker, topics, conditions, phasers, timers);
         }
         // 复制停摆自愈看门狗：装配末位——全部判据通道（division/gateway/
         // client 池）此时均已就绪；阈值由 election-timeout 折算钉死。
@@ -244,7 +306,7 @@ public final class ClusterRuntime {
         log.info("cluster runtime up: node={}, peers={}", clusterConfig.nodeId(), clusterConfig.peers());
         return new ClusterRuntime(subsystem, waitQueue, gateway, sessionCoordinator,
                 expiryDriver, queueReadyDriver, handler, leaderTracker, stallWatchdog, topics,
-                conditions, phasers);
+                conditions, phasers, timers, timerDriver);
     }
 
     /**
@@ -262,6 +324,7 @@ public final class ClusterRuntime {
      */
     public void close() {
         stallWatchdog.close();
+        timerDriver.close();
         gateway.close();
         sessionCoordinator.close();
         queueReadyDriver.close();

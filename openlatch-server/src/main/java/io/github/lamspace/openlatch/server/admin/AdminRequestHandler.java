@@ -346,6 +346,7 @@ public final class AdminRequestHandler {
             int barrierEntries = 0;
             int queueEntries = 0;
             int phaserEntries = 0;
+            int timerEntries = 0;
             for (CoreInspection.KeySnapshot k : standaloneCore.inspect().keys()) {
                 if (k.family() == KeyFamily.LATCH) {
                     latchEntries++;
@@ -357,12 +358,17 @@ public final class AdminRequestHandler {
                     queueEntries++;
                 } else if (k.family() == KeyFamily.PHASER) {
                     phaserEntries++;
+                } else if (k.family() == KeyFamily.TIMER) {
+                    timerEntries++;
                 }
             }
             b.setHeldLocks(st.heldLocks()).setHeldSemaphores(st.heldSemaphores())
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
                     .setPhaserEntries(phaserEntries)
+                    // v11：延时触发条目数（复制态家族读数——单机常驻账簿，判例
+                    // phaser_entries；装载存量即条目数本身，无单键峰值线）。
+                    .setTimerEntries(timerEntries)
                     // v8：订阅登记键数（Leader/单机视角；无持有语义单列）。
                     .setTopicEntries(standaloneTopics == null ? 0
                             : standaloneTopics.topicKeyCount())
@@ -376,6 +382,7 @@ public final class AdminRequestHandler {
             int barrierEntries = 0;
             int queueEntries = 0;
             int phaserEntries = 0;
+            int timerEntries = 0;
             for (ShadowTable.AdminEntryView v : shadow.adminEntries().values()) {
                 if (v.lockType() == LockType.LOCK_TYPE_LATCH_VALUE) {
                     latchEntries++;
@@ -392,12 +399,17 @@ public final class AdminRequestHandler {
                     // v10：相位器条目数（复制态家族读数，各节点经镜像收敛一致，
                     // 与 topic 的 Leader 本地表口径分轨）。
                     phaserEntries++;
+                } else if (ShadowTable.isTimerType(v.lockType())) {
+                    // v11：延时触发条目数（复制态家族读数——判例 phaser，与
+                    // topic 本地表口径分轨）。
+                    timerEntries++;
                 }
             }
             b.setHeldLocks(held[0]).setHeldSemaphores(held[1])
                     .setLatchEntries(latchEntries).setAtomicEntries(atomicEntries)
                     .setBarrierEntries(barrierEntries).setQueueEntries(queueEntries)
                     .setPhaserEntries(phaserEntries)
+                    .setTimerEntries(timerEntries)
                     // v8：订阅登记键数仅 Leader 视角呈现（降级残留随下次当选
                     // 一并清零，非 Leader 恒 0——判例等待队列 Leader 门控）。
                     .setTopicEntries(leaderNow() ? cluster.topicRegistry().topicKeyCount() : 0)
@@ -408,7 +420,9 @@ public final class AdminRequestHandler {
                             ? cluster.waitQueue().totalWaiters()
                                     + cluster.conditionRegistry().totalCount()
                                     + (cluster.phaserRegistry() == null
-                                            ? 0 : cluster.phaserRegistry().totalCount()) : 0)
+                                            ? 0 : cluster.phaserRegistry().totalCount())
+                                    + (cluster.timerRegistry() == null
+                                            ? 0 : cluster.timerRegistry().totalCount()) : 0)
                     .setNodeRole(currentRole());
         }
         return envelope(msg, MessageType.ADMIN_SUMMARY, x -> x.setAdminSummaryResponse(b));
@@ -481,6 +495,14 @@ public final class AdminRequestHandler {
                                 .setPhaserRegistered(k.phaserRegistered())
                                 .setPhaserArrived(k.phaserArrived())
                                 .setWaiterCount(standaloneCore.phaserWaiters(k.key()).size());
+                    }
+                    if (k.family() == KeyFamily.TIMER) {
+                        // v11：timer 行账簿三元组（复制态原始读数，不折算 marked
+                        // ——呈现面时钟无关）；等待数取条目等待集（单机真源）。
+                        row.setTimerGeneration(k.timerGeneration())
+                                .setTimerArmed(k.timerArmed())
+                                .setTimerFireAtMs(k.timerFireAtMs())
+                                .setWaiterCount(standaloneCore.timerWaiters(k.key()).size());
                     }
                     if (k.family() == KeyFamily.ATOMIC) {
                         // v4：原子行呈现形态与当前值（holders/租约/等待恒零）。
@@ -565,6 +587,15 @@ public final class AdminRequestHandler {
                             .setPhaserArrived(v.phaserArrived());
                     row.setWaiterCount(leader && cluster.phaserRegistry() != null
                             ? cluster.phaserRegistry().count(en.getKey()) : 0);
+                } else if (ShadowTable.isTimerType(v.lockType())) {
+                    // v11：timer 行账簿三元组（复制态，各节点一致且不随节点时钟
+                    // 漂移——呈现面不折算 marked）；等待数 Leader 簿记、Follower 恒 0
+                    //（与 phaser 双轨同型，"三计数可读而等待数为零"非矛盾）。
+                    row.setTimerGeneration(v.timerGeneration())
+                            .setTimerArmed(v.timerArmed())
+                            .setTimerFireAtMs(v.timerFireAtMs());
+                    row.setWaiterCount(leader && cluster.timerRegistry() != null
+                            ? cluster.timerRegistry().count(en.getKey()) : 0);
                 }
                 rows.add(row.build());
             }
@@ -714,6 +745,19 @@ public final class AdminRequestHandler {
                             .setRegisteredAtMs(wv.enqueuedAtMs()).build());
                 }
             }
+            if (snap.family() == KeyFamily.TIMER) {
+                // v11：timer 键明细——账簿三元组（复制态原始读数）+ 挂起等待明细
+                //（单机=条目等待集，登记到达序；与 waiters 区段并列不并号）。
+                b.setTimerGeneration(snap.timerGeneration())
+                        .setTimerArmed(snap.timerArmed())
+                        .setTimerFireAtMs(snap.timerFireAtMs());
+                for (var wv : standaloneCore.timerWaiters(req.getKey())) {
+                    b.addTimerWaitersInfo(io.github.lamspace.openlatch.protocol
+                            .AdminTimerWaiterInfo.newBuilder()
+                            .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                            .setArmedAtMs(wv.enqueuedAtMs()).build());
+                }
+            }
             if (snap.family() == KeyFamily.LOCK) {
                 // v9：LOCK 键条件等待明细（条目锁内只读快照，集建立序→
                 // 集内到达序；与等待队列区段并列——已搬运入队项只在上方
@@ -776,6 +820,15 @@ public final class AdminRequestHandler {
                             .setSessionId(pr.sessionId()).setParties(pr.parties()).build());
                 }
             }
+            if (ShadowTable.isTimerType(v.lockType())) {
+                // v11：timer 明细——三元组为复制态镜像（各节点一致、原始读数
+                // 不折算——命中呈现非 topic 式未命中）；挂起等待明细为 Leader
+                // 本地簿记（下方 leader 分支填充，Follower 随 wait_queue_leader_only
+                // 同源标注如实空）。
+                b.setTimerGeneration(v.timerGeneration())
+                        .setTimerArmed(v.timerArmed())
+                        .setTimerFireAtMs(v.timerFireAtMs());
+            }
             if (ShadowTable.isQueueType(v.lockType())) {
                 // v7：队列明细（复制态镜像读数；首元素到期为条目时刻口径，
                 // 全量元素零外发）。
@@ -815,6 +868,18 @@ public final class AdminRequestHandler {
                                 .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
                                 .setExpectedPhase(wv.expectedPhase())
                                 .setRegisteredAtMs(wv.enqueuedAtMs()).build());
+                    }
+                }
+                if (ShadowTable.isTimerType(v.lockType())
+                        && cluster.timerRegistry() != null) {
+                    // v11：timer 等待明细（Leader 本地簿记视图，登记到达序；
+                    // 非 Leader 不填——proto 缺省零值/空列表即如实零读，上方
+                    // wait_queue_leader_only 同源标注）。
+                    for (var wv : cluster.timerRegistry().waiters(req.getKey())) {
+                        b.addTimerWaitersInfo(io.github.lamspace.openlatch.protocol
+                                .AdminTimerWaiterInfo.newBuilder()
+                                .setSessionId(wv.sessionId()).setRequestId(wv.requestId())
+                                .setArmedAtMs(wv.armedAtMs()).build());
                     }
                 }
                 if ("lock".equals(familyNameOfLockType(v.lockType()))) {
@@ -912,6 +977,7 @@ public final class AdminRequestHandler {
             case BARRIER -> "barrier";
             case QUEUE -> "queue";
             case PHASER -> "phaser";
+            case TIMER -> "timer";
         };
     }
 
@@ -939,6 +1005,9 @@ public final class AdminRequestHandler {
         }
         if (ShadowTable.isPhaserType(lockTypeValue)) {
             return "phaser";
+        }
+        if (ShadowTable.isTimerType(lockTypeValue)) {
+            return "timer";
         }
         return "lock";
     }

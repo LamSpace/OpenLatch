@@ -262,6 +262,8 @@ public final class ServerSessionHandler extends SimpleChannelInboundHandler<Enve
                         .handleConditionOp(session, msg, ctx);
                 case PHASER_OP -> cluster.requestHandler()
                         .handlePhaserOp(session, msg, ctx);
+                case TIMER_OP -> cluster.requestHandler()
+                        .handleTimerOp(session, msg, ctx);
                 case CLUSTER_VIEW -> {
                     // 只读查询：任意节点以 LeaderTracker 单源 + 本地配置作答，
                     // 不产生日志条目（v2 客户端种子发现/诊断）。

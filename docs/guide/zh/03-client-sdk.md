@@ -402,6 +402,59 @@ ph.awaitAdvanceInterruptibly(seen, 5, TimeUnit.SECONDS); // 等相位推进越�
    `arriveAndAwaitAdvance` 的挂起半程恒宽容）。需 v10 握手（升级序先服务端后
    客户端）：v≤9 会话发 `PHASER_OP` 得 `INVALID_REQUEST` 消息级拒绝、不断连。
 
+## 延时触发（OTimer，v11）
+
+定时单次标记：装载一枚未来某刻响一次、全体共见的标记，对应 JDK `java.util.Timer`
+的可判定子集。句柄无状态、无需关闭、构造零网络（无"构造即预装"，装载恒显式）。
+到期闹钟惯用法：
+
+```java
+OTimer t = client.newTimer("daily-report");   // 构造零网络
+long 代次 = t.schedule(6, TimeUnit.HOURS);     // 6 小时后响一次，返回新代次
+// 另一进程/稍后：
+boolean 响了 = t.await(7, TimeUnit.HOURS);      // true=见到标记；false=超时
+if (t.isFired()) { /* 全体共见同一次到期，不消耗 */ }
+t.schedule(6, TimeUnit.HOURS);                  // 重装载：开新一轮（换代清钟）
+t.disarm();                                     // 撤销：当代终结，在等者收异常
+```
+
+语义边界（务必知晓，详见 [01 核心概念 §13](01-concepts.md)）：
+
+1. **全体共见、不消耗**：一次 `schedule` 恰一发，到点后任何到达的 `await`/
+   `isFired` 恒即刻通过（标记不需被取走）——与 `ODelayQueue` 延时形态的
+   "一元素一消费者、take 即改变所有人可见状态"是两台机器：广播单次标记用
+   timer，延时交接用队列；
+2. **改期以最新代为准**：重装载换代清钟，已挂起的 `await` 以最新代到期时刻为准
+   （推后多睡、提前先响皆合法，无"旧代承诺"）；`disarm` 使当代终结并**即时**
+   唤醒全体在等者——`await()`/`await(timeout)` 收到当代被撤销时抛
+   `OpenLatchException`（"等待不可再满足"异常终态），**不是**布尔 `false`
+   （`false` 仅承载超时，两形态不混读）；
+3. **装载者死亡钟照响**（死亡语义第三形态）：装载方进程/会话死亡不影响触发——
+   账簿绑定 key、死亡零扰动，旁观者照共见；等待位随装载方会话灭但钟不停
+   （与屏障"死亡即破障"、phaser"死亡即摘除"并列，是 timer 相对进程本地
+   `Timer` 的核心增量）；
+4. **无周期、无回调、无绝对时刻**（三不提供）：`schedule(task, delay, period)`
+   不提供——服务端周期自触即常驻重发变异，与"到期零条目"裁决相反，客户端
+   循环 `schedule` 即等价；无任务载荷/回调（服务端不执行用户代码，触发形态是
+   标记位+唤醒）；`scheduleAt(Instant)` 不收（客户端墙钟偏差注入即污染判据，
+   绝对到期时刻恒由服务端应用点折算，仅收相对 `delay`）；
+5. **成本与精度模型**：`schedule`/`disarm`/每次读数各 1 个 RTT；`await` 含挂起
+   期分片保活重发。到点唤醒滞后一个服务端扫描周期（默认 200ms，正确性不依赖
+   精度——谓词恒可重判）。装载条目率恒等于用户显式操作频率（到期零条目）；
+6. **等待跨换主自愈**：唤醒谓词在复制账簿，换主窗丢失的通知由重发即刻了结
+   （已到期 `true`、已撤销异常、未到期续挂），无丢失窗（沿 phaser 同侧证据，
+   对照条件 signal 丢失窗）；
+7. **advisory 读数与钟偏移**：`isFired`/`isArmed`/`getRemainingMillis` 是
+   Leader 本地零日志读数（即刻过期是契约），"已否到期"随判定节点本地时钟——
+   跨节点可见偏差 ≤ 节点间时钟偏移（显式降级，管理呈现面不折算、恒呈原始
+   `{代次, armed, fire_at_ms}`）；
+8. **护栏与版本门**：`max-timer-horizon-ms`（默认 24h）限单次 `delay`——超限
+   `INVALID_REQUEST`（参数线，判定唯一在受理点、条目侧不复核）；挂起等待受
+   `max-queue-depth-per-key` 合并口径（超限 `OVERLOADED`）；唤醒精度
+   `timer-ready-tick-ms`（默认 200ms，与队列 tick 分轨）。需 v11 握手（升级序
+   先服务端后客户端）：v≤10 会话发 `TIMER_OP` 得 `INVALID_REQUEST` 消息级
+   拒绝、不断连。
+
 ## 异步用法
 
 ```java

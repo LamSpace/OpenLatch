@@ -127,6 +127,28 @@ class ServerMetricsVocabularyTest {
                 StatusCode.INVALID_REQUEST);
         metrics.recordPhaser(io.github.lamspace.openlatch.protocol.PhaserOp.PHASER_OP_ARRIVE,
                 StatusCode.NOT_LEADER);
+        // v11：timer 计数线（op 词表五值各一形态；QUEUED/OVERLOADED 仅 await
+        // op 可达；DENIED 经 timer AWAIT 终态首次回到可达面——既有码值新可达线
+        // 的词表证据；fired 为唤醒集合事件计数）。
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                StatusCode.OK);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp
+                .TIMER_OP_SCHEDULE, StatusCode.INVALID_REQUEST);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_DISARM,
+                StatusCode.OK);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_AWAIT,
+                StatusCode.QUEUED);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_AWAIT,
+                StatusCode.OVERLOADED);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_AWAIT,
+                StatusCode.DENIED);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_CANCEL,
+                StatusCode.OK);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_QUERY,
+                StatusCode.OK);
+        metrics.recordTimer(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_AWAIT,
+                StatusCode.NOT_LEADER);
+        metrics.recordTimerFired(2);
         // is_leader 由集群装配注册（08c），本测试经角色绑定入口补齐词表覆盖。
         metrics.bindClusterIsLeader(7, () -> true);
         scrape = metrics.registry().scrape();
@@ -184,6 +206,42 @@ class ServerMetricsVocabularyTest {
         // waiters 口径不含订阅者（三口径分离的负向守门）。
         assertThat(scrape).doesNotContain("topic_total_total");
         assertThat(scrape).doesNotContain("topic.dropped");
+    }
+
+    /**
+     * v11：timer 两命名点线路名——{@code timer.total{op,status}} 按五操作词表
+     * 归数（{@code QUEUED}/{@code OVERLOADED} 仅 await 线；{@code DENIED} 经
+     * timer AWAIT 终态首次可达——既有码值新可达线的词表证据）；
+     * {@code timer.fired.total} 为唤醒集合事件计数（唤醒面非到期面）。timer
+     * 不设单键峰值 Gauge（装载态二值——"无 timer_*_max 线"为口径缺位避让的
+     * 线路面证据）。恒不可达面负向守门：{@code BARRIER_BROKEN}/{@code
+     * REJECT_SUBSCRIBERS}/{@code NOT_HELD} 对 timer 无线。
+     */
+    @Test
+    void timerLineNames() {
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"schedule\",status=\"OK\"} 1");
+        assertThat(scrape).contains(
+                "openlatch_server_timer_total{op=\"schedule\",status=\"INVALID_REQUEST\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"disarm\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"await\",status=\"QUEUED\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"await\",status=\"OVERLOADED\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"await\",status=\"DENIED\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"cancel\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"query\",status=\"OK\"} 1");
+        assertThat(scrape)
+                .contains("openlatch_server_timer_total{op=\"await\",status=\"NOT_LEADER\"} 1");
+        assertThat(scrape).contains("openlatch_server_timer_fired_total 2");
+        // 避让注记的线路面证据：无单键峰值线；恒不可达码形无线。
+        assertThat(scrape).doesNotContain("openlatch_server_timer_armed_max");
+        assertThat(scrape).doesNotContain("timer_total{op=\"await\",status=\"BARRIER_BROKEN\"}");
+        assertThat(scrape).doesNotContain("timer_total{op=\"schedule\",status=\"NOT_HELD\"}");
     }
 
     /**

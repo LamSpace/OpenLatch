@@ -35,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 副本回放逐字节一致（含死亡摘除驱动的推进——账簿迁移纯确定性、不读墙钟
  * 外生输入）；等待/取消/查询零条目；去重槽与换代窗口回放不双计数、相位
  * 单调不回退；镜像 digest 含 phaser 字段跨副本等值。编号证据基线由
- * "RaftEntryType 止于 13"更替为"止于 14 且 14 为 phaser 专用"，并同时钉死
+ * "RaftEntryType 止于 13"更替为"止于 14 且 14 为 phaser 专用"（v11 再更替为
+ * "止于 15、15 为 timer 专用"，断言按当前版本口径表述），并同时钉死
  * topic/condition 两代边界在 v10 上界下依然成立（版本相对口径）。
  */
 class StateMachinePhaserTest {
@@ -198,18 +199,20 @@ class StateMachinePhaserTest {
     }
 
     @Test
-    void numberingEvidenceBaselineMovesTo14AndPriorBoundariesHold() {
-        // 更替的守卫基线：RaftEntryType 值域止于 14、14 为 phaser 专用；
+    void numberingEvidenceBaselineMovesTo15AndPriorBoundariesHold() {
+        // 更替的守卫基线（v11 版本相对口径）：RaftEntryType 值域止于 15、
+        // 15 为 timer 专用、14 为 phaser 专用（v10 时代上界随本代改相对表述）；
         // topic/condition 两代"零占用"证据按版本相对口径在本上界下成立。
         for (RaftEntryType t : RaftEntryType.values()) {
             if (t == RaftEntryType.UNRECOGNIZED) {
                 continue;
             }
-            assertThat(t.getNumber()).isLessThanOrEqualTo(14);
+            assertThat(t.getNumber()).isLessThanOrEqualTo(15);
             assertThat(t.name()).doesNotContain("TOPIC");
             assertThat(t.name()).doesNotContain("CONDITION");
         }
         assertThat(RaftEntryType.PHASER_OP_ENTRY.getNumber()).isEqualTo(14);
+        assertThat(RaftEntryType.TIMER_OP_ENTRY.getNumber()).isEqualTo(15);
         // 1–13 既有编号语义不变（判例条目工厂逐一可用，golden 冻结兜底）。
         assertThat(SnapshotLock.getDescriptor().findFieldByName("phaser_phase").getNumber())
                 .isEqualTo(35);

@@ -194,6 +194,21 @@ class ConsoleStandaloneTest {
             }
         });
         awaitVisible("/keys", "stage:phaser");
+        // v11 timer：装载远钟 + 一线程挂 await（未到期持续挂起——keys 页三元组、
+        // 详情等待区段与"等待者含 timer 挂起"口径断言依赖此状态）。
+        io.github.lamspace.openlatch.client.OTimer timer =
+                seedClient.newTimer("stage:timer");
+        timer.schedule(600_000, java.util.concurrent.TimeUnit.MILLISECONDS);
+        BLOCKED.submit(() -> {
+            try {
+                timer.await(30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException e) {
+                // 会话关闭/超时形态：观察面已断言过，脱队可接受。
+            }
+        });
+        awaitVisible("/keys", "stage:timer");
     }
 
     /** 关停服务器与客户端（daemon 阻塞线程随连接关闭自然脱队）。 */
@@ -243,15 +258,16 @@ class ConsoleStandaloneTest {
                 .contains(OpenLatchServer.serverVersion())
                 .doesNotContain("管理认证失败");
         // 持有 lock=1 / semaphore=1 / latch 条目=1 / barrier 条目=1 / queue 条目=1 /
-        // phaser 条目=1 /
-        // 等待者=7（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一 + v9 条件
-        // 等待者一 + v10 phaser 到场等待者一——v9/v10 口径：等待者数字含条件与
-        // 相位等待者，表头随行注记）。
+        // phaser 条目=1 / timer 条目=1 /
+        // 等待者=8（锁/信号量/Latch/屏障各一 + v7 队列等容量挂起者一 + v9 条件
+        // 等待者一 + v10 phaser 到场等待者一 + v11 timer 旁观等待者一——v9/v10/v11
+        // 口径：等待者数字含条件、相位与到期等待者，表头随行注记）。
         assertThat(body).contains("<td>1</td>");
-        assertThat(body).contains("<td>7</td>");
+        assertThat(body).contains("<td>8</td>");
         assertThat(body).contains("等待者（含条件/相位等待）");
-        // v10：PHASER 条目数列（概览表头与读数）。
+        // v10：PHASER 条目数列（概览表头与读数）；v11：TIMER 条目数列。
         assertThat(body).contains("PHASER 条目");
+        assertThat(body).contains("TIMER 条目");
         // 会话数：业务客户端 + 控制台自身管理连接 + v9 条件预置裸协议连接。
         assertThat(body).contains("<td>3</td>");
         // sparkline 三线已渲染（指标区未降级）。
@@ -267,11 +283,12 @@ class ConsoleStandaloneTest {
                 .contains("cond:job").contains("stage:phaser")
                 .contains("lock").contains("semaphore").contains("latch").contains("barrier")
                 .contains("queue").contains("topic").contains("phaser");
-        // 七行 key（链接计数），总条数读数为 7（pager 的 <span>7</span>）——
-        // 含 v9 条件等待键（持有已随 await 释放、条件集使条目持续可见）。
+        // 九行 key（链接计数），总条数读数为 9（pager 的 <span>9</span>）——
+        // 含 v9 条件等待键（持有已随 await 释放、条件集使条目持续可见）与
+        // v11 timer 旁观键（装载存续使条目持续可见）。
         assertThat(org.springframework.util.StringUtils.countOccurrencesOf(
-                body, "/key?node=")).isEqualTo(8);
-        assertThat(body).contains("<span>8</span>");
+                body, "/key?node=")).isEqualTo(9);
+        assertThat(body).contains("<span>9</span>");
         // v9 LOCK 行条件等待数随行呈现（Leader/单机来源非零如实）。
         assertThat(body).contains("1 条件等待");
         // topic 行读数（订阅数；Leader 本地登记注记）。
@@ -326,6 +343,14 @@ class ConsoleStandaloneTest {
         assertThat(ph).contains("相位 0 · registered 3 · 当前到场 2")
                 .contains("<h3>注册配额</h3>").contains("<h3>相位等待</h3>")
                 .contains("无持有者（相位器按注册/到场合拢裁决，无持有语义）");
+        // v11 timer 明细：三元组横注（装载态与绝对到期时刻原始读数、无 marked
+        // 折算）+ 装载账簿表 + 到期等待区段（登记到达序）+ 无持有语义如实标注。
+        String tm = get("/key?node=" + ConsoleTestSupport.nodeAddress(SERVER)
+                + "&key=stage:timer");
+        assertThat(tm).contains("代次 1").contains("<h3>装载账簿</h3>")
+                .contains("<h3>到期等待</h3>").contains("在装")
+                .contains("无持有者（延时触发绑定 key 不绑定会话，装载者死亡钟照响，无持有语义）")
+                .doesNotContain("已到期");
         // v9 条件等待区段（单机口径）：区段标题、条件名寻址明细、
         // "持有已随 await 释放"形态注记（不以空壳掩盖）；等待队列区段
         // 与之并列且搬运项不重复（当前无搬运，队列为"无人等待"）。

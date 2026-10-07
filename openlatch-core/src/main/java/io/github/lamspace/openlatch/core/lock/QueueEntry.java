@@ -675,7 +675,7 @@ public final class QueueEntry implements KeyEntry {
                 null, 0, 0, 0,
                 0, 0, 0, false, null, null, null,
                 capacity, elements.size(), head == null ? 0 : head.expiresAtMs,
-                payloadBytes, head == null ? null : head.payload.clone(), 0, 0, 0);
+                payloadBytes, head == null ? null : head.payload.clone(), 0, 0, 0, 0, false, 0);
     }
 
     // ===== 内部实现 =====

@@ -157,5 +157,19 @@ public enum Outcome {
      * 建条目，避免"key 在而账簿空"歧义窗）；server 层映射协议
      * {@code INVALID_REQUEST}。
      */
-    REJECT_PHASER_NO_ENTRY
+    REJECT_PHASER_NO_ENTRY,
+    /**
+     * 拒绝：非 SCHEDULE 操作命中不存在的延时触发条目——SCHEDULE 是 TIMER
+     * 家族唯一的建条目入口（timer 无"未装载即等待"的合法形态，MUST NOT
+     * 隐式建钟，避免"key 在而账簿空"歧义窗）；server 层映射协议
+     * {@code INVALID_REQUEST}。
+     */
+    REJECT_TIMER_NO_ENTRY,
+    /**
+     * 拒绝：SCHEDULE 的 {@code delay_ms} 超过 {@code max-timer-horizon-ms}
+     * ——防"永远不响的钟"占驻账簿；判定唯一在受理点（单机门面/集群 Leader
+     * 预检），条目应用侧不复核（配置漂移不撕裂账簿，判例 phaser parties 线）；
+     * server 层映射协议 {@code INVALID_REQUEST}（参数越界线，非资源护栏码）。
+     */
+    REJECT_TIMER_DELAY_OVER
 }

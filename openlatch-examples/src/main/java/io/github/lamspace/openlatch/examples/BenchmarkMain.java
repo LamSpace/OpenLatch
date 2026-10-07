@@ -34,6 +34,7 @@ import io.github.lamspace.openlatch.client.OBarrier;
 import io.github.lamspace.openlatch.client.OBlockingQueue;
 import io.github.lamspace.openlatch.client.ODelayQueue;
 import io.github.lamspace.openlatch.client.OCondition;
+import io.github.lamspace.openlatch.client.OTimer;
 import io.github.lamspace.openlatch.client.OPhaser;
 import io.github.lamspace.openlatch.client.OLock;
 import io.github.lamspace.openlatch.client.OTopic;
@@ -159,6 +160,9 @@ public final class BenchmarkMain {
             // phaser 相（v10）热身：单发到场与两方按相位会合。
             runPhaserArrive(client, WARMUP_MS / 2);
             runPhaserTrip(client, server.port(), WARMUP_MS / 2);
+            // timer 相（v11）热身：装载受理与一主一备同刻了结。
+            runTimerSchedule(client, WARMUP_MS / 2);
+            runTimerFire(client, server.port(), WARMUP_MS / 2);
             List<long[]> queueHandoffThroughput = new ArrayList<>();
             List<double[]> queueHandoffLatencies = new ArrayList<>();
             List<long[]> queueFanoutThroughput = new ArrayList<>();
@@ -178,6 +182,10 @@ public final class BenchmarkMain {
             List<double[]> phaserArriveLatencies = new ArrayList<>();
             List<long[]> phaserTripThroughput = new ArrayList<>();
             List<double[]> phaserTripLatencies = new ArrayList<>();
+            List<long[]> timerScheduleThroughput = new ArrayList<>();
+            List<double[]> timerScheduleLatencies = new ArrayList<>();
+            List<long[]> timerFireThroughput = new ArrayList<>();
+            List<double[]> timerFireLatencies = new ArrayList<>();
             List<long[]> refSmallThroughput = new ArrayList<>();
             List<double[]> refSmallLatencies = new ArrayList<>();
             List<long[]> refBigThroughput = new ArrayList<>();
@@ -283,6 +291,12 @@ public final class BenchmarkMain {
                 Result pt = runPhaserTrip(client, server.port(), SAMPLE_MS);
                 phaserTripThroughput.add(new long[] {pt.opsPerSec});
                 phaserTripLatencies.add(pt.latencies);
+                Result tsched = runTimerSchedule(client, SAMPLE_MS);
+                timerScheduleThroughput.add(new long[] {tsched.opsPerSec});
+                timerScheduleLatencies.add(tsched.latencies);
+                Result tfire = runTimerFire(client, server.port(), SAMPLE_MS);
+                timerFireThroughput.add(new long[] {tfire.opsPerSec});
+                timerFireLatencies.add(tfire.latencies);
             }
             String report = renderReport(uncThroughput, uncLatencyBatches,
                     contThroughput, latencies, addThroughput, addLatencies,
@@ -300,6 +314,8 @@ public final class BenchmarkMain {
                     conditionHandoffLatencies);
             report = report + renderPhaserSection(phaserArriveThroughput,
                     phaserArriveLatencies, phaserTripThroughput, phaserTripLatencies);
+            report = report + renderTimerSection(timerScheduleThroughput,
+                    timerScheduleLatencies, timerFireThroughput, timerFireLatencies);
             System.out.println(report);
             Path out = resolveOutputPath();
             Files.createDirectories(out.getParent());
@@ -1280,6 +1296,121 @@ public final class BenchmarkMain {
                 .append(medianOps(tripThroughput))
                 .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.5)))
                 .append(" | ").append(fmt(medianQuantile(tripLatencies, 0.99))).append(" |\n");
+        return sb.toString();
+    }
+
+    /**
+     * 装载受理相（v11）：固定键循环 {@code schedule}——每发恰一条变异条目
+     * （换代清钟），ops=受理装载数，延迟取单次请求-应答 RTT。
+     *
+     * @param client 客户端
+     * @param millis 采样时长
+     * @return 结果
+     */
+    private static Result runTimerSchedule(OpenLatchClient client, long millis) {
+        OTimer t = client.newTimer("bench:timer:schedule");
+        AtomicLong ops = new AtomicLong();
+        Reservoir reservoir = new Reservoir();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (System.nanoTime() < deadline) {
+            long start = System.nanoTime();
+            t.schedule(600_000L, TimeUnit.MILLISECONDS);
+            reservoir.record(System.nanoTime() - start);
+            ops.incrementAndGet();
+        }
+        return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                reservoir.sortedSamples());
+    }
+
+    /**
+     * 一主一备同刻了结相（v11）：主连接循环"装载 50ms 近钟→await 了结"，
+     * 子连接旁观者对同 key 持续 await——ops=主侧完成轮数（每轮一次到期全体
+     * 共见），延迟取主侧 schedule 应答至本轮 {@code await=true} 全程（含服务端
+     * tick 唤醒滞后一窗——W15 唤醒滞后基线口径）。
+     *
+     * @param client 主客户端
+     * @param port   服务端端口（子连接）
+     * @param millis 采样时长
+     * @return 结果
+     * @throws InterruptedException 采样或收工 join 被打断
+     * @throws java.util.concurrent.ExecutionException 子连接建连失败
+     * @throws java.util.concurrent.TimeoutException 子连接建连超时
+     */
+    private static Result runTimerFire(OpenLatchClient client, int port, long millis)
+            throws InterruptedException, java.util.concurrent.ExecutionException,
+            java.util.concurrent.TimeoutException {
+        String key = "bench:timer:fire:" + System.nanoTime();
+        OTimer a = client.newTimer(key);
+        OpenLatchClient subClient = OpenLatchClient.builder()
+                .address("127.0.0.1:" + port)
+                .defaultWaitTimeout(Duration.ofSeconds(60))
+                .build();
+        subClient.connectAsync().get(10, TimeUnit.SECONDS);
+        try {
+            OTimer peer = subClient.newTimer(key);
+            java.util.concurrent.atomic.AtomicBoolean ended =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            Thread peerT = new Thread(() -> {
+                try {
+                    while (!ended.get()) {
+                        peer.await(30, TimeUnit.SECONDS);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (RuntimeException e) {
+                    if (!ended.get()) {
+                        System.err.println("[bench-timer-peer] " + e);
+                    }
+                }
+            }, "bench-timer-peer");
+            peerT.setDaemon(true);
+            peerT.start();
+            AtomicLong ops = new AtomicLong();
+            Reservoir reservoir = new Reservoir();
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+            while (System.nanoTime() < deadline) {
+                long start = System.nanoTime();
+                a.schedule(50L, TimeUnit.MILLISECONDS);
+                if (!a.await(30, TimeUnit.SECONDS)) {
+                    break; // 预算不中：基线窗失效，收工
+                }
+                reservoir.record(System.nanoTime() - start);
+                ops.incrementAndGet();
+            }
+            ended.set(true);
+            peerT.interrupt();
+            peerT.join(5_000);
+            return new Result(Math.round(ops.doubleValue() * 1_000.0 / millis),
+                    reservoir.sortedSamples());
+        } finally {
+            subClient.shutdown();
+        }
+    }
+
+    /**
+     * 渲染 timer 小节（v11），追加至统一基线报告。
+     *
+     * @param scheduleThroughput 装载受理吞吐批
+     * @param scheduleLatencies  装载受理 RTT 批
+     * @param fireThroughput     同刻了结轮次吞吐批
+     * @param fireLatencies      同刻了结端到端延迟批（含 tick 窗）
+     * @return Markdown 小节
+     */
+    private static String renderTimerSection(List<long[]> scheduleThroughput,
+            List<double[]> scheduleLatencies, List<long[]> fireThroughput,
+            List<double[]> fireLatencies) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n## timer 相（v11）\n\n");
+        sb.append("| 场景 | ops/s（中位） | 延迟 P50 (ms) | P99 (ms) |\n");
+        sb.append("|---|---|---|---|\n");
+        sb.append("| 装载受理（每发一变异条目） | ")
+                .append(medianOps(scheduleThroughput))
+                .append(" | ").append(fmt(medianQuantile(scheduleLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(scheduleLatencies, 0.99))).append(" |\n");
+        sb.append("| 一主一备同刻了结全程（含 tick 唤醒窗） | ")
+                .append(medianOps(fireThroughput))
+                .append(" | ").append(fmt(medianQuantile(fireLatencies, 0.5)))
+                .append(" | ").append(fmt(medianQuantile(fireLatencies, 0.99))).append(" |\n");
         return sb.toString();
     }
 

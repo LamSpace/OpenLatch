@@ -123,6 +123,12 @@ public final class ClusterRequestHandler {
      * phaser 面，抵达回 {@code INTERNAL_ERROR}，判例 conditions 同形态）。
      */
     private final io.github.lamspace.openlatch.server.phaser.PhaserRegistry phasers;
+    /**
+     * v11：timer 等待簿记（Leader 本地态，账簿本体经复制状态机——等待/撤销/
+     * 读数在本簿记与影子表直答，装载/撤销经提交；{@code null}=夹具无 timer 面，
+     * 抵达回 {@code INTERNAL_ERROR}，判例 phasers 同形态）。
+     */
+    private final io.github.lamspace.openlatch.server.timer.TimerRegistry timers;
 
     /**
      * 构造处理器（不埋点，既有测试夹具形态）。
@@ -222,6 +228,35 @@ public final class ClusterRequestHandler {
                                          conditions,
                                  io.github.lamspace.openlatch.server.phaser.PhaserRegistry
                                          phasers) {
+        this(gateway, kernel, waitQueue, config, leaderTracker, metrics, topics, conditions,
+                phasers, null);
+    }
+
+    /**
+     * 构造集群请求处理器（v11 全参形态：追加 timer 等待簿记装配）。
+     *
+     * @param gateway       复制网关
+     * @param kernel        状态机内核（影子读与提交路径装配）
+     * @param waitQueue     等待队列
+     * @param config        服务配置
+     * @param leaderTracker Leader 提示单源
+     * @param metrics       指标门面，可为 {@code null}（不埋点）
+     * @param topics        topic 登记表（Leader 本地态）
+     * @param conditions    条件等待登记表（Leader 本地态）
+     * @param phasers       phaser 等待簿记（Leader 本地态）
+     * @param timers        timer 等待簿记（Leader 本地态）；{@code null}=夹具
+     *                      无 timer 面（TIMER_OP 抵达时回 {@code INTERNAL_ERROR}）
+     */
+    public ClusterRequestHandler(ReplicationGateway gateway, LockStateMachineCore kernel,
+                                 WaitQueue waitQueue, ServerConfig config,
+                                 LeaderTracker leaderTracker, ServerMetrics metrics,
+                                 io.github.lamspace.openlatch.server.topic.TopicRegistry topics,
+                                 io.github.lamspace.openlatch.server.condition.ConditionRegistry
+                                         conditions,
+                                 io.github.lamspace.openlatch.server.phaser.PhaserRegistry
+                                         phasers,
+                                 io.github.lamspace.openlatch.server.timer.TimerRegistry
+                                         timers) {
         this.gateway = gateway;
         this.kernel = kernel;
         this.waitQueue = waitQueue;
@@ -231,6 +266,7 @@ public final class ClusterRequestHandler {
         this.topics = topics;
         this.conditions = conditions;
         this.phasers = phasers;
+        this.timers = timers;
     }
 
     /**
@@ -1246,6 +1282,235 @@ public final class ClusterRequestHandler {
     }
 
     /**
+     * TIMER_OP 集群路径（v11，Leader 权威车道双轨分派——判例
+     * {@code handlePhaserOp}）。SCHEDULE/DISARM 为**变异操作**，经
+     * {@code TIMER_OP_ENTRY} 提交（受理点预检=门控/形状/horizon/家族/无条目，
+     * 越界与违例零条目在带拒绝）；AWAIT/CANCEL/QUERY 为 **Leader 本地操作**，
+     * 直读影子账簿谓词判定与簿记登记（"等待是订阅不是状态"——到期共见的
+     * 判定基于复制态镜像 + Leader 本地时钟，MUST NOT 触达提交通道）。
+     * 非 Leader 节点的全量同型 {@code NOT_LEADER} 拒绝在入口门
+     * （{@code validateEnvelope} 后按角色分派）承载，无提示字段判例族。
+     *
+     * @param session 已握手会话（v11 协商）
+     * @param msg     请求信封（{@code timer_op_request} 分支）
+     * @param ctx     连接上下文
+     */
+    public void handleTimerOp(ServerSession session, Envelope msg,
+                              ChannelHandlerContext ctx) {
+        long startNanos = System.nanoTime();
+        Envelope bad = validateEnvelope(msg, session, true);
+        if (bad != null) {
+            writeSync(ctx, session, startNanos, bad);
+            return;
+        }
+        if (session.protocolVersion() < 11) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        if (timers == null) {
+            log.warn("TIMER_OP handled without timer registry assembly");
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INTERNAL_ERROR));
+            return;
+        }
+        io.github.lamspace.openlatch.protocol.TimerOpRequest req = msg.getTimerOpRequest();
+        if (RequestDispatcher.timerShapeInvalid(req)) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        String key = req.getKey();
+        var view = kernel.shadow().adminEntry(key);
+        boolean isTimer = view != null && ShadowTable.isTimerType(view.lockType());
+        // 家族/无条目在带裁决（零条目、零簿记扰动；判例 phaser 双源守卫）。
+        if (view != null && !isTimer) {
+            writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+            return;
+        }
+        var op = req.getOp();
+        switch (op) {
+            case TIMER_OP_SCHEDULE -> {
+                if (!req.hasDelayMs() || req.getDelayMs() < 0
+                        || req.getDelayMs() > config.maxTimerHorizonMs()) {
+                    // horizon 判定唯一在受理点（越界零条目；条目应用侧不复核）。
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                io.github.lamspace.openlatch.protocol.raft.TimerOpPayload payload =
+                        io.github.lamspace.openlatch.protocol.raft.TimerOpPayload.newBuilder()
+                        .setSessionId(session.sessionId())
+                        .setRequestId(msg.getRequestId())
+                        .setRequest(req)
+                        .build();
+                gateway.submit(io.github.lamspace.openlatch.protocol.raft.RaftEntryType
+                        .TIMER_OP_ENTRY, payload.toByteString())
+                        .whenComplete((r, err) -> {
+                            Envelope resp = err == null
+                                    ? mapTimerOp(msg, r)
+                                    : commitFailure(msg, err);
+                            if (metrics != null && resp.hasTimerOpResponse()) {
+                                metrics.recordTimer(op,
+                                        resp.getTimerOpResponse().getStatus());
+                            }
+                            respondAsync(ctx, session, startNanos, resp);
+                        });
+            }
+            case TIMER_OP_DISARM -> {
+                if (!isTimer) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                io.github.lamspace.openlatch.protocol.raft.TimerOpPayload payload =
+                        io.github.lamspace.openlatch.protocol.raft.TimerOpPayload.newBuilder()
+                        .setSessionId(session.sessionId())
+                        .setRequestId(msg.getRequestId())
+                        .setRequest(req)
+                        .build();
+                gateway.submit(io.github.lamspace.openlatch.protocol.raft.RaftEntryType
+                        .TIMER_OP_ENTRY, payload.toByteString())
+                        .whenComplete((r, err) -> {
+                            Envelope resp = err == null
+                                    ? mapTimerOp(msg, r)
+                                    : commitFailure(msg, err);
+                            if (metrics != null && resp.hasTimerOpResponse()) {
+                                metrics.recordTimer(op,
+                                        resp.getTimerOpResponse().getStatus());
+                            }
+                            respondAsync(ctx, session, startNanos, resp);
+                        });
+            }
+            case TIMER_OP_AWAIT -> {
+                if (!isTimer) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                long now = System.currentTimeMillis();
+                if (!view.timerArmed()) {
+                    // 代终结即刻 DENIED（等待不可满足的显式终态——撤销唤醒后的
+                    // 重发同样落此臂，终态幂等）。
+                    timers.remove(key, session.sessionId(), msg.getRequestId());
+                    respondTimer(ctx, session, startNanos, msg, StatusCode.DENIED,
+                            view.timerGeneration(), false, view.timerFireAtMs(), false);
+                    return;
+                }
+                if (now >= view.timerFireAtMs()) {
+                    // 谓词已越（含唤醒后的了结重发与换主重挂）：即刻共见。
+                    timers.remove(key, session.sessionId(), msg.getRequestId());
+                    respondTimer(ctx, session, startNanos, msg, StatusCode.OK,
+                            view.timerGeneration(), true, view.timerFireAtMs(), true);
+                    return;
+                }
+                if (timers.count(key) >= config.maxQueueDepthPerKey()) {
+                    respondTimer(ctx, session, startNanos, msg, StatusCode.OVERLOADED,
+                            0, false, 0, false);
+                    return;
+                }
+                timers.register(key, session.sessionId(), msg.getRequestId(), now);
+                respondTimer(ctx, session, startNanos, msg, StatusCode.QUEUED,
+                        view.timerGeneration(), true, view.timerFireAtMs(), false);
+            }
+            case TIMER_OP_CANCEL -> {
+                timers.remove(key, session.sessionId(), req.getAwaitRequestId());
+                respondTimer(ctx, session, startNanos, msg, StatusCode.OK,
+                        isTimer ? view.timerGeneration() : 0,
+                        isTimer && view.timerArmed(),
+                        isTimer ? view.timerFireAtMs() : 0, false);
+            }
+            case TIMER_OP_QUERY -> {
+                if (!isTimer) {
+                    writeSync(ctx, session, startNanos,
+                            RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+                    return;
+                }
+                boolean marked = view.timerArmed()
+                        && System.currentTimeMillis() >= view.timerFireAtMs();
+                respondTimer(ctx, session, startNanos, msg, StatusCode.OK,
+                        view.timerGeneration(), view.timerArmed(), view.timerFireAtMs(), marked);
+            }
+            default -> writeSync(ctx, session, startNanos,
+                    RequestDispatcher.errorResponse(msg, StatusCode.INVALID_REQUEST));
+        }
+    }
+
+    /**
+     * TIMER 变异操作回执映射：应用回执 → 协议应答（零值形拒绝态不携三元组；
+     * marked 在读回侧按判定时刻折算——条目回执无 marked 位，派生裁决的
+     * 应答线呈现）。
+     *
+     * @param msg 原请求信封
+     * @param r   应用回执
+     * @return 应答信封
+     */
+    private Envelope mapTimerOp(Envelope msg,
+            io.github.lamspace.openlatch.protocol.raft.ApplyResult r) {
+        StatusCode status = switch (r.getStatus()) {
+            case OK -> StatusCode.OK;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case INVALID_REQUEST -> StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+        boolean marked = status == StatusCode.OK
+                && msg.getTimerOpRequest().getOp()
+                        == io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE
+                && r.getTimerArmed()
+                && System.currentTimeMillis() >= r.getTimerFireAtMs();
+        return Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.TIMER_OP)
+                .setRequestId(msg.getRequestId())
+                .setTimerOpResponse(io.github.lamspace.openlatch.protocol
+                        .TimerOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(msg.getTimerOpRequest().getOp())
+                        .setGeneration(r.getTimerGeneration())
+                        .setArmed(r.getTimerArmed())
+                        .setFireAtMs(r.getTimerFireAtMs())
+                        .setMarked(marked))
+                .build();
+    }
+
+    /**
+     * TIMER 本地操作词的即时应答写回（簿记/影子直答路径专用，op 回显与
+     * 三元组+marked 择用；拒绝态零值形）。
+     *
+     * @param ctx        连接上下文
+     * @param session    会话
+     * @param startNanos 起始时刻（写回耗时埋点）
+     * @param msg        原请求信封
+     * @param status     应答状态码
+     * @param generation 代次回显（拒绝态 0）
+     * @param armed      装载态回显（拒绝态 false）
+     * @param fireAtMs   绝对到期时刻回显（拒绝态 0）
+     * @param marked     到期共见读数
+     */
+    private void respondTimer(ChannelHandlerContext ctx, ServerSession session,
+            long startNanos, Envelope msg, StatusCode status, long generation,
+            boolean armed, long fireAtMs, boolean marked) {
+        Envelope resp = Envelope.newBuilder()
+                .setProtocolVersion(msg.getProtocolVersion())
+                .setType(MessageType.TIMER_OP)
+                .setRequestId(msg.getRequestId())
+                .setTimerOpResponse(io.github.lamspace.openlatch.protocol
+                        .TimerOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(msg.getTimerOpRequest().getOp())
+                        .setGeneration(generation)
+                        .setArmed(armed)
+                        .setFireAtMs(fireAtMs)
+                        .setMarked(marked))
+                .build();
+        if (metrics != null) {
+            metrics.recordTimer(msg.getTimerOpRequest().getOp(), status);
+        }
+        writeSync(ctx, session, startNanos, resp);
+    }
+
+    /**
      * PHASER 变异操作回执映射：应用回执 → 协议应答（零值形拒绝态不携计数；
      * {@code QUEUE_FULL} 对 phaser 恒不可达——上限判定在受理点、条目应用侧
      * 不复核，防御映射为 {@code OVERLOADED}）。
@@ -1595,6 +1860,7 @@ public final class ClusterRequestHandler {
             case TOPIC_OP -> msg.hasTopicOpRequest();
             case CONDITION_OP -> msg.hasConditionOpRequest();
             case PHASER_OP -> msg.hasPhaserOpRequest();
+            case TIMER_OP -> msg.hasTimerOpRequest();
             default -> false;
         };
         if (!hasPayload) {
@@ -1613,6 +1879,7 @@ public final class ClusterRequestHandler {
             case TOPIC_OP -> msg.getTopicOpRequest().getKey();
             case CONDITION_OP -> msg.getConditionOpRequest().getKey();
             case PHASER_OP -> msg.getPhaserOpRequest().getKey();
+            case TIMER_OP -> msg.getTimerOpRequest().getKey();
             default -> msg.getLeaseRenewRequest().getKey();
         };
         if (key.isEmpty()) {
@@ -1763,6 +2030,13 @@ public final class ClusterRequestHandler {
                     io.github.lamspace.openlatch.protocol.ConditionOpResponse.newBuilder()
                             .setStatus(StatusCode.NOT_LEADER)
                             .setOp(msg.getConditionOpRequest().getOp()));
+            // v11：TIMER_OP 同型拒绝——op 回显沿 PHASER_OP 判例；默认实例的 OK
+            // 会被成型为"装载成功（generation=0）/共见读数"伪成功，码形违例
+            // 在此杜绝（W10 常驻门禁扩展）。
+            case TIMER_OP -> b.setTimerOpResponse(
+                    io.github.lamspace.openlatch.protocol.TimerOpResponse.newBuilder()
+                            .setStatus(StatusCode.NOT_LEADER)
+                            .setOp(msg.getTimerOpRequest().getOp()));
             default -> {
                 log.warn("NOT_LEADER reject has no same-shape case for type {} — "
                         + "add the matching payload branch on protocol extension "

@@ -379,6 +379,72 @@ topology precedent).
   `arriveAndAwaitAdvance`'s wait half is always lenient — an arrival already
   in the ledger is never stranded by depth).
 
+## 13. Timer and the scheduled one-shot mark
+
+`OClient.newTimer(key)` (wire v11) covers the **decidable subset** of JDK
+`java.util.Timer`: arm a mark that fires once at a future instant and is
+**seen by everyone**. Against the delay form of `ODelayQueue` (v7) the two
+machines split delayed semantics: the queue carries a **delayed handoff**
+(one element, one consumer, expiry flips visibility, no reschedule/withdraw),
+the timer carries a **broadcast one-shot mark** (one arm, all observers see
+the same fire, reschedulable and dis armable, never consumed). "Everyone
+should see the bell ring" → timer; "hand this job to one consumer later" →
+`ODelayQueue`.
+
+- **Expiry is a derived predicate, not a state transition (the core
+  ruling)** — the ledger stores only `{generation, armed, fire_at_ms}`;
+  `marked = armed ∧ verdict-clock ≥ fire_at_ms` is a pure function of the
+  replicated data and a clock. **SCHEDULE/DISARM go through Raft** (they
+  decide who will see what at which future instant); **the clock crossing
+  fire_at_ms appends zero entries** — there is no fire event, no bit to set
+  (the polar opposite of lease expiry, which is a destructive transition
+  and therefore logged). Wake-up on expiry is a pure Leader tick hint: a
+  missed sweep loses nothing, the waiter's re-sent AWAIT re-evaluates the
+  predicate and settles (tick-level precision; correctness never depends
+  on it).
+- **One shot, sticky, shared** — one arm fires exactly once; after the
+  instant every arriving `await`/`isFired` passes immediately (the mark is
+  not consumed — the structural difference from queue `take`). "Next round"
+  = re-`schedule` (new generation, sticky mark cleared, generation counter
+  +1).
+- **Reschedule follows the newest generation** — a pending waiter tracks
+  the latest fire time (sleeping longer or waking earlier are both legal;
+  prefer timed awaits). `disarm` terminates the generation and wakes all
+  waiters **immediately** (cancel rides on the event, not the tick) with an
+  exception-flavored settle.
+- **The clock still rings when the loader dies (third death caliber)** —
+  the trigger binds the key, not the session: loader death leaves
+  `{generation, armed, fire_at_ms}` untouched and observers still share the
+  fire. Listed alongside Barrier's break-on-death and Phaser's implicit
+  quota removal — the core gain over in-process `java.util.Timer`: a future
+  event independent of its initiator's lifetime. Waiter slots die with
+  their sessions.
+- **Waits self-heal across leader change** — the predicate lives in the
+  replicated ledger; a notify lost during failover settles on the next
+  re-send (fired → true, disarmed → exception, pending → re-parked), no
+  compensation, no loss window (same side as Phaser, contrast the
+  condition's signal-loss window).
+- **Three Non-Goals** — no task payloads/callbacks (the server never runs
+  user code; the trigger is a mark plus wake-up), no periodic re-arm
+  (`schedule(task, delay, period)` rejected — server-side periodicity would
+  mean permanent self-emitted mutations, the exact opposite of zero-entry
+  expiry; loop `schedule` client-side), no absolute-time arm
+  (`scheduleAt(Instant)` rejected — client clock skew would poison the
+  predicate; only relative delay, converted server-side at the apply point).
+- **Reads and the clock caliber** — `isFired`/`isArmed`/`getRemainingMillis`
+  are advisory Leader-local reads (stale the moment they return); the
+  fired/not-yet verdict follows the evaluating node's clock, so cross-node
+  visibility skews by ≤ the clock offset (declared degradation). The admin
+  projection never converts — raw `{generation, armed, fire_at_ms}` read
+  byte-identical on every node.
+- **Guardrails** — `max-timer-horizon-ms` (default 24h) clamps each delay
+  (`INVALID_REQUEST` parameter line, checked only at admission);
+  `timer-ready-tick-ms` (default 200ms) sets wake precision (separate knob
+  from the queue tick); suspended waits count against the shared
+  `max-queue-depth-per-key` (`OVERLOADED`). Metrics: `timer.total`
+  {op,status} plus `timer.fired.total` (wake-side events only — a silent
+  expiry with no waiters contributes nothing).
+
 ## Primitive cheat sheet
 
 | Primitive | Reentrant | Key semantics |
@@ -396,6 +462,7 @@ topology precedent).
 | Broadcast topic | — | at-most-once; weak backpressure = drop-newest across two buffer tiers (never backpressures, never disconnects); per-subscription ascending seq within one term, rebased at leader change; dedup only same-Leader (cross-term retries may double-deliver — consumer idempotence required); **death unsubscribes** (the queue's inverse); "one key, one form" is an application contract (v8) |
 | Condition variable | host lock's | await folds a full release and re-acquires — **returns holding the lock** with reentrancy counting from 1; spurious wake-ups allowed, **the guard loop is the caller's obligation**; signal requires ownership (authoritative server check + local pre-check, two layers), await permission is local-only (an explicit downgrade); named addressing (key, name) is cross-process equivalent; **waiting is a promise, signal is an event** (auto re-registration across leader change, in-window signals uncompensated); waiters hold no lease and holder death never signals for you (prefer timed await); read/write forms unsupported; waiter count merges into the key's waiting guardrail (v9) |
 | Phaser | — | dynamic quotas attributed per session (`arriveAndDeregister` overdraft rejected); registrations/arrivals/departures each logged, **quotas persist across phases (only departure removes)**; trip = arrivals ≥ quota with immediate wake; **death removes quota without stalling and never rolls back counted arrivals** (contrast Barrier's break-on-death); zero quota = idle, no termination (re-register revives); no hook / no tiering / long phases (three Non-Goals); wait predicate lives in the ledger — **self-heals across leader change** (contrast the condition's signal loss window); every read is one RTT, advisory, non-linearized; `awaitAdvance` bounded by the wait budget (v10) |
+| Timer | — | scheduled one-shot mark: **expiry is a derived predicate** (arm/disarm logged, the clock crossing fire_at_ms appends zero entries — the two ends against lease-expiry-logs), one fire shared by all without consumption (vs the queue's one-element-one-consumer handoff), **re-arm clears the sticky mark, waiters follow the newest generation**, `disarm` terminates the generation and wakes waiters immediately as a DENIED/exception settle, **the clock still rings when the loader dies** (third death caliber, vs Barrier break / Phaser removal), waits self-heal across leader change, no periodicity / no callbacks / no absolute-time arm (three Non-Goals), verdict skews by ≤ clock offset while the admin projection stays raw (no conversion), `await` false means timeout only — disarming is an exception (two shapes never conflated), horizon/tick guardrails (v11) |
 
 ## Next
 
