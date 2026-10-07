@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.server.raft;
 
 import io.github.lamspace.openlatch.core.CoreConfig;
+import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.PhaserOp;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
 import io.github.lamspace.openlatch.protocol.raft.ApplyStatus;
@@ -37,7 +38,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 单调不回退；镜像 digest 含 phaser 字段跨副本等值。编号证据基线由
  * "RaftEntryType 止于 13"更替为"止于 14 且 14 为 phaser 专用"（v11 再更替为
  * "止于 15、15 为 timer 专用"，断言按当前版本口径表述），并同时钉死
- * topic/condition 两代边界在 v10 上界下依然成立（版本相对口径）。
+ * topic/condition 两代边界在 v10 上界下依然成立（版本相对口径）；租约到期
+ * 影子清扫对 phaser 镜像零触碰——静置 phaser 键随到期条目扫过镜像存续、
+ * 幻影键不入到期释放集（影子到期误摘修复的回归钉）。
  */
 class StateMachinePhaserTest {
 
@@ -182,6 +185,44 @@ class StateMachinePhaserTest {
         assertThat(after.get(0).getPhaserArrived()).isEqualTo(1);
         assertThat(after.get(1).getPhaserAdvancedKeysList()).containsExactly("p");
         assertThat(fresh.shadow().adminEntry("p").phaserPhase()).isEqualTo(1);
+    }
+
+    @Test
+    void expireSweepLeavesPhaserMirrorUntouched() {
+        // 回归钉（判例原子家族到期误扫夹具形态）：phaser 建账静置（此后
+        // 零后续变异）与短租约有持锁共存，到期条目应用点清扫——镜像 phaser
+        // 条目逐字段存续、到期摘除集仅含真实到期锁键（计数面同钉）。
+        List<RaftLogEntry> seq = List.of(
+                RaftEntrySamples.sessionOpen(41, 1_000, 1),
+                RaftEntrySamples.sessionOpen(42, 1_000, 2),
+                RaftEntrySamples.phaserSample(41, 101, "p", PhaserOp.PHASER_OP_REGISTER,
+                        2, null, 0, 1_100, 10),
+                RaftEntrySamples.phaserSample(42, 102, "p", PhaserOp.PHASER_OP_ARRIVE,
+                        0, null, 0, 1_200, 11),
+                // 重入锁短租约（200ms）授予：凭证 1、条目时刻下 1_500 到期。
+                RaftEntrySamples.acquireWithWait(41, 103, "mk", 1_300,
+                        LockType.LOCK_TYPE_REENTRANT, 12, -1, 200, 9),
+                // 租约到期条目（携带时刻远超到期）：应用点整表影子清扫。
+                RaftEntrySamples.expire("mk", 1, 10_000, 13));
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        List<ApplyResult> rs = replay(seq, core);
+        assertThat(core.applyFailures()).isZero();
+        ApplyResult expireResult = rs.get(rs.size() - 1);
+        assertThat(expireResult.getStatus()).isEqualTo(ApplyStatus.OK);
+        // 清扫摘除集仅含真实到期锁 key——phaser 幻影键不入集（到期释放
+        // 计数口径按实际释放钉死）。
+        assertThat(expireResult.getFreedKeysList()).containsExactly("mk");
+        // 静置后镜像 phaser 条目存续且三计数逐字段保真（非空壳重建）。
+        assertThat(core.shadow().isPhaser("p")).isTrue();
+        assertThat(core.shadow().adminEntry("p").phaserPhase()).isZero();
+        assertThat(core.shadow().adminEntry("p").phaserRegistered()).isEqualTo(2);
+        assertThat(core.shadow().adminEntry("p").phaserArrived()).isEqualTo(1);
+        // 到期锁照常摘除——本修复不触碰真实到期面。
+        assertThat(core.shadow().isHeld("mk")).isFalse();
+        // 跨副本确定性恒等：双份独立回放摘要相等。
+        LockStateMachineCore other = new LockStateMachineCore(new CoreConfig());
+        replay(seq, other);
+        assertThat(core.digest()).isEqualTo(other.digest());
     }
 
     @Test
