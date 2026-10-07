@@ -1,7 +1,7 @@
 # continuous-integration Specification
 
 ## Purpose
-TBD - created by archiving change ci-github-actions. Update Purpose after archive.
+以 GitHub Actions 承载本仓库的例行守护：push/PR 上的轻量验证门禁（引用门禁自查 + 全反应堆 verify 含 javadoc 深度），与按需/周期的重档位 job（进程级演练手动随跑、benchmark 周跑）；把"防假绿"的断言（如演练套件缺失即红）固化在流水线内，使守护不依赖个人自觉。
 ## Requirements
 ### Requirement: push 与 PR 验证门禁
 

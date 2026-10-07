@@ -1,7 +1,7 @@
 # fault-drill-harness Specification
 
 ## Purpose
-TBD - created by archiving change drill-port-allocation-race-fix. Update Purpose after archive.
+进程级故障演练夹具的可执行纪律：演练以真实子进程与带外端口取样构造故障时序（滚动重启/杀主/分区），端口分配 MUST NOT 走探针式竞态取口；现场产物（drill-logs 与报告）红了先保全再清理，为选举风暴等间歇形态的判型提供证据面。
 ## Requirements
 ### Requirement: 演练夹具端口分配纪律
 
