@@ -70,9 +70,10 @@ package io.github.lamspace.openlatch.client;
  *
  * <p><b>线程模型</b>：句柄线程安全；{@code publish} 每次一通网络往返
  * （集群含改道开销）；同一 key 的发布经客户端级在途互斥与自动重发
- * （判例原子/队列写车道）。监听器在 SDK dispatcher 线程执行、<b>单订阅内
- * 串行回调</b>（对齐 {@code Flow.Subscriber.onNext} 不重入承诺），绝不占用
- * 网络 EventLoop；回调异常被吞并记录、不中断后续交付。
+ * （判例原子/队列写车道）。监听器在每订阅一条的 SDK 虚拟派发线程执行、
+ * <b>单订阅内串行回调</b>（对齐 {@code Flow.Subscriber.onNext} 不重入承诺），
+ * 绝不占用网络 EventLoop，且订阅数增长不消耗平台线程；回调异常被吞并记录、
+ * 不中断后续交付。
  *
  * <p><b>版本门</b>：需协议 v8（服务端与客户端双端升级，升级序先服务端后
  * 客户端，判例 v3–v7）；v≤7 会话发送 topic 消息被消息级拒绝。
@@ -129,7 +130,7 @@ public interface OTopic {
 
     /**
      * 建立订阅：向服务端登记本会话对该 key 的兴趣，交付经
-     * {@code TOPIC_MESSAGE} 推送、在 SDK dispatcher 线程串行回调。
+     * {@code TOPIC_MESSAGE} 推送、在每订阅一条的虚拟派发线程串行回调。
      * 句柄同一时刻至多一个活跃订阅：重复调用替换前一个订阅（旧句柄
      * 失效并尽力退订，不静默双路由）。
      *

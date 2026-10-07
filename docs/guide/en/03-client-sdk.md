@@ -298,10 +298,11 @@ Semantic boundaries (details in [01 Concepts §10](01-concepts.md)):
    slot and never double-fan-out; retries across a leader change (including
    manual ones) **may double-deliver** — consumer idempotence is required;
 5. **Listener threading**: callbacks are serialized per subscription (the JDK
-   `Flow.Subscriber.onNext` no-reentrancy promise) on an SDK dispatcher
-   thread, never on the network EventLoop; handler exceptions are swallowed
-   and logged without breaking delivery. Hand off heavy work to your own
-   executor;
+   `Flow.Subscriber.onNext` no-reentrancy promise) on a per-subscription
+   **virtual dispatcher thread** (platform-thread count does not grow with
+   subscriptions), never on the network EventLoop; handler exceptions are
+   swallowed and logged without breaking delivery. Hand off heavy work to
+   your own executor;
 6. **Subscriptions bind to the session**: subscriber process death
    unsubscribes (the deliberate inverse of the queue's "death never swallows
    elements" — queues hold resident data, topics hold delivery events).
@@ -549,6 +550,32 @@ lock-lost callbacks follow the same rule on their dedicated thread.
 
 Inject a host `MeterRegistry` (Micrometer, compile-optional dependency) to export the four
 client metrics (requests, duration, reconnects, locks-lost) — see [08](08-observability.md).
+
+## Virtual threads
+
+Every synchronous blocking call (`lock`/`acquire`/`await`/queues/atomics) is
+safe to run directly on **virtual threads**: waiting uses time-boxed future
+suspension and client-local timing, so a blocked caller consumes no platform
+thread and high waiter fan-out carries no SDK resource cost (waiting is
+queued server-side and generates no lease-renewal traffic; concurrency still
+bounded by the server's authoritative per-key queue-depth limits). The
+runtime baseline is JDK 25 (JDK ≥ 24 removed carrier pinning for blocking
+inside `synchronized`), and the caller path has no JNI blocking sources, so
+virtual threads are never pinned; reentrancy and ownership key on
+`threadId()`, which for virtual threads is globally unique and never reused
+after termination — identical semantics to platform threads.
+
+- SDK infrastructure (the network EventLoop, the shared timer driving
+  watchdog/timeouts, and the lock-lost callback executor) stays on platform
+  threads with a constant count — independent of the caller's thread flavor;
+- `OTopic` delivery runs on one virtual dispatcher thread per subscription;
+  the per-subscription serialization promise is unchanged;
+- to diagnose pinning (expected: zero) enable the JFR
+  `jdk.VirtualThreadPinned` event or run development with
+  `-Djdk.tracePinnedThreads=full`;
+- blocking inside async-chain callbacks remains forbidden (they complete on
+  the network thread — see "Async usage"); hand heavy work to your own
+  executor.
 
 ## Pitfall quick-reference
 

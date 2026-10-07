@@ -5,6 +5,7 @@
 | Dimension | Support | Notes |
 |---|---|---|
 | Java runtime/compile | **25** (only) | all artifacts build with `release=25`; 17/21 cannot load them |
+| Caller thread flavor | **platform & virtual both supported** | blocking APIs are virtual-thread-friendly (no pinning; ownership and interrupt semantics identical), see [03](03-client-sdk.md) |
 | Spring Boot starter | **4.x** | depends on Boot-4-only artifacts; Boot 3.x incompatible — wire the SDK manually ([03](03-client-sdk.md)) |
 | Spring Framework | whatever Boot 4 ships (Framework 7) | starter targets Boot 4 contexts only |
 | Wire protocol | servers accept **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11** (HELLO negotiation, range [1,11]) | out-of-range rejected at handshake — no implicit compatibility |
