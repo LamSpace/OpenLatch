@@ -1,7 +1,7 @@
 # user-documentation Specification
 
 ## Purpose
-TBD - created by archiving change bilingual-user-guide. Update Purpose after archive.
+面向使用者的双语用户指南（docs/guide zh/en 对称分章）：简介与架构、核心概念、快速上手、客户端 SDK、Spring Boot starter、集群部署与运维、安全、管理控制台、可观测性、故障排查、兼容性与术语表；指南是用户细节的唯一权威载体，语义降级与增强处必须显式言明，README 仅保留最小上手闭环与索引。
 ## Requirements
 
 ### Requirement: 双语用户指南分区与章节覆盖

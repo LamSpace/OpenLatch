@@ -47,6 +47,7 @@
 
 | 事项 | JDK 对应 | 备注 | 状态 |
 |---|---|---|---|
+| 影子到期误摘 PHASER 修复(`ShadowTable.expireUpTo`) | —(非对外 API 面,镜像投影缺陷) | v11 落地审查发现的理论窗:`expireUpTo`(LEASE_EXPIRE_ENTRY 应用点的影子清扫)无租约跳过清单含 LATCH/BARRIER/QUEUE/ATOMIC/TIMER(v11 已带)而**独缺 PHASER**——phaser 镜像条目 `expiresAtMs` 恒 0,任一租约到期扫描会把它误摘→管理面 phaser 键瞬时失踪(引擎账簿无恙,后续镜像事件即自愈,故为观察面瞬时缺陷非状态腐化) | 一行修复+夹具:跳过清单补 `isPhaserType`,以"phaser 键与到期锁共存"回归红先钉住 | 未启动(来源:PR #15 备注与 add-otimer 归档过程记录) |
 | 客户端虚拟线程化 | `Thread.ofVirtual` | 阻塞 API 桥接与看门狗线程模型评估(`maven.compiler.release=25` 已就位) | 未启动 |
 | 上下文传播 | `ScopedValue`(25 已转正) | 客户端内部会话/追踪上下文传递评估,替代线程本地袋 | 未启动 |
 | 结构化并发 | `StructuredTaskScope` | 25 仍预览且发布禁止 `--enable-preview`——挂起至转正 | 挂起 |
