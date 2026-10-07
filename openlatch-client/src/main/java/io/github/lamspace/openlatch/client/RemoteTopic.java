@@ -31,7 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,8 +54,9 @@ import java.util.Objects;
  * <p><b>交付与本地两级缓冲</b>：{@code TOPIC_MESSAGE} 推送经
  * {@code OpenLatchClient} 的 (会话, subscription_id) 路由表命中本句柄后，
  * 先按同任期 {@code topic_seq} 缺口累计丢弃计数（换 term 基线重置），再入
- * 本地有界队列（256 条）；队列满 drop-newest 并计数。派发线程单订阅串行
- * 回调，异常吞并记录不断链——全程不占网络 EventLoop。
+ * 本地有界队列（256 条）；队列满 drop-newest 并计数。每订阅一条虚拟派发线程，
+ * 单订阅串行回调，异常吞并记录不断链——全程不占网络 EventLoop，平台线程数
+ * 不随订阅数增长。
  *
  * <p><b>发布放弃语义</b>：写路径与原子/队列同纪律——在途总界限内瞬态失败
  * 同信封重发；会话中途更替则放弃并抛（新会话下去重槽失效，盲目重发会
@@ -451,12 +452,20 @@ final class RemoteTopic implements OTopic {
 
     /**
      * 活跃订阅句柄（{@link OTopicSubscription} 实现）：绑定路由、本地二级
-     * 缓冲与串行派发线程。
+     * 缓冲与虚拟派发线程（单订阅串行回调）。
      */
     static final class Subscription implements OTopicSubscription {
 
         /** SDK 本地二级缓冲条数上限（drop-newest，与服务端侧同策略）。 */
         private static final int LOCAL_BUFFER_LIMIT = 256;
+
+        /**
+         * 派发线程工厂：每订阅一条虚拟线程，顺序号命名服务 thread dump 可读性。
+         * 虚拟线程形态使平台线程数不随订阅数增长；单订阅串行回调承诺由
+         * "每订阅恰一条派发线程"的形态保有，与线程种类无关。
+         */
+        private static final ThreadFactory DELIVERY_THREADS =
+                Thread.ofVirtual().name("openlatch-topic-delivery-", 0).factory();
 
         /** 应用处理器。 */
         private final OTopicMessageHandler handler;
@@ -481,7 +490,8 @@ final class RemoteTopic implements OTopic {
         private final RemoteTopic owner;
 
         /**
-         * 构造订阅并启动派发线程。
+         * 构造订阅并启动虚拟派发线程（形态承诺：不消耗平台线程；停止经
+         * {@link #deactivate()} 标志与派发循环超时自然收敛，无 interrupt/join）。
          *
          * @param owner   所属句柄
          * @param handler 应用处理器
@@ -489,9 +499,7 @@ final class RemoteTopic implements OTopic {
         Subscription(RemoteTopic owner, OTopicMessageHandler handler) {
             this.owner = owner;
             this.handler = handler;
-            this.dispatcher = new Thread(this::deliveryLoop,
-                    "openlatch-topic-delivery-" + ThreadLocalRandom.current().nextInt(1 << 16));
-            this.dispatcher.setDaemon(true);
+            this.dispatcher = DELIVERY_THREADS.newThread(this::deliveryLoop);
             this.dispatcher.start();
         }
 

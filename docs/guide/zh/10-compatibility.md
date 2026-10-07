@@ -5,6 +5,7 @@
 | 维度 | 支持 | 备注 |
 |---|---|---|
 | Java 运行时/编译 | **25**（唯一档位） | 全部构件以 `release=25` 编译；17/21 无法加载 |
+| 调用方线程形态 | **平台/虚拟线程均受支持** | 同步阻塞接口虚拟线程亲和（无钉扎、归属与中断语义一致），详见 [03](03-client-sdk.md) |
 | Spring Boot starter | **4.x** | 依赖 Boot 4 独有构件，Boot 3.x 不兼容；Boot 3 工程手动装配 SDK（[03](03-client-sdk.md)） |
 | Spring Framework | 随 Boot 4（Framework 7） | starter 仅面向 Boot 4 应用上下文 |
 | 线路协议 | 服务端接受 **v1 / v2 / v3 / v4 / v5 / v6 / v7 / v8 / v9 / v10 / v11**（HELLO 协商，支持区间 [1,11]） | 区间外拒绝，不做隐式兼容 |

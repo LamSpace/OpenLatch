@@ -77,6 +77,10 @@ import java.util.concurrent.TimeUnit;
  * 各类超时由共享 {@link HashedWheelTimer} 驱动；锁丢失回调在专用单线程
  * 执行器上调用。异步接口返回的 future 在网络/定时器线程上完成，
  * <b>用户链接的回调不得执行阻塞操作</b>，需要阻塞处理时应切换至调用方自己的执行器。
+ * 上述 EventLoop、共享定时器与回调执行器自身恒为平台线程形态；而调用方侧的
+ * 同步阻塞接口（{@code lock}/{@code acquire}/{@code await}/队列与原子操作族）
+ * 可安全地以虚拟线程执行——等待经 future 限时挂起与本地计时轮询，不占用平台
+ * 载体线程，调用方线程身份（重入归属键 {@code threadId()}）在两种形态下语义一致。
  *
  * <p><b>生命周期</b>：经 {@link #builder()} 构建，构建时创建后台资源并发起
  * 首次异步连接；{@link #shutdown()} 先对本地登记持锁尽力释放（单条目至多
