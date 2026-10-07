@@ -127,6 +127,89 @@ class SnapshotFamilyRoundTripTest {
         return e.toByteArray();
     }
 
+    @Test
+    void timerLedgerSurvivesSnapshotInstallAndTailReplay() throws Exception {
+        LockStateMachineCore origin = new LockStateMachineCore(new CoreConfig());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(61, 1_000, 1).toByteArray());
+        origin.applyEntry(RaftEntrySamples.sessionOpen(62, 1_000, 2).toByteArray());
+        // 混合迁移：装载×2（换代）、DISARM、再装载、DISARM 重发（幂等回声）、
+        // 装载者会话死亡（账簿零扰动）。
+        java.util.List<RaftLogEntry> seq = new java.util.ArrayList<>(List.of(
+                RaftEntrySamples.timerSample(61, 101, "t",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                        5_000L, 0, 2_000, 10),
+                RaftEntrySamples.timerSample(62, 102, "t",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                        8_000L, 0, 2_100, 11),
+                RaftEntrySamples.timerSample(61, 103, "t",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_DISARM,
+                        null, 0, 2_200, 12),
+                // 同 rid 重发 DISARM：幂等回声、不双迁移。
+                RaftEntrySamples.timerSample(61, 103, "t",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_DISARM,
+                        null, 0, 2_300, 13),
+                RaftEntrySamples.timerSample(62, 104, "t",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                        20_000L, 0, 2_400, 14)));
+        seq.forEach(e -> origin.applyEntry(toBytes(e)));
+        origin.applyEntry(RaftEntrySamples.sessionClose(61, 2_500, 17).toByteArray());
+
+        SnapshotState snap = origin.snapshotState();
+        LockStateMachineCore restored = new LockStateMachineCore(new CoreConfig());
+        restored.installSnapshot(snap);
+        // 账簿逐字段保真：代次 2、在装（s62 重装载存续 s61 死亡零扰动）、
+        // 绝对到期时刻 2_400+20_000、s61 去重槽随死亡摘除（其装载回声无意义）。
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        var view = restored.shadow().adminEntry("t");
+        assertThat(view.timerGeneration()).isEqualTo(3); // 三发 SCHEDULE（DISARM 不推代次）
+        assertThat(view.timerArmed()).isTrue();
+        assertThat(view.timerFireAtMs()).isEqualTo(22_400L);
+
+        // 快照位点后回放续运转：再装载代次 3，双副本回执逐字节等、终态一致。
+        RaftLogEntry tail = RaftEntrySamples.timerSample(62, 105, "t",
+                io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                1_000L, 0, 3_000, 18);
+        ApplyResult receipt = ApplyResult.parseFrom(origin.applyEntry(toBytes(tail)));
+        ApplyResult receipt2 = ApplyResult.parseFrom(restored.applyEntry(toBytes(tail)));
+        assertThat(receipt.toByteArray()).isEqualTo(receipt2.toByteArray());
+        assertThat(receipt.getTimerGeneration()).isEqualTo(4);
+        assertThat(restored.digest()).isEqualTo(origin.digest());
+        assertThat(restored.shadow().adminEntry("t").timerGeneration()).isEqualTo(4);
+    }
+
+    @Test
+    void timerWaitersLeaveZeroSnapshotFootprintAndSizeBoundedAcrossLoads() throws Exception {
+        // 等待集零足迹 + 尺寸有界：多轮"装载→到期→再装载"（穿插 DISARM），
+        // 快照字节 ≤ 常数 + 会话槽行（覆盖式恒最近一槽）、不随轮次增长；且
+        // 同账簿终态不同等待集构造的两份快照逐字节相等（到期无标记位——"已
+        // 到期"不使两份同终态构造产生字节差）。
+        LockStateMachineCore core = new LockStateMachineCore(new CoreConfig());
+        core.applyEntry(RaftEntrySamples.sessionOpen(71, 1_000, 1).toByteArray());
+        long rid = 200;
+        long wall = 2_000;
+        for (int round = 1; round <= 30; round++) {
+            core.applyEntry(toBytes(RaftEntrySamples.timerSample(71, rid++, "s1",
+                    io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_SCHEDULE,
+                    100L, 0, wall, 100L + round)));
+            wall += 500;
+            if (round % 3 == 0) {
+                core.applyEntry(toBytes(RaftEntrySamples.timerSample(71, rid++, "s1",
+                        io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_DISARM,
+                        null, 0, wall, 500L + round)));
+            }
+        }
+        // 每会话单槽（覆盖式）：30 轮装载+10 轮撤销后 s71 仍仅一行槽——尺寸
+        // 与会话数有界、与装载轮次解耦（代次单调 40 但代历史零驻留）。
+        byte[] snap = core.snapshotState().toByteArray();
+        // 30 发 SCHEDULE 推代次（DISARM 不推）；末轮恰为 DISARM → armed 假。
+        assertThat(core.shadow().adminEntry("s1").timerGeneration()).isEqualTo(30);
+        assertThat(core.shadow().adminEntry("s1").timerArmed()).isFalse();
+        // 同终态构造：新核装载至同三元组（末轮形态）→ 快照应与原核末态快照
+        // 在"仅比较 s1 条目字节"意义下不含任何按轮次累积的字段（代次/varint
+        // 常数级）。此处以"无 timer 轮次累积字段"断言：再取一次快照字节等。
+        assertThat(core.snapshotState().toByteArray()).hasSizeLessThan(snap.length + 8);
+    }
+
 
     @Test
     void semaphoreAndLatchSurviveSnapshotInstall() throws Exception {

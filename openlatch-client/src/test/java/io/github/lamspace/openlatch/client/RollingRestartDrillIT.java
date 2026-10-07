@@ -162,6 +162,11 @@ class RollingRestartDrillIT {
             pSeed.register();
             pSeed.register();
             assertThat(pSeed.arrive()).isZero();
+            // v11 timer：滚动前 A 装载 10min 远钟（代次 1）——账簿三元组为
+            // 复制态跨滚动存续；装载绑定 key 不绑定会话（滚动中 A 会话换代
+            // 不撤钟的契约由"远钟仍 armed"断言与近钟轮次共同承载）。
+            io.github.lamspace.openlatch.client.OTimer tSeed = a.newTimer("roll-timer");
+            tSeed.schedule(600, TimeUnit.SECONDS);
 
             // 全量滚动（leader 先序）：逐节点停止→重启→等端口与选主。
             Node leader0 = waitLeader(nodes);
@@ -253,6 +258,47 @@ class RollingRestartDrillIT {
                 }
             }
             assertThat(advancedTo).as("滚动重启后合拢照常推进（相位严格前进）").isPositive();
+            // v11 timer 跨滚动断言面（契约形）：①远钟条目存续、原始读数
+            // 仍 armed 未过期；②存活侧 B 装载近钟→await 经 tick 唤醒窗了结
+            //（含改道重试自愈）；③DISARM 后新 await 以异常收束（代终结跨
+            // 滚动照常）。装载者会话换代不撤钟由 ①承担（tSeed 装载者 A 的
+            // 会话在滚动中已不确定，钟仍 armed）。
+            io.github.lamspace.openlatch.client.OTimer tProbe = b.newTimer("roll-timer");
+            boolean seedArmed = false;
+            long sDeadline = System.currentTimeMillis() + 60_000;
+            while (!seedArmed && System.currentTimeMillis() < sDeadline) {
+                try {
+                    seedArmed = tProbe.isArmed() && tProbe.getRemainingMillis() > 0;
+                } catch (OpenLatchException transientT) {
+                    // 改道/重连窗：重试收敛。
+                }
+                Thread.sleep(500);
+            }
+            assertThat(seedArmed).as("远钟 armed 且未到期跨三节点滚动存续").isTrue();
+            io.github.lamspace.openlatch.client.OTimer tRound = b.newTimer("roll-timer-round");
+            boolean settled = false;
+            long rDeadline = System.currentTimeMillis() + 90_000;
+            while (!settled && System.currentTimeMillis() < rDeadline) {
+                try {
+                    tRound.schedule(2, TimeUnit.SECONDS);
+                    settled = tRound.await(20, TimeUnit.SECONDS);
+                } catch (OpenLatchException transientR) {
+                    Thread.sleep(500);
+                }
+            }
+            assertThat(settled).as("跨滚动近钟到期全体了结（含 tick 唤醒窗）").isTrue();
+            tRound.disarm();
+            boolean denied = false;
+            long dDeadline = System.currentTimeMillis() + 30_000;
+            while (!denied && System.currentTimeMillis() < dDeadline) {
+                try {
+                    tRound.await(10, TimeUnit.SECONDS);
+                    Thread.sleep(500); // 仍见共见态：撤销路径未收敛，重试
+                } catch (OpenLatchException deniedEx) {
+                    denied = true;
+                }
+            }
+            assertThat(denied).as("DISARM 后 await 以异常收束（代终结跨滚动成立）").isTrue();
             System.out.println("[drill-C] extended primitives survived rolling restart");
         } finally {
             if (a != null) {

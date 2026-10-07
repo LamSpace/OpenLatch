@@ -271,6 +271,9 @@ public final class RequestDispatcher {
             case PHASER_OP -> msg.hasPhaserOpRequest()
                     ? dispatchPhaserOp(session, msg)
                     : errorResponse(msg, StatusCode.INVALID_REQUEST);
+            case TIMER_OP -> msg.hasTimerOpRequest()
+                    ? dispatchTimerOp(session, msg)
+                    : errorResponse(msg, StatusCode.INVALID_REQUEST);
             case PING -> null;
             default -> errorResponse(msg, StatusCode.INVALID_REQUEST);
         };
@@ -362,6 +365,10 @@ public final class RequestDispatcher {
             case REJECT_PHASER_PARTIES -> StatusCode.OVERLOADED;
             case REJECT_PHASER_QUOTA -> StatusCode.INVALID_REQUEST;
             case REJECT_PHASER_NO_ENTRY -> StatusCode.INVALID_REQUEST;
+            // v11：timer 无条目/horizon 越界同属形状非法（深度超限已在
+            // REJECT_QUEUE_FULL 行骑 OVERLOADED）。
+            case REJECT_TIMER_NO_ENTRY -> StatusCode.INVALID_REQUEST;
+            case REJECT_TIMER_DELAY_OVER -> StatusCode.INVALID_REQUEST;
             case BARRIER_BROKEN -> StatusCode.BARRIER_BROKEN;
         };
     }
@@ -1266,6 +1273,108 @@ public final class RequestDispatcher {
     }
 
     /**
+     * 分发延时触发操作（v11，单机闭环通道）：v11 门（v≤10 消息级拒绝不断连）
+     * → 形状互斥矩阵 → {@code CoreEngine.timerOp}（受理通道——horizon 判定
+     * 在引擎 enforceCap 臂）→ 状态码映射与三元组回显。等待/唤醒在单机条目态
+     * 内闭环（{@code TimerEntry} 等待集 + 监听点 {@code AWAIT_NOTIFY} 投递），
+     * 到期扫描由服务端就绪调度臂按 {@code timer-ready-tick-ms} 周期消费
+     * {@code core.wakeTimerReady()}（判例单机队列唤醒臂）。
+     *
+     * @param session 已握手会话
+     * @param msg     入站消息信封
+     * @return 协议响应信封
+     */
+    private Envelope dispatchTimerOp(ServerSession session, Envelope msg) {
+        if (session.protocolVersion() < 11) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.protocol.TimerOpRequest req = msg.getTimerOpRequest();
+        if (timerShapeInvalid(req)) {
+            return errorResponse(msg, StatusCode.INVALID_REQUEST);
+        }
+        io.github.lamspace.openlatch.core.result.TimerOpResult r =
+                core.timerOp(toTimerCommand(session.sessionId(), msg.getRequestId(), req));
+        StatusCode status = toTimerStatus(r.outcome());
+        if (metrics != null) {
+            metrics.recordTimer(req.getOp(), status);
+        }
+        return envelope(msg, MessageType.TIMER_OP, b -> b.setTimerOpResponse(
+                io.github.lamspace.openlatch.protocol.TimerOpResponse.newBuilder()
+                        .setStatus(status)
+                        .setOp(req.getOp())
+                        .setGeneration(r.generation())
+                        .setArmed(r.armed())
+                        .setFireAtMs(r.fireAtMs())
+                        .setMarked(r.marked())));
+    }
+
+    /**
+     * 协议 timer 请求 → core 命令（两车道共用；形状已由
+     * {@link #timerShapeInvalid} 放行，{@code delay_ms} presence 以装箱承载
+     * "未主张/0 主张"两态——判例 phaser expectedPhase 折法）。
+     *
+     * @param sessionId 引擎内部会话 id
+     * @param requestId 原请求信封 request_id
+     * @param req       协议请求
+     * @return core 命令
+     */
+    public static io.github.lamspace.openlatch.core.command.TimerOpCommand toTimerCommand(
+            long sessionId, long requestId,
+            io.github.lamspace.openlatch.protocol.TimerOpRequest req) {
+        return new io.github.lamspace.openlatch.core.command.TimerOpCommand(
+                sessionId, requestId, req.getKey(),
+                io.github.lamspace.openlatch.server.raft.LockStateMachineCore
+                        .toCoreTimerOp(req.getOp()),
+                req.hasDelayMs() ? req.getDelayMs() : null, req.getAwaitRequestId());
+    }
+
+    /**
+     * timer 请求形状互斥矩阵校验（入口裁决唯一落点，判例
+     * {@code phaserShapeInvalid}）：{@code delay_ms} 仅 SCHEDULE 携带
+     * （presence 必须存在且非负；0 主张合法——立即共见）；
+     * {@code await_request_id} 仅 CANCEL 携带且非零；DISARM/AWAIT/QUERY
+     * 两字段均缺省/零。操作词界外拒绝。
+     *
+     * @param req 协议请求
+     * @return 违例为 {@code true}
+     */
+    public static boolean timerShapeInvalid(
+            io.github.lamspace.openlatch.protocol.TimerOpRequest req) {
+        boolean hasDelay = req.hasDelayMs();
+        long delay = req.getDelayMs();
+        return switch (req.getOp()) {
+            case TIMER_OP_SCHEDULE -> !hasDelay || delay < 0 || req.getAwaitRequestId() != 0;
+            case TIMER_OP_DISARM, TIMER_OP_AWAIT, TIMER_OP_QUERY ->
+                    hasDelay || req.getAwaitRequestId() != 0;
+            case TIMER_OP_CANCEL -> hasDelay || req.getAwaitRequestId() == 0;
+            default -> true;
+        };
+    }
+
+    /**
+     * timer 裁决 → 协议状态码：{@code DENIED} 终态经 timer 首次回到可达面
+     * （代终结等待了结——既有码值新可达线，判例队列立即式对偶）；深度超限
+     * {@code OVERLOADED}；horizon/形状/无条目/家族 {@code INVALID_REQUEST}。
+     *
+     * @param outcome core 裁决结果
+     * @return 协议状态码
+     */
+    static StatusCode toTimerStatus(io.github.lamspace.openlatch.core.result.Outcome outcome) {
+        return switch (outcome) {
+            case GRANTED -> StatusCode.OK;
+            case DENIED -> StatusCode.DENIED;
+            case QUEUED -> StatusCode.QUEUED;
+            case REJECT_SESSION -> StatusCode.SESSION_EXPIRED;
+            case REJECT_KEY_EMPTY -> StatusCode.KEY_EMPTY;
+            case REJECT_KEY_TOO_LONG -> StatusCode.KEY_TOO_LONG;
+            case REJECT_QUEUE_FULL -> StatusCode.OVERLOADED;
+            case REJECT_TIMER_NO_ENTRY, REJECT_TIMER_DELAY_OVER, REJECT_TYPE_MISMATCH ->
+                    StatusCode.INVALID_REQUEST;
+            default -> StatusCode.INTERNAL_ERROR;
+        };
+    }
+
+    /**
      * 条件裁决 → 协议状态码（signal 权限 {@code NOT_HELD} 原词送达）。
      *
      * @param status core 条件裁决状态
@@ -1552,6 +1661,12 @@ public final class RequestDispatcher {
                     io.github.lamspace.openlatch.protocol.PhaserOpResponse.newBuilder()
                             .setStatus(status)
                             .setOp(request.getPhaserOpRequest().getOp()));
+            // v11：TIMER_OP 同规则——门控/形状/家族/无条目拒绝的状态码在线路
+            // 可见且 op 回显（判例 PHASER_OP；默认实例形态的 OK 伪成功违例）。
+            case TIMER_OP -> b.setTimerOpResponse(
+                    io.github.lamspace.openlatch.protocol.TimerOpResponse.newBuilder()
+                            .setStatus(status)
+                            .setOp(request.getTimerOpRequest().getOp()));
             default -> {
             }
         }

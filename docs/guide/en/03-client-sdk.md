@@ -480,6 +480,58 @@ Semantic boundaries (see [01 Core Concepts §12](01-concepts.md)):
    sending `PHASER_OP` get an `INVALID_REQUEST` message-level rejection
    without disconnect.
 
+## Timer (`OTimer`, v11)
+
+A scheduled one-shot mark — the decidable subset of JDK `java.util.Timer`.
+Handles are stateless, never need closing, and construct with zero network
+(there is no "arm at construction" — arming is always explicit).
+
+```java
+OTimer t = client.newTimer("daily-report");      // zero network
+long gen = t.schedule(6, TimeUnit.HOURS);        // fire once in 6h; echoes the new generation
+boolean rang = t.await(7, TimeUnit.SECONDS);     // true = saw the mark; false = timeout only
+if (t.isFired()) { /* every arriving observer sees the same fire */ }
+t.schedule(6, TimeUnit.HOURS);                   // re-arm: new generation, sticky mark cleared
+t.disarm();                                      // withdraw: generation terminated, waiters woken
+```
+
+Semantic boundaries (details in [01 concepts §13](01-concepts.md)):
+
+1. **shared, never consumed** — after the instant any arriving `await`/
+   `isFired` passes at once; contrast `ODelayQueue`: a delayed element is
+   handed to exactly one consumer and taking it changes what everyone
+   else can see. Broadcast one-shot mark → timer; delayed handoff → queue;
+2. **newest generation wins** — a re-arm moves the clock; already-parked
+   `await`s track the new fire time (sleeping longer / waking earlier are
+   both legal). A generation terminated by `disarm` settles waiters as an
+   `OpenLatchException` ("unsatisfiable"), **not** a boolean `false` —
+   `false` means timeout only, the two shapes never conflate;
+3. **the clock still rings when the loader dies** — the trigger binds the
+   key; loader/session death leaves the ledger untouched (waiter slots die
+   with their sessions); the third death caliber alongside Barrier's
+   break-on-death and Phaser's implicit quota removal;
+4. **not provided** — periodic re-arm (loop `schedule` client-side), task
+   callbacks (the server runs no user code), absolute-time arms
+   (`scheduleAt(Instant)` rejected — client clock skew would pollute the
+   predicate; only relative delay, converted server-side);
+5. **cost and precision** — every call is ≥1 RTT; wake precision is one
+   server sweep window (default 200ms; correctness never depends on it);
+   entry rate equals your explicit arms (expiry itself logs nothing);
+6. **failover self-heal** — lost notifies during leader change are covered
+   by the waiter's next re-send (settled or re-parked), no loss window
+   (same side as Phaser, contrast the condition's signal-loss window);
+7. **advisory reads** — `isFired`/`isArmed`/`getRemainingMillis` are
+   Leader-local QUERY round-trips, stale on arrival; the fired verdict
+   follows the evaluating node's clock (cross-node skew ≤ clock offset;
+   the admin projection shows raw values and never converts);
+8. **guardrails and version gate** — `max-timer-horizon-ms` (default 24h)
+   rejects over-limit delays at admission (`INVALID_REQUEST`, the
+   parameter line — not a resource code); suspended waits share the merged
+   `max-queue-depth-per-key` (`OVERLOADED`); wake precision
+   `timer-ready-tick-ms` (default 200). Requires v11 (upgrade the server
+   first): v≤10 sessions sending `TIMER_OP` get an `INVALID_REQUEST`
+   message-level rejection without disconnect.
+
 ## Async usage
 
 ```java

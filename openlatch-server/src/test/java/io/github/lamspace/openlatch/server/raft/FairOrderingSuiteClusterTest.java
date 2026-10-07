@@ -32,6 +32,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code WaitQueue} 位次经复制路径推进时"通知序 == 排队序 == 授予序"
  * 依旧成立（位次裁决在 Leader 内存、授予裁决经日志，两层不得合谋插队）。
  * {@code FAIR} 与 {@code REENTRANT} 参数化同矩阵。
+ *
+ * <p><b>豁免清单（判例 v5 D6，本套件结构上仅覆盖 ACQUIRE 队首车道）</b>：
+ * BARRIER/ATOMIC/TOPIC/PHASER 各家族无 FIFO 授予序承诺（合拢/操作/广播/
+ * 谓词唤醒各按其序）；<b>TIMER 同判登记（v11）</b>——AWAIT 是广播谓词
+ * 等待非队首批授（到期唤醒全员共见、无授予序可言；装载先后由 Raft apply
+ * 序承载并经 {@code StateMachineTimerTest} 确定性测试钉住）。
  */
 class FairOrderingSuiteClusterTest {
 

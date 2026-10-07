@@ -20,6 +20,12 @@ Leader 本地态，条件明细仅 Leader 视角非零（Follower 读数如实�
 订阅登记的 Leader-only 口径同源）；条件名即寻址文本，本面无内容外发。
 全量元素字节随 v6 载荷同一防放大纪律，永不出现在管理应答中。
 
+timer 键（v11）同双速呈现：账簿三元组（`timer_generation`/`timer_armed`/`timer_fire_at_ms`）
+为复制态各节点一致，等待明细 Leader-only、Follower 如实零并同口径标注。timer 呈现面
+**不折算已否到期**——恒呈原始绝对到期时刻（`marked` 只在 Leader 应答线按判定节点时钟
+折算，呈现跨节点逐字节等）；代终结（DISARMED）键以 `timer_armed=false` 如实呈现而非
+缺行；到期与否由读侧以 armed 与 fire_at 自行判定，页面不渲染「已响」折算标记。
+
 **它不提供任何写操作**——没有强制解锁、没有踢会话。它是观察窗，不是遥控器。
 
 ## 部署

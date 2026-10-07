@@ -92,12 +92,43 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
      *                    非队列形态恒 {@code null}）
      * @param phaser      PHASER 条目的账簿状态组（相位/注册/到场/配额/换代窗口；
      *                    非相位器形态恒 {@code null}，v10）
+     * @param timer       TIMER 条目的账簿状态组（代次/装载态/绝对到期时刻/
+     *                    装载去重槽；非延时触发形态恒 {@code null}，v11）
      */
     public record Entry(String key, LockType lockType, long leaseToken, long leaseMs,
                         long expiresAtMs, List<Holder> holders,
                         int permitsTotal, long latchTotal, long latchCount,
                         AtomicState atomic, BarrierState barrier, AtomicRefState atomicRef,
-                        QueueState queue, PhaserState phaser) {
+                        QueueState queue, PhaserState phaser, TimerState timer) {
+
+        /**
+         * v11 之前的十四参形态（含 PHASER 状态组、不含 TIMER 状态组）：
+         * TIMER 状态组恒 {@code null}——既有构造点（恢复装配与测试）不因
+         * 新维改写。
+         *
+         * @param key         锁键
+         * @param lockType    锁类型
+         * @param leaseToken  当前租约凭证
+         * @param leaseMs     实际生效租期
+         * @param expiresAtMs 当前到期时刻
+         * @param holders     持有者列表
+         * @param permitsTotal Semaphore 许可总量
+         * @param latchTotal  Latch 定型初始计数
+         * @param latchCount  Latch 当前剩余计数
+         * @param atomic      标量原子状态组（非该形态 {@code null}）
+         * @param barrier     屏障状态组（非该形态 {@code null}）
+         * @param atomicRef   有值引用状态组（非该形态 {@code null}）
+         * @param queue       队列状态组（非该形态 {@code null}）
+         * @param phaser      相位器状态组（非该形态 {@code null}）
+         */
+        public Entry(String key, LockType lockType, long leaseToken, long leaseMs,
+                long expiresAtMs, List<Holder> holders, int permitsTotal,
+                long latchTotal, long latchCount, AtomicState atomic, BarrierState barrier,
+                AtomicRefState atomicRef, QueueState queue, PhaserState phaser) {
+            this(key, lockType, leaseToken, leaseMs, expiresAtMs, holders,
+                    permitsTotal, latchTotal, latchCount, atomic, barrier, atomicRef,
+                    queue, phaser, null);
+        }
 
         /**
          * 锁家族便捷构造：许可与屏障字段取缺省 0，原子状态组为 {@code null}。
@@ -226,6 +257,20 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                 throw new IllegalArgumentException(
                         "non-phaser entry carries phaser state: key=" + key);
             }
+            boolean timerKind = lockType == LockType.TIMER;
+            if (timerKind) {
+                if (timer == null) {
+                    throw new IllegalArgumentException(
+                            "timer entry requires state group: key=" + key);
+                }
+                if (!holders.isEmpty() || leaseToken != 0 || leaseMs != 0 || expiresAtMs != 0) {
+                    throw new IllegalArgumentException(
+                            "timer entry carries lease or holders: key=" + key);
+                }
+            } else if (timer != null) {
+                throw new IllegalArgumentException(
+                        "non-timer entry carries timer state: key=" + key);
+            }
             boolean atomicKind = lockType == LockType.ATOMIC_LONG
                     || lockType == LockType.ATOMIC_INTEGER
                     || lockType == LockType.ATOMIC_BOOLEAN;
@@ -303,6 +348,15 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
                     throw new IllegalArgumentException(
                             "phaser entry must not carry other-family state: key=" + key);
                 }
+            } else if (timerKind) {
+                // 延时触发自洽性首检完成租约/持有面；此处校验他族字段零携带
+                // （代次/装载态不变量由 TimerState 构造器钉定）。
+                if (permitsTotal != 0 || latchTotal != 0 || latchCount != 0
+                        || atomic != null || atomicRef != null || barrier != null
+                        || queue != null || phaser != null) {
+                    throw new IllegalArgumentException(
+                            "timer entry must not carry other-family state: key=" + key);
+                }
             } else if (atomicRefKind) {
                 // 引用条目自洽性已在家族首检完成（载荷两态原样直写，不校验）。
             } else {
@@ -337,7 +391,7 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             if (lockType != LockType.READ && lockType != LockType.LATCH
                     && lockType != LockType.SEMAPHORE && lockType != LockType.BARRIER
                     && !atomicKind && !atomicRefKind && !queueKind && !phaserKind
-                    && holders.size() != 1) {
+                    && !timerKind && holders.size() != 1) {
                 throw new IllegalArgumentException(
                         "write-side entry must have exactly one holder: key=" + key);
             }
@@ -573,6 +627,48 @@ public record CoreStateRestore(List<Entry> entries, List<Long> sessions, long ne
             }
             if (prevPhase == -1 && !prevArrivals.isEmpty()) {
                 throw new IllegalArgumentException("phaser prev arrivals without prev phase");
+            }
+        }
+    }
+
+    /**
+     * TIMER 条目的快照状态组（v11；账簿直写通道，数据载体）：装载代次、
+     * 装载态、绝对到期时刻与每会话装载去重槽表。<b>不存在"已到期"驻留位
+     * ——marked 是账簿与判定时刻的派生谓词</b>（"到期零条目"裁决的快照侧
+     * 对偶：恢复不重演"补 fire"环节，两份同终态账簿构造永无字节差）。
+     * 列表序即确定性导出序（槽按会话 id 升序——跨副本摘要可比的前提）；
+     * 等待集不入本状态组（Leader 本地易失态，恢复即清空、客户端重挂补登记
+     * ——v10 phaser 等待集条款同构）。
+     *
+     * <p><b>账簿不变量</b>（构造即钉定）：{@code generation ≥ 1}（条目由
+     * SCHEDULE 建立，代次自 1 起单调递增、恢复不回退）；{@code !armed} 时
+     * {@code fireAtMs} 仍为历史观察值（DISARM 保持不重写）；每会话至多一槽
+     * （覆盖式），槽内 op 仅 SCHEDULE/DISARM 两值（本地操作无槽）。
+     *
+     * @param generation 装载代次（≥1）
+     * @param armed      装载态（{@code true}=PENDING、{@code false}=DISARMED）
+     * @param fireAtMs   绝对到期时刻（应用点折算值；DISARM 后保持历史值）
+     * @param slots      每会话装载去重槽（会话 id 升序）
+     */
+    public record TimerState(long generation, boolean armed, long fireAtMs,
+            java.util.List<io.github.lamspace.openlatch.core.lock.TimerEntry.Slot> slots) {
+
+        /**
+         * 构造并校验账簿自洽性与列表深复制。
+         *
+         * @throws IllegalArgumentException 自洽性违例
+         */
+        public TimerState {
+            if (generation < 1) {
+                throw new IllegalArgumentException("timer generation must be >= 1: " + generation);
+            }
+            slots = java.util.List.copyOf(slots);
+            Set<Long> seen = new HashSet<>();
+            for (var s : slots) {
+                if (!seen.add(s.sessionId())) {
+                    throw new IllegalArgumentException(
+                            "timer slot session duplicated: session=" + s.sessionId());
+                }
             }
         }
     }

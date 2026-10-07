@@ -41,6 +41,7 @@ import io.github.lamspace.openlatch.core.lock.LockTable;
 import io.github.lamspace.openlatch.core.lock.PhaserEntry;
 import io.github.lamspace.openlatch.core.lock.QueueEntry;
 import io.github.lamspace.openlatch.core.lock.SemaphoreEntry;
+import io.github.lamspace.openlatch.core.lock.TimerEntry;
 import io.github.lamspace.openlatch.core.lock.Owner;
 import io.github.lamspace.openlatch.core.lock.Waiter;
 import io.github.lamspace.openlatch.core.snapshot.CoreStateRestore;
@@ -51,8 +52,10 @@ import io.github.lamspace.openlatch.core.result.ConditionOpResult;
 import io.github.lamspace.openlatch.core.result.AtomicRefOpResult;
 import io.github.lamspace.openlatch.core.result.BarrierActionDoneResult;
 import io.github.lamspace.openlatch.core.result.BarrierAwaitResult;
+import io.github.lamspace.openlatch.core.command.TimerOpCommand;
 import io.github.lamspace.openlatch.core.result.BarrierLeaveResult;
 import io.github.lamspace.openlatch.core.result.LatchAwaitResult;
+import io.github.lamspace.openlatch.core.result.TimerOpResult;
 import io.github.lamspace.openlatch.core.result.LatchCountDownResult;
 import io.github.lamspace.openlatch.core.result.Outcome;
 import io.github.lamspace.openlatch.core.PhaserOpType;
@@ -213,6 +216,17 @@ public final class CoreEngine {
                         ps.arrived(), ps.parties(), ps.arrivals(),
                         ps.prevPhase(), ps.prevArrivals());
                 lockTable.computeIfAbsent(en.key(), k -> pe);
+                continue;
+            }
+            if (en.lockType() == LockType.TIMER) {
+                // 延时触发条目：账簿直写（不经迁移规则——恢复不重演装载
+                // 判定，更无"补 fire"环节——到期是读面谓词不是账簿位，
+                // 已到期共现钟与未到期钟在恢复面同构存续）；挂起等待集恒空
+                // （Leader 本地态，客户端重挂补登记、谓词重评即了结）。
+                CoreStateRestore.TimerState ts = en.timer();
+                TimerEntry te = TimerEntry.restored(en.key(), ts.generation(), ts.armed(),
+                        ts.fireAtMs(), ts.slots());
+                lockTable.computeIfAbsent(en.key(), k -> te);
                 continue;
             }
             if (en.lockType() == LockType.BARRIER) {
@@ -427,12 +441,13 @@ public final class CoreEngine {
             return new AcquireResult(Outcome.REJECT_KEY_TOO_LONG, 0, 0, 0);
         }
 
-        // LATCH/BARRIER/ATOMIC 不经获取通道：ACQUIRE 携带这些类型
-        // 属请求形状错误，协议层门控之后由本守卫兜底。
+        // LATCH/BARRIER/ATOMIC/QUEUE/PHASER/TIMER 不经获取通道：ACQUIRE 携带
+        // 这些类型属请求形状错误，协议层门控之后由本守卫兜底。
         if (cmd.lockType() == LockType.LATCH || cmd.lockType() == LockType.BARRIER
                 || familyOf(cmd.lockType()) == KeyFamily.ATOMIC
                 || familyOf(cmd.lockType()) == KeyFamily.QUEUE
-                || familyOf(cmd.lockType()) == KeyFamily.PHASER) {
+                || familyOf(cmd.lockType()) == KeyFamily.PHASER
+                || familyOf(cmd.lockType()) == KeyFamily.TIMER) {
             return new AcquireResult(Outcome.REJECT_TYPE_MISMATCH, 0, 0, 0);
         }
         // v9：await 折叠形状守卫（接入层唯一裁决后的 core 防御兜底）——condition
@@ -517,6 +532,7 @@ public final class CoreEngine {
             case BARRIER -> KeyFamily.BARRIER;
             case QUEUE, DELAY_QUEUE -> KeyFamily.QUEUE;
             case PHASER -> KeyFamily.PHASER;
+            case TIMER -> KeyFamily.TIMER;
         };
     }
 
@@ -557,6 +573,10 @@ public final class CoreEngine {
             // 路径）创建，ACQUIRE 携 phaser 定型在入口即拒（见 acquire 守卫）。
             case PHASER -> throw new IllegalStateException(
                     "phaser entries are created only via phaser channels");
+            // 延时触发条目只能经 timerOp 的 SCHEDULE 建条目路径创建，
+            // ACQUIRE 携 timer 定型在入口即拒（见 acquire 守卫）。
+            case TIMER -> throw new IllegalStateException(
+                    "timer entries are created only via timer channels");
         };
     }
 
@@ -1316,6 +1336,150 @@ public final class CoreEngine {
     }
 
     /**
+     * 延时触发操作（单机受理通道，v11）：SCHEDULE/DISARM 迁移账簿、AWAIT/CANCEL/
+     * QUERY 在条目内等待集本地裁决（单机形态等待住条目、唤醒经监听点投递）。
+     * horizon 上限判定唯一在本受理路径（{@code enforceCap=true} 臂）——条目
+     * 应用侧不复核，配置漂移不撕裂账簿（判例 phaser parties 线）。
+     *
+     * @param cmd 延时触发命令（形状与尺寸已由接入层受理）
+     * @return 操作结果（三元组为裁决时刻账簿快照）
+     */
+    public TimerOpResult timerOp(TimerOpCommand cmd) {
+        return timerOp(cmd, true);
+    }
+
+    /**
+     * 延时触发操作（复制应用通道，v11）：集群状态机应用点专用——除 MUST NOT
+     * 依据配置拒绝装载外与 {@link #timerOp(TimerOpCommand)} 同一迁移；
+     * {@code now} 经 {@code EntryClock} 注入条目时刻（绝对到期时刻由
+     * 条目携带时刻折算，回放与 live 同值、换主不改判——判例 v7 队列延时形态）。
+     * 集群形态等待不住条目（Leader 侧 TimerRegistry 簿记），应用点唤醒排空
+     * 由网关据 {@code disarmed} 标记完成。
+     *
+     * @param cmd 延时触发命令
+     * @return 操作结果
+     */
+    public TimerOpResult timerApply(TimerOpCommand cmd) {
+        return timerOp(cmd, false);
+    }
+
+    /**
+     * timer 通道实现（受理/应用两路共用，{@code enforceCap} 判别是否
+     * 消费 horizon 上限判定）。家族互斥走既有 {@code REJECT_TYPE_MISMATCH}
+     * 线路；SCHEDULE 是条目唯一建条目入口（判例 v10 REGISTER），其余操作
+     * 命中不存在条目 {@code REJECT_TIMER_NO_ENTRY}（MUST NOT 隐式建钟）。
+     *
+     * @param cmd        延时触发命令
+     * @param enforceCap 是否受理 horizon 上限判定
+     * @return 操作结果
+     */
+    private TimerOpResult timerOp(TimerOpCommand cmd, boolean enforceCap) {
+        long now = clock.nowMs();
+        if (!sessions.contains(cmd.sessionId())) {
+            return TimerOpResult.rejected(Outcome.REJECT_SESSION);
+        }
+        Outcome keyBad = validateKey(cmd.key());
+        if (keyBad != null) {
+            return TimerOpResult.rejected(keyBad);
+        }
+        String key = cmd.key();
+        while (true) {
+            KeyEntry e = lockTable.get(key);
+            if (e == null) {
+                if (cmd.op() != TimerOpType.SCHEDULE) {
+                    return TimerOpResult.rejected(Outcome.REJECT_TIMER_NO_ENTRY);
+                }
+                if (enforceCap && cmd.delayMs() != null
+                        && cmd.delayMs() > config.maxTimerHorizonMs()) {
+                    return TimerOpResult.rejected(Outcome.REJECT_TIMER_DELAY_OVER);
+                }
+                e = lockTable.computeIfAbsent(key, TimerEntry::new);
+            }
+            List<Waiter> notify = new ArrayList<>();
+            TimerOpResult result;
+            synchronized (e) {
+                if (lockTable.get(key) != e) {
+                    continue; // 条目竞态变更，重试
+                }
+                if (!(e instanceof TimerEntry te)) {
+                    return TimerOpResult.rejected(Outcome.REJECT_TYPE_MISMATCH);
+                }
+                if (!sessions.touchIfPresent(cmd.sessionId(), key)) {
+                    return TimerOpResult.rejected(Outcome.REJECT_SESSION);
+                }
+                if (enforceCap && cmd.op() == TimerOpType.SCHEDULE && cmd.delayMs() != null
+                        && cmd.delayMs() > config.maxTimerHorizonMs()) {
+                    return TimerOpResult.rejected(Outcome.REJECT_TIMER_DELAY_OVER);
+                }
+                result = te.timerOp(cmd, now, config, notify, !enforceCap);
+            }
+            fireNotify(notify, key);
+            return result;
+        }
+    }
+
+    /**
+     * 延时触发条目复制态导出（影子表镜像与跨副本摘要的权威读口，判例
+     * {@link #phaserReplicatedState}）：无条目或非 TIMER 家族回
+     * {@code null}。
+     *
+     * @param key 延时触发键
+     * @return 复制态快照或 {@code null}
+     */
+    public TimerEntry.ReplicatedState timerReplicatedState(String key) {
+        if (key == null) {
+            return null;
+        }
+        KeyEntry e = lockTable.get(key);
+        if (e == null) {
+            return null;
+        }
+        synchronized (e) {
+            if (lockTable.get(key) != e) {
+                return null;
+            }
+            return e instanceof TimerEntry te ? te.replicatedState() : null;
+        }
+    }
+
+    /**
+     * 单 key 延时触发挂起等待明细（单机形态条目内视图；集群形态恒空——
+     * 等待住 Leader 侧 TimerRegistry，判例 {@link #phaserWaiters}）。
+     *
+     * @param key 延时触发键
+     * @return 等待项视图列表（登记到达序）
+     */
+    public List<TimerEntry.WaiterView> timerWaiters(String key) {
+        KeyEntry e = key == null ? null : lockTable.get(key);
+        return e instanceof TimerEntry te ? te.waitersSnapshot() : List.of();
+    }
+
+    /**
+     * 单机到期唤醒扫描（判例 {@code wakeQueueReady} 的 timer 臂，供服务端
+     * 就绪扫描调度器按 {@code timer-ready-tick-ms} 周期消费）：对"有挂起
+     * 等待者且当代 armed 且已越过 fireAtMs"的 timer 条目收集唤醒并出集，
+     * 经监听点投递通知；纯提示零状态变更（MUST NOT 迁移账簿、MUST NOT 产生
+     * 日志足迹——到期是派生谓词，本方法只是把已成立的谓词送达在场订阅者）。
+     *
+     * @return 本轮唤醒的等待项总数（供 fired 唤醒事件计数口径）
+     */
+    public int wakeTimerReady() {
+        long now = clock.nowMs();
+        int count = 0;
+        for (KeyEntry e : lockTable.values()) {
+            if (!(e instanceof TimerEntry te)) {
+                continue;
+            }
+            List<Waiter> notify = new ArrayList<>();
+            synchronized (te) {
+                count += te.wakeReadyHeads(now, config.headReplyTimeoutMs(), notify);
+            }
+            fireNotify(notify, e.key());
+        }
+        return count;
+    }
+
+    /**
      * key 形状校验的共享出口：空与超长分别回
      * {@link Outcome#REJECT_KEY_EMPTY} / {@link Outcome#REJECT_KEY_TOO_LONG}，
      * 合法返回 {@code null}。
@@ -1522,6 +1686,7 @@ public final class CoreEngine {
                     case BarrierEntry be -> snapshots.add(be.snapshot(now));
                     case QueueEntry qe -> snapshots.add(qe.snapshot(now));
                     case PhaserEntry pe -> snapshots.add(pe.snapshot(now));
+                    case TimerEntry te -> snapshots.add(te.snapshot(now));
                     default -> {
                         // 未知实现不入快照（理论不可达：条目类已穷尽）。
                     }
@@ -1562,6 +1727,7 @@ public final class CoreEngine {
                 case BarrierEntry be -> be.snapshot(now);
                 case QueueEntry qe -> qe.snapshot(now);
                 case PhaserEntry pe -> pe.snapshot(now);
+                case TimerEntry te -> te.snapshot(now);
                 default -> null;
             };
         }

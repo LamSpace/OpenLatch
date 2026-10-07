@@ -56,5 +56,12 @@ public enum KeyFamily {
     /** 有界队列家族（{@code QueueEntry}）：元素绑定 key 不绑定会话，常驻不回收。 */
     QUEUE,
     /** 相位器家族（{@code PhaserEntry}）：动态注册配额与相位账簿，死亡摘除不空转，常驻不回收。 */
-    PHASER
+    PHASER,
+    /**
+     * 延时触发家族（{@code TimerEntry}）：定时单次标记——装载代次与到期时刻
+     * 是复制账簿，到期为派生谓词（无"已响"驻留位）；触发绑定 key 不绑定会话
+     * （装载者死亡钟照响，与队列"死亡不吞元素"同轴、与屏障破障/phaser 摘除
+     * 并列死亡三形态），常驻不回收。
+     */
+    TIMER
 }

@@ -33,6 +33,10 @@ enum MessageType {
   PHASER_OP        = 22;   // v10：相位器操作（单消息对；变异全入日志——注册/到场/离场逐条经提交，
                            // 等待/取消/查询 Leader 本地零提交。AWAIT_ADVANCE 与 ARRIVE_AND_AWAIT 的
                            // 等待半程骑 AWAIT_NOTIFY 推送，v10 零新推送类型；唤醒重发恒 OK 终态）
+  TIMER_OP         = 23;   // v11：延时触发操作（单消息对；装载/撤销入日志——SCHEDULE/DISARM 逐条经
+                           // 提交，等待/取消等待/查询 Leader 本地零提交；到期零条目——marked 为账簿
+                           // 与判定时刻的派生谓词。AWAIT 唤醒与 DISARM 终结唤醒均骑 AWAIT_NOTIFY，
+                           // v11 零新推送类型；了结重发以 OK/DENIED 终态自决、无回炉）
 }
 
 // 锁类型。
@@ -54,6 +58,11 @@ enum LockType {
   LOCK_TYPE_PHASER       = 14; // v10：相位器家族判别（动态注册/到场/离场的会合原语；形态由 PHASER_OP 消息类型隐含、
                                 // 本值不入请求字段——判例 LOCK_TYPE_BARRIER；ACQUIRE/其余车道携带属违例。
                                 // 编号证据线：本值与 RaftEntryType.PHASER_OP_ENTRY=14 构成 v10 的 14 号上界）
+  LOCK_TYPE_TIMER        = 15; // v11：延时触发家族判别（定时单次标记——装载代次与到期时刻是账簿内容、
+                                // 无子形态判别；形态由 TIMER_OP 消息类型隐含、本值不入请求字段——判例
+                                // LOCK_TYPE_PHASER；ACQUIRE/其余车道携带属违例。
+                                // 编号证据线：本值与 RaftEntryType.TIMER_OP_ENTRY=15 构成 v11 的 15 号上界，
+                                // v10 时代的 14 号上界证据随本代更替为历史相对口径）
 }
 
 // 状态码。
@@ -131,6 +140,8 @@ message Envelope {
     ConditionOpResponse       condition_op_response        = 46;  // v9
     PhaserOpRequest           phaser_op_request            = 47;  // v10
     PhaserOpResponse          phaser_op_response           = 48;  // v10
+    TimerOpRequest            timer_op_request             = 49;  // v11
+    TimerOpResponse           timer_op_response            = 50;  // v11
   }
 }
 
@@ -285,6 +296,8 @@ message AdminSummaryResponse {
   int32      topic_entries    = 13; // v8：TOPIC 订阅登记键数（Leader 本地登记表读数，无持有语义单列；非 Leader 恒 0）
   int32      phaser_entries   = 14; // v10：PHASER 条目数（复制态家族读数、各节点经镜像收敛一致——与 topic_entries 的
                                     // Leader 本地表口径分轨；无持有语义单列，判例 latch/atomic/barrier/queue_entries）
+  int32      timer_entries    = 15; // v11：TIMER 条目数（复制态家族读数、各节点经镜像收敛一致——判例 phaser_entries；
+                                    // 装载存量即条目数本身，timer 不设单键峰值 Gauge 的 SUMMARY 侧依据）
 }
 
 message AdminListKeysRequest {
@@ -327,6 +340,13 @@ message AdminKeyInfo {
   sint64 phaser_phase              = 19; // 当前相位号（自 0 起单调递增；非 PHASER 恒 0）
   int32  phaser_registered         = 20; // registeredParties 注册总数（非 PHASER 恒 0）
   int32  phaser_arrived            = 21; // 当前相位到场计数（非 PHASER 恒 0）
+  // v11：TIMER 行的账簿三元组（复制态，各节点读数一致且不随节点时钟漂移；非 timer 行恒 0）。
+  // 该行的 waiter_count（5 号位）承载等待集人数——Leader 本地口径、Follower 如实 0（判例
+  // family=phaser 行双轨注记）。**呈现面不折算 marked**：到期判定仅在 Leader 应答线发生，
+  // 管理面恒呈原始 armed/fire_at_ms——两台节点的三元组逐字节相等。
+  sint64 timer_generation          = 22; // 装载代次（自 1 起每次 SCHEDULE 严格 +1；非 TIMER 恒 0）
+  bool   timer_armed               = 23; // 装载态（true=PENDING、false=DISARMED 代终结；非 TIMER 恒 false）
+  int64  timer_fire_at_ms          = 24; // 绝对到期时刻（应用点折算值原样承载，历史值不重写；非 TIMER 恒 0）
 }
 
 message AdminListKeysResponse {
@@ -441,6 +461,24 @@ message AdminKeyDetailResponse {
   int32  phaser_arrived = 35;     // 当前相位到场计数（非 PHASER 恒 0）
   repeated AdminPhaserWaiterInfo phaser_waiters_info = 36;   // 等待明细（非 PHASER 恒空）
   repeated AdminPhaserPartyInfo  phaser_parties_info = 37;   // 每会话注册配额（账簿插入序=注册先后；非 PHASER 恒空）
+  // v11：TIMER 专属账簿与等待维（非 timer 键恒 0/空列表）。三元组为复制态——Follower 照常
+  // 呈现（键详情命中，与 topic 键的 Follower 未命中分轨，判例 PHASER 区段）；等待明细为
+  // Leader 本地集合——Follower 如实零/空并挂 wait_queue_leader_only 同口径标注（双速呈现
+  // 沿 phaser 型）。等待明细按登记到达序、与 waiters 区段并列不并号（timer 等待非队首批授）。
+  // 呈现面不折算 marked（时钟无关呈现纪律——"已否到期"由读侧以 armed 与 fire_at 自行判定）。
+  sint64 timer_generation = 38;      // 装载代次（非 TIMER 恒 0）
+  bool   timer_armed = 39;           // 装载态（非 TIMER 恒 false）
+  int64  timer_fire_at_ms = 40;      // 绝对到期时刻（非 TIMER 恒 0）
+  repeated AdminTimerWaiterInfo timer_waiters_info = 41;     // 等待明细（非 TIMER 恒空）
+}
+
+// v11：timer 等待明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空——等待集为 Leader
+// 本地易失态，Follower 如实零读；在集身份=(会话,请求)，无归属线程概念；无代次入参——
+// 等待谓词为当代纯函数，对照 AdminPhaserWaiterInfo 的 expected_phase 维）。
+message AdminTimerWaiterInfo {
+  int64  session_id       = 1;  // 等待会话（逻辑会话 id）
+  int64  request_id       = 2;  // 等待方 TIMER_OP 的 request_id（唤醒通知关联键）
+  int64  armed_at_ms      = 3;  // 登记时刻（受理节点本地时刻读数；换主重挂后重新计时）
 }
 
 // v10：phaser 等待明细项（ADMIN_KEY_DETAIL 专用，仅 Leader 视角非空——等待集为
@@ -758,4 +796,60 @@ message PhaserOpResponse {
   sint64     phase     = 3;   // 相位回显（语义见 op×status 矩阵，见消息注）
   int32      registered = 4;  // 回执时刻 registeredParties（QUERY 与回执观察；拒绝路径为 0）
   int32      arrived    = 5;  // 回执时刻当前相位到场计数（同上）
+}
+
+// v11：延时触发操作类型（TIMER_OP.op）。五操作词表——装载/撤销装载/等待标记/
+// 撤销等待登记/读数。SCHEDULE/DISARM 两类变异逐条经提交（TIMER_OP_ENTRY——装载决定
+// "未来某刻对谁可见"是复制态迁移，沿 v5/v10 迁移入日志纪律，落地纪律第 2 条对本原语
+// 不豁免）；AWAIT/CANCEL/QUERY 零日志（等待是订阅不是状态、观察不是迁移——判例族直接
+// 延伸）；**到期本身零条目**——marked = armed ∧ 判定时刻 ≥ fire_at_ms 是账簿与钟的纯
+// 函数（"到期不是迁移，是时间的兑现"，与租约"到期是状态迁移故入日志"构成判例族两端）。
+// AWAIT 为阻塞操作词（判例 v7 take 与 v10 AWAIT_ADVANCE——无立即式等待需求，不设独立
+// 等待消息）。
+enum TimerOp {
+  TIMER_OP_SCHEDULE = 0;  // 装载/重装载（delay 后到期；换代清钟——代次+1、粘滞 marked 归伪；无条目时建条目并定型 TIMER 家族）
+  TIMER_OP_DISARM   = 1;  // 撤销装载（当代代终结粘滞、同关键区唤醒全体在等旁观者以 DENIED 终态了结；幂等回声，判例 v9 LEAVE）
+  TIMER_OP_AWAIT    = 2;  // 等待当代标记（已到期即刻 OK、已撤销即刻 DENIED、未到期 QUEUED 挂起；无代次入参——谓词当下重评即完备）
+  TIMER_OP_CANCEL   = 3;  // 撤销等待登记（按 (会话, await_request_id) 摘除；幂等 OK，判例 v9 LEAVE/v10 CANCEL）
+  TIMER_OP_QUERY    = 4;  // 读数（Leader 本地零日志——generation/armed/fire_at_ms/marked 抓取读数，remaining 客户端差值导出；MUST NOT 推进任何状态）
+}
+
+// v11：延时触发操作请求（TIMER_OP）。key 沿用既有长度纪律（非空、≤maxKeyLength）。
+// 形状互斥矩阵入口裁决（判例 v8 payload/op_seq、v9 thread_id、v10 expected_phase）：
+// delay_ms 仅 SCHEDULE 携带且 MUST ∈ [0, max-timer-horizon-ms]（optional——0 主张与
+// 缺省两态可判别：delay=0 即立即可共见为合法装载，故 presence 与值域分离；其余 op
+// MUST 缺省）；await_request_id 仅 CANCEL 携带且 MUST 非零（指向被撤销等待项的原
+// TIMER_OP 信封 request_id）、其余 op MUST 为 0。矩阵外组合一律同型 INVALID_REQUEST、
+// 账簿与等待集零扰动。家族定型：SCHEDULE 是条目唯一建条目入口（判例 v10 REGISTER），
+// 非 SCHEDULE 命中不存在条目 INVALID_REQUEST（MUST NOT 隐式建钟）；ACQUIRE/其余车道
+// 命中 timer key 或携带 LOCK_TYPE_TIMER 走既有 REJECT_TYPE_MISMATCH 线路映射
+// INVALID_REQUEST（TIMER 与 DELAY_QUEUE 同具到期语义但到期对象不同——元素可见性 vs
+// 全体共见标记位，状态机互不相通）。
+message TimerOpRequest {
+  string          key               = 1;
+  TimerOp         op                = 2;
+  optional int64  delay_ms          = 3;  // 仅 SCHEDULE：相对延迟（≥0、≤horizon；其余 op 携带为违例）
+  int64           await_request_id  = 4;  // 仅 CANCEL：被撤销等待项的原 request_id（其余携非零为违例）
+}
+
+// v11：延时触发操作应答。拒绝态字段为零值形。status 可达面
+// OK/DENIED/QUEUED/OVERLOADED/NOT_LEADER/INVALID_REQUEST/SESSION_EXPIRED/INTERNAL_ERROR——
+// **DENIED 经 timer 首次回到可达面**：当代已撤销装载的等待终态（"本次等待不可能成功"
+// 与 v7 队列元素不可满足的立即式同构语义）；QUEUED/OVERLOADED 仅 AWAIT op 可达（登记
+// 回执与合并等待深度超限）；BARRIER_BROKEN/REJECT_SUBSCRIBERS/NOT_HELD 对 timer 恒
+// 不可达（无破相、无订阅、无持有概念）。
+// generation/armed/fire_at_ms 为账簿三元组回显：SCHEDULE=新代终态三元组（armed 恒
+// true）、DISARM=当代代次+armed false+fire_at 保持撤销前值（历史观察值不重写）；
+// AWAIT 的 QUEUED 回执=受理时刻三元组（观察值），了结重发终态 OK（marked=true，按
+// 了结判定时刻折算）或 DENIED（当代已撤销）——了结即终结、无二次 QUEUED、无回炉
+// （谓词重评幂等自决，无了结记录构造——对照 phaser 有界了结窗，本原语为"等待是订阅"
+// 类目最薄一档）。QUERY 回 OK 且四元组为 Leader 本地账簿按判定时刻的抓取读数。
+// marked 折算仅发生在 Leader 应答线——管理呈现面恒呈原始三元组（时钟无关纪律）。
+message TimerOpResponse {
+  StatusCode status       = 1;
+  TimerOp    op           = 2;
+  sint64     generation   = 3;  // 装载代次回显（自 1 起单调递增；观察序非等待参数）
+  bool       armed        = 4;  // 装载态（true=PENDING、false=DISARMED 代终结）
+  int64      fire_at_ms   = 5;  // 绝对到期时刻（应用点折算；DISARM 后保持历史值）
+  bool       marked       = 6;  // 到期共见读数（判定时刻 ≥ fire_at_ms ∧ armed；仅了结/QUERY 承载语义）
 }

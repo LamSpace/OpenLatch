@@ -251,6 +251,12 @@ class LeaderKillDrillIT {
             pa.register();
             pa.register();
             assertThat(pa.arrive()).isZero();
+            // v11 timer：kill 前由 A 装载 8s 近钟（到期点预期落在 kill+重选+
+            // 失联清理窗内）——到期判定在复制账簿与服务端时钟、与 Leader 生死
+            // 无关；装载绑定 key 不绑定会话，kill 后 A 会话被失联隐式摘除亦不
+            // 撤钟（"死亡不撤钟"契约的演练可执行化）。
+            io.github.lamspace.openlatch.client.OTimer tKill = a.newTimer("drill-timer");
+            tKill.schedule(8, TimeUnit.SECONDS);
 
             logRoles("C:kill前", nodes);
             leader.process().destroyForcibly();
@@ -312,12 +318,39 @@ class LeaderKillDrillIT {
             }
             assertThat(advancedTo).as("kill 后会合照常推进（相位严格前进）").isPositive();
 
+            // v11 timer 跨 kill（契约形断言）：①8s 近钟照响并被 B 侧 await 了结
+            //（谓词在复制账簿、重挂自愈；装载者会话消亡不撤钟）；②kill 后变异
+            // 通道照常：B 重装载远钟→DISARM→await 以异常收束（代终结跨换主成立）。
+            io.github.lamspace.openlatch.client.OTimer tProbe = b.newTimer("drill-timer");
+            boolean fired = false;
+            long fDeadline = System.currentTimeMillis() + 45_000;
+            while (!fired && System.currentTimeMillis() < fDeadline) {
+                try {
+                    fired = tProbe.await(10, TimeUnit.SECONDS);
+                } catch (OpenLatchException transientT) {
+                    Thread.sleep(500); // 改道/瞬断窗：有界重试（不赌清理时序）
+                }
+            }
+            assertThat(fired).as("跨 kill 近钟照响并了结（死亡不撤钟+重挂自愈）").isTrue();
+            io.github.lamspace.openlatch.client.OTimer tAfter = b.newTimer("drill-timer");
+            assertThat(tAfter.schedule(600, TimeUnit.SECONDS))
+                    .as("kill 后重装载照常（新代次）").isPositive();
+            tAfter.disarm();
+            boolean deniedAfter = false;
+            try {
+                tAfter.await(5, TimeUnit.SECONDS);
+            } catch (OpenLatchException deniedEx) {
+                deniedAfter = true;
+            }
+            assertThat(deniedAfter).as("kill 后 DISARM 代终结异常收束").isTrue();
+
             appendReport("## 场景 C：kill -9 Leader × 扩展原语存续\n\n"
                     + "| 指标 | 判定 |\n|---|---|\n"
                     + "| 切换后许可池收敛 | 会话清理归还可得 ✅ |\n"
                     + "| 切换后屏障计数存续 | 1→0→await 放行 ✅ |\n"
                     + "| 归还无泄漏 | 满量可得 ✅ |\n"
-                    + "| phaser 条目存续与合拢跨 kill | 换代后存活侧续注册→相位严格前进 ✅ |\n\n");
+                    + "| phaser 条目存续与合拢跨 kill | 换代后存活侧续注册→相位严格前进 ✅ |\n"
+                    + "| timer 跨 kill 照响与了结 | 8s 近钟跨 kill/失联窗 await 了结；kill 后重装载/DISARM 正常 ✅ |\n\n");
         } finally {
             if (a != null) {
                 a.shutdown();

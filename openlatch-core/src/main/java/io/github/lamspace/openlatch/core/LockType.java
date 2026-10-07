@@ -117,5 +117,15 @@ public enum LockType {
      * 记账，会话死亡隐式摘除且已到场事实不撤销（与屏障"死亡即破障"
      * 刻意分轨，见 {@code PhaserEntry} 契约）。
      */
-    PHASER
+    PHASER,
+    /**
+     * 延时触发家族（枚举序与协议 {@code LOCK_TYPE_TIMER} 数值 15 对齐）：
+     * 非锁家族类型，仅作 key 定型判别——定时单次标记原语，装载/撤销经门面
+     * 独立入口（{@code CoreEngine.timerOp}/{@code timerApply}）进入
+     * {@code TimerEntry}，不经获取/释放/续租命令通道。到期为账簿与判定
+     * 时刻的派生谓词（"到期不是迁移，是时间的兑现"——与租约到期"状态
+     * 迁移故入日志"构成判例族两端）；触发绑定 key 不绑定会话（装载者
+     * 死亡钟照响）。ACQUIRE/其余车道携带本类型属请求形状错误，入口即拒。
+     */
+    TIMER
 }

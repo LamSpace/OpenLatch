@@ -299,7 +299,16 @@ class ProtocolCodecTest {
         assertThat(java.util.Arrays.stream(StatusCode.values())
                 .filter(s -> s != StatusCode.UNRECOGNIZED).count()).isEqualTo(14);
         assertThat(java.util.Arrays.stream(LockType.values())
-                .filter(l -> l != LockType.UNRECOGNIZED).count()).isEqualTo(15);
+                .filter(l -> l != LockType.UNRECOGNIZED).count()).isEqualTo(16);
+        // v11：延时触发消息对/家族判别/操作词编号钉定（StatusCode 零新增延续——14 值
+        // 不变；三词表证据线更替为 StatusCode 止于 13、LockType/RaftEntryType 止于 15）。
+        assertThat(MessageType.TIMER_OP.getNumber()).isEqualTo(23);
+        assertThat(LockType.LOCK_TYPE_TIMER.getNumber()).isEqualTo(15);
+        assertThat(TimerOp.TIMER_OP_SCHEDULE.getNumber()).isZero();
+        assertThat(TimerOp.TIMER_OP_DISARM.getNumber()).isEqualTo(1);
+        assertThat(TimerOp.TIMER_OP_AWAIT.getNumber()).isEqualTo(2);
+        assertThat(TimerOp.TIMER_OP_CANCEL.getNumber()).isEqualTo(3);
+        assertThat(TimerOp.TIMER_OP_QUERY.getNumber()).isEqualTo(4);
         assertThat(PhaserOp.PHASER_OP_REGISTER.getNumber()).isZero();
         assertThat(PhaserOp.PHASER_OP_ARRIVE.getNumber()).isEqualTo(1);
         assertThat(PhaserOp.PHASER_OP_ARRIVE_AND_AWAIT.getNumber()).isEqualTo(2);
@@ -1031,8 +1040,10 @@ class ProtocolCodecTest {
         assertThat(parsedDetail.getPhaserWaitersInfo(0).getExpectedPhase()).isEqualTo(10L);
         assertThat(parsedDetail.getPhaserPartiesInfo(0).getParties()).isEqualTo(3);
 
-        // v10 编号证据正向钉定：条目上界 14、值域无空洞复用；快照 phaser 字段链
-        // 35–40；回执 phaser 字段 23–26（1–13 既有值语义由 golden 冻结保证）
+        // v10 编号证据正向钉定（版本相对口径）：phaser 专用值 14、值域无空洞复用；
+        // 快照 phaser 字段链 35–41；回执 phaser 字段 23–26（1–13 既有值语义由 golden
+        // 冻结保证）。条目值域上界随 v11 更替为止于 15——"止于 14"为 v10 时代相对口径、
+        // MUST NOT 锚死绝对值（更替条款见 timerOperationRoundTrip 与 golden 冻结）。
         assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.PHASER_OP_ENTRY.getNumber())
                 .isEqualTo(14);
         for (io.github.lamspace.openlatch.protocol.raft.RaftEntryType t
@@ -1040,7 +1051,7 @@ class ProtocolCodecTest {
             if (t == io.github.lamspace.openlatch.protocol.raft.RaftEntryType.UNRECOGNIZED) {
                 continue;
             }
-            assertThat(t.getNumber()).isBetween(0, 14);
+            assertThat(t.getNumber()).isBetween(0, 15);
         }
         assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
                 .findFieldByName("phaser_phase").getNumber()).isEqualTo(35);
@@ -1062,5 +1073,135 @@ class ProtocolCodecTest {
         return roundTrip(Envelope.newBuilder().setProtocolVersion(10)
                 .setType(MessageType.PHASER_OP).setRequestId(82L)
                 .setPhaserOpResponse(resp).build()).getPhaserOpResponse();
+    }
+
+    /**
+     * 场景：v11 延时触发消息对回环——五操作词全形状与矩阵违例形如实承载（形状裁决
+     * 在接入层，编解码只载字节，判例 phaser 七操作形），{@code delay_ms} 未主张与 0
+     * 主张两态可判别（{@code delay=0} 即立即可共见为合法装载，presence 与值域分离，
+     * 判例 expected_phase）、应答三元组择用与终态形（OK/DENIED/QUEUED）、管理面 timer
+     * 维（LIST_KEYS 三元组 / DETAIL 等待明细）回环，并正向钉定 v11 编号证据线：
+     * {@code RaftEntryType.TIMER_OP_ENTRY = 15} 上界、{@code SnapshotLock} timer 字段
+     * 链 42–45 且无 marked 字段（到期派生裁决的快照面编号证据）、{@code ApplyResult}
+     * 回执 timer 字段 27–29、{@code Envelope.payload} 槽 49/50。
+     */
+    @Test
+    void timerOperationRoundTrip() throws InvalidProtocolBufferException {
+        // 五操作词 + 违例形：delay_ms 仅 SCHEDULE（optional presence）、
+        // await_request_id 仅 CANCEL——违例组合字节级照载（不裁决）
+        TimerOpRequest schedule = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_SCHEDULE).setDelayMs(5000L).build();
+        TimerOpRequest scheduleZero = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_SCHEDULE).setDelayMs(0L).build();
+        TimerOpRequest scheduleNoDelay = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_SCHEDULE).build();
+        TimerOpRequest disarm = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_DISARM).build();
+        TimerOpRequest await = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_AWAIT).build();
+        TimerOpRequest cancel = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_CANCEL).setAwaitRequestId(81L).build();
+        TimerOpRequest query = TimerOpRequest.newBuilder()
+                .setKey("tm").setOp(TimerOp.TIMER_OP_QUERY).build();
+        TimerOpRequest violationAwaitDelay = await.toBuilder().setDelayMs(1L).build();
+        TimerOpRequest violationScheduleCancel = schedule.toBuilder().setAwaitRequestId(9L).build();
+
+        // presence 两态：未主张 vs 0 主张（delay=0 合法装载）
+        assertThat(scheduleNoDelay.hasDelayMs()).isFalse();
+        assertThat(scheduleZero.hasDelayMs()).isTrue();
+        assertThat(scheduleZero.getDelayMs()).isZero();
+        assertThat(scheduleNoDelay.toByteArray()).isNotEqualTo(scheduleZero.toByteArray());
+        for (TimerOpRequest req : List.of(schedule, scheduleZero, scheduleNoDelay, disarm,
+                await, cancel, query, violationAwaitDelay, violationScheduleCancel)) {
+            assertThat(roundTrip(envTimer(req)).getTimerOpRequest()).isEqualTo(req);
+        }
+        assertThat(roundTrip(envTimer(scheduleNoDelay)).getTimerOpRequest()
+                .hasDelayMs()).isFalse();
+
+        // 应答择用：三元组回显（SCHEDULE 新代/queued 观察值/OK 共见/DENIED 代终结）、
+        // 拒绝零值形；无 marked 驻留语义——marked 仅在终态/查询读数承载判定时刻折算
+        TimerOpResponse scheduled = TimerOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(TimerOp.TIMER_OP_SCHEDULE)
+                .setGeneration(3L).setArmed(true).setFireAtMs(1700000500L).build();
+        TimerOpResponse queued = TimerOpResponse.newBuilder()
+                .setStatus(StatusCode.QUEUED).setOp(TimerOp.TIMER_OP_AWAIT)
+                .setGeneration(3L).setArmed(true).setFireAtMs(1700000500L).build();
+        TimerOpResponse fired = TimerOpResponse.newBuilder()
+                .setStatus(StatusCode.OK).setOp(TimerOp.TIMER_OP_AWAIT)
+                .setGeneration(3L).setArmed(true).setFireAtMs(1700000500L)
+                .setMarked(true).build();
+        TimerOpResponse disarmed = TimerOpResponse.newBuilder()
+                .setStatus(StatusCode.DENIED).setOp(TimerOp.TIMER_OP_AWAIT)
+                .setGeneration(3L).setArmed(false).setFireAtMs(1700000500L).build();
+        TimerOpResponse overload = TimerOpResponse.newBuilder()
+                .setStatus(StatusCode.OVERLOADED).setOp(TimerOp.TIMER_OP_AWAIT).build();
+        assertThat(parseTimerResponse(scheduled).getGeneration()).isEqualTo(3L);
+        assertThat(parseTimerResponse(queued).getStatus()).isEqualTo(StatusCode.QUEUED);
+        assertThat(parseTimerResponse(fired).getMarked()).isTrue();
+        TimerOpResponse parsedDenied = parseTimerResponse(disarmed);
+        assertThat(parsedDenied.getStatus()).isEqualTo(StatusCode.DENIED);
+        assertThat(parsedDenied.getArmed()).isFalse();
+        assertThat(parsedDenied.getFireAtMs()).isEqualTo(1700000500L);
+        TimerOpResponse parsedOverload = parseTimerResponse(overload);
+        assertThat(parsedOverload.getGeneration()).isZero();
+        assertThat(parsedOverload.getOp()).isEqualTo(TimerOp.TIMER_OP_AWAIT);
+
+        // 管理面 timer 维：LIST_KEYS 三元组 + waiter_count 双轨；DETAIL 等待明细
+        AdminKeyInfo keyInfo = AdminKeyInfo.newBuilder()
+                .setKey("tm").setFamily("timer").setWaiterCount(2)
+                .setTimerGeneration(3L).setTimerArmed(true).setTimerFireAtMs(1700000500L).build();
+        AdminKeyInfo parsedKeyInfo = AdminKeyInfo.parseFrom(keyInfo.toByteArray());
+        assertThat(parsedKeyInfo.getTimerGeneration()).isEqualTo(3L);
+        assertThat(parsedKeyInfo.getTimerArmed()).isTrue();
+        assertThat(parsedKeyInfo.getTimerFireAtMs()).isEqualTo(1700000500L);
+        AdminKeyDetailResponse detail = AdminKeyDetailResponse.newBuilder()
+                .setStatus(StatusCode.OK).setFamily("timer")
+                .setTimerGeneration(3L).setTimerArmed(true).setTimerFireAtMs(1700000500L)
+                .addTimerWaitersInfo(AdminTimerWaiterInfo.newBuilder()
+                        .setSessionId(0x100000001L).setRequestId(81L)
+                        .setArmedAtMs(999L).build())
+                .build();
+        AdminKeyDetailResponse parsedDetail = AdminKeyDetailResponse.parseFrom(detail.toByteArray());
+        assertThat(parsedDetail).isEqualTo(detail);
+        assertThat(parsedDetail.getTimerWaitersInfo(0).getArmedAtMs()).isEqualTo(999L);
+
+        // v11 编号证据正向钉定：条目上界 15（timer 专用，1–14 语义由 golden 冻结保证）；
+        // 快照 timer 字段链 42–45 且不存在任何 marked 字段（到期派生裁决的编号证据）；
+        // 回执 timer 字段 27–29；Envelope 槽 49/50
+        assertThat(io.github.lamspace.openlatch.protocol.raft.RaftEntryType.TIMER_OP_ENTRY.getNumber())
+                .isEqualTo(15);
+        for (io.github.lamspace.openlatch.protocol.raft.RaftEntryType t
+                : io.github.lamspace.openlatch.protocol.raft.RaftEntryType.values()) {
+            if (t == io.github.lamspace.openlatch.protocol.raft.RaftEntryType.UNRECOGNIZED) {
+                continue;
+            }
+            assertThat(t.getNumber()).isBetween(0, 15);
+        }
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .findFieldByName("timer_generation").getNumber()).isEqualTo(42);
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .findFieldByName("timer_dedup_slots").getNumber()).isEqualTo(45);
+        assertThat(io.github.lamspace.openlatch.protocol.raft.SnapshotLock.getDescriptor()
+                .getFields().stream().noneMatch(f -> f.getName().contains("marked"))).isTrue();
+        assertThat(io.github.lamspace.openlatch.protocol.raft.ApplyResult.getDescriptor()
+                .findFieldByName("timer_armed").getNumber()).isEqualTo(29);
+        assertThat(Envelope.getDescriptor().findFieldByName("timer_op_request").getNumber())
+                .isEqualTo(49);
+        assertThat(Envelope.getDescriptor().findFieldByName("timer_op_response").getNumber())
+                .isEqualTo(50);
+    }
+
+    /** timer 请求信封包裹（复用 {@link #roundTrip(Envelope)} 于 TIMER_OP 通道）。 */
+    private static Envelope envTimer(TimerOpRequest req) {
+        return Envelope.newBuilder().setProtocolVersion(11)
+                .setType(MessageType.TIMER_OP).setRequestId(91L)
+                .setTimerOpRequest(req).build();
+    }
+
+    /** timer 应答信封包裹回环（复用 {@link #roundTrip(Envelope)} 于 TIMER_OP 通道）。 */
+    private static TimerOpResponse parseTimerResponse(TimerOpResponse resp) {
+        return roundTrip(Envelope.newBuilder().setProtocolVersion(11)
+                .setType(MessageType.TIMER_OP).setRequestId(92L)
+                .setTimerOpResponse(resp).build()).getTimerOpResponse();
     }
 }

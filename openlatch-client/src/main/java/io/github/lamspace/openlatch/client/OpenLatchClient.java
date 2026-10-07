@@ -1671,6 +1671,24 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 创建跨进程延时触发句柄（{@link OTimer}，协议 v11）：定时单次标记——
+     * 装载一枚未来某刻响一次、全体共见的标记；构造零网络（装载恒显式
+     * {@link OTimer#schedule}，无"构造即预装"语义——对照 newPhaser 的
+     * 初始注册参数）。
+     *
+     * @param key 延时触发键（非空）
+     * @return 延时触发句柄
+     * @throws IllegalArgumentException key 为空
+     */
+    public OTimer newTimer(String key) {
+        Objects.requireNonNull(key, "key");
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("key must not be empty");
+        }
+        return new RemoteTimer(this, key);
+    }
+
+    /**
      * 同 key 在途写互斥监视器（{@link RemoteAtomicBase} 消费）：
      * 保证任意时刻本客户端对同 key 至多一个在途写——超时重发的
      * {@code op_seq} 恒为该 key 最近序号，服务端去重单槽即充分。
@@ -1915,6 +1933,53 @@ public final class OpenLatchClient implements AutoCloseable {
                 .setRequestId(requestId)
                 .setBarrierActionDoneRequest(BarrierActionDoneRequest.newBuilder()
                         .setKey(key).setGeneration(generation))
+                .build();
+    }
+
+    /**
+     * 构造 TIMER_OP 信封（v11，装载/撤销/等待/读数直发车道共用；判例
+     * phaser 直发——不设信封协议版本，会话门由握手协商承载）。形状互斥
+     * 矩阵由装配点保证：仅 SCHEDULE 携 {@code delayMs}（presence——0 主张
+     * 合法），其余操作恒缺省。
+     *
+     * @param requestId 请求 id
+     * @param op        操作词
+     * @param key       延时触发键
+     * @param delayMs   相对延迟毫秒（仅 SCHEDULE，其余传 {@code null}）
+     * @return 信封
+     */
+    static Envelope timerEnvelope(long requestId,
+            io.github.lamspace.openlatch.protocol.TimerOp op, String key, Long delayMs) {
+        io.github.lamspace.openlatch.protocol.TimerOpRequest.Builder rb =
+                io.github.lamspace.openlatch.protocol.TimerOpRequest.newBuilder()
+                        .setKey(key).setOp(op);
+        if (delayMs != null) {
+            rb.setDelayMs(delayMs);
+        }
+        return Envelope.newBuilder()
+                .setType(MessageType.TIMER_OP)
+                .setRequestId(requestId)
+                .setTimerOpRequest(rb)
+                .build();
+    }
+
+    /**
+     * 构造 timer 等待撤销信封（CANCEL 尽力收束专用；await_request_id 指向
+     * 被撤销等待项的原请求 id，判例 phaser cancelEnvelope 形态）。
+     *
+     * @param requestId       本撤销请求 id
+     * @param key             延时触发键
+     * @param awaitRequestId  被撤销等待项的原 request_id
+     * @return 信封
+     */
+    static Envelope timerCancelEnvelope(long requestId, String key, long awaitRequestId) {
+        return Envelope.newBuilder()
+                .setType(MessageType.TIMER_OP)
+                .setRequestId(requestId)
+                .setTimerOpRequest(io.github.lamspace.openlatch.protocol.TimerOpRequest
+                        .newBuilder().setKey(key)
+                        .setOp(io.github.lamspace.openlatch.protocol.TimerOp.TIMER_OP_CANCEL)
+                        .setAwaitRequestId(awaitRequestId))
                 .build();
     }
 

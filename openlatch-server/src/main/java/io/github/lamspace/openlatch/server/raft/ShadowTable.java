@@ -20,6 +20,7 @@ import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotBarrierArrival;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotHolder;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserArrival;
+import io.github.lamspace.openlatch.protocol.raft.SnapshotTimerSlot;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotPhaserParty;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueElement;
 import io.github.lamspace.openlatch.protocol.raft.SnapshotQueueSlot;
@@ -132,6 +133,32 @@ public final class ShadowTable {
                                    long prevPhase, List<ArrivalRef> prevArrivals) { }
 
     /**
+     * v11：timer 每会话装载去重槽镜像项（逻辑会话 id；覆盖式单槽——
+     * 同 (会话,请求) 重发回放回声的判据行，digest 参与项）。
+     *
+     * @param sessionId      逻辑会话 id
+     * @param requestId      最近一次装载/撤销的请求 id
+     * @param scheduleOp     槽内操作（{@code true}=SCHEDULE 回声、{@code false}=DISARM 回声）
+     * @param echoGeneration 首次回执的代次回显
+     * @param echoFireAtMs   首次回执的绝对到期时刻回显
+     */
+    public record TimerSlotRef(long sessionId, long requestId, boolean scheduleOp,
+                               long echoGeneration, long echoFireAtMs) { }
+
+    /**
+     * v11：timer 复制态镜像输入（引擎 {@code TimerEntry.ReplicatedState}
+     * 经逻辑 id 折算后的形态；槽列表按账簿插入序导出（判例 v10 配额表——
+     * 内部 sid 升序跨副本不可比，插入序由 apply 序唯一决定）。
+     *
+     * @param generation 装载代次
+     * @param armed      装载态
+     * @param fireAtMs   绝对到期时刻（应用点折算值；DISARM 后保持历史值）
+     * @param slots      每会话装载去重槽（账簿插入序=该会话首装先后）
+     */
+    public record TimerMirrorData(long generation, boolean armed, long fireAtMs,
+                                  List<TimerSlotRef> slots) { }
+
+    /**
      * 循环屏障复制态镜像输入（应用点自引擎导出的不可变快照）。
      *
      * @param parties             定型许可数
@@ -194,6 +221,10 @@ public final class ShadowTable {
      * @param phaserRegistered PHASER 注册总数（其余家族 0）
      * @param phaserArrived  PHASER 当前相位到场计数（其余家族 0）
      * @param phaserParties  PHASER 每会话注册配额（逻辑 id，会话升序；其余家族空）
+     * @param timerGeneration TIMER 装载代次（其余家族 0，v11）
+     * @param timerArmed     TIMER 装载态（其余家族 {@code false}；呈现面不折算
+     *                       marked——原始读数时钟无关）
+     * @param timerFireAtMs  TIMER 绝对到期时刻（其余家族 0）
      */
     public record AdminEntryView(int lockType, long leaseToken, long expiresAtMs, long leaseMs,
                                  Map<Holder, Integer> holders, int permitsTotal, int permitsAvailable,
@@ -205,7 +236,9 @@ public final class ShadowTable {
                                  long queueCapacity, int queueDepth, long queueHeadExpiryMs,
                                  long queueTotalPayloadBytes, byte[] queueHeadPayload,
                                  long phaserPhase, int phaserRegistered, int phaserArrived,
-                                 List<PartyRef> phaserParties) { }
+                                 List<PartyRef> phaserParties,
+                                 long timerGeneration, boolean timerArmed,
+                                 long timerFireAtMs) { }
 
     /** 单 key 的复制态：模式、凭证、到期、租期与持有者计数（插入序=首次持有序）。 */
     private static final class SLock {
@@ -303,6 +336,14 @@ public final class ShadowTable {
         private long phaserPrevPhase = -1L;
         /** PHASER 上一推进周期到场槽（逻辑 id，插入序；digest 用）。 */
         private List<ArrivalRef> phaserPrevArrivals = List.of();
+        /** TIMER 装载代次（其余家族 0，v11）。 */
+        private long timerGeneration;
+        /** TIMER 装载态（其余家族 false，v11）。 */
+        private boolean timerArmed;
+        /** TIMER 绝对到期时刻（其余家族 0，v11）。 */
+        private long timerFireAtMs;
+        /** TIMER 装载去重槽表（逻辑 id，会话升序；仅参与 digest，v11）。 */
+        private List<TimerSlotRef> timerSlots = List.of();
 
         /**
          * 构造复制态条目。
@@ -446,7 +487,8 @@ public final class ShadowTable {
                 l.refInitial, l.refValue,
                 l.queueCapacity, l.queueDepth, l.queueHeadExpiryMs,
                 l.queueTotalPayloadBytes, l.queueHeadPayload,
-                l.phaserPhase, l.phaserRegistered, l.phaserArrived, l.phaserParties);
+                l.phaserPhase, l.phaserRegistered, l.phaserArrived, l.phaserParties,
+                l.timerGeneration, l.timerArmed, l.timerFireAtMs);
     }
 
     /**
@@ -575,6 +617,7 @@ public final class ShadowTable {
             if (en.getValue().lockType == LockType.LOCK_TYPE_LATCH_VALUE
                     || en.getValue().lockType == LockType.LOCK_TYPE_BARRIER_VALUE
                     || isQueueType(en.getValue().lockType)
+                    || isTimerType(en.getValue().lockType)
                     || isAtomicFamily(en.getValue().lockType)) {
                 // 无租约家族（Latch/ATOMIC/BARRIER/QUEUE）到期时刻恒 0——非"已到期"
                 // 信号，永不由到期清扫回收（一次性护栏、常驻值、循环屏障世代存续与
@@ -627,6 +670,19 @@ public final class ShadowTable {
                         .filter(s -> s.sessionId() != sessionId).toList();
                 if (remaining.size() != l.queueSlots.size()) {
                     l.queueSlots = remaining;
+                    adminView.put(en.getKey(), viewOf(l));
+                }
+                continue;
+            }
+            if (isTimerType(l.lockType)) {
+                // v11：延时触发条目存续与一切会话无关——触发绑定 key 不绑定会话
+                // （装载者死亡钟照响，三元组镜像零扰动）；仅摘该会话的装载去重
+                // 槽行（引擎侧 TimerEntry.removeSession 同判——回声辅助结构随
+                // 会话灭，镜像与引擎两侧事件流一致，判例队列槽摘除同径）。
+                List<TimerSlotRef> remainingSlots = l.timerSlots.stream()
+                        .filter(sl -> sl.sessionId() != sessionId).toList();
+                if (remainingSlots.size() != l.timerSlots.size()) {
+                    l.timerSlots = remainingSlots;
                     adminView.put(en.getKey(), viewOf(l));
                 }
                 continue;
@@ -848,6 +904,24 @@ public final class ShadowTable {
                                 .setSessionId(a.sessionId()).setRequestId(a.requestId()));
                     }
                 }
+            } else if (isTimerType(l.lockType)) {
+                // v11 延时触发条目：账簿仅呈当前 (generation, armed, fireAt, 每会话
+                // 最近槽)——代次历史与到期标记零驻留（"到期无位"的序列化面证据：
+                // 已到期与未到期的同三元组条目导出字节等）。槽按账簿插入序导出
+                //（判例 v10 配额表——内部 sid 升序跨副本不可比）。
+                lb.setTimerGeneration(l.timerGeneration).setTimerArmed(l.timerArmed)
+                        .setTimerFireAtMs(l.timerFireAtMs);
+                for (TimerSlotRef ts : l.timerSlots) {
+                    lb.addTimerDedupSlots(SnapshotTimerSlot.newBuilder()
+                            .setSessionId(ts.sessionId()).setRequestId(ts.requestId())
+                            .setOp(ts.scheduleOp()
+                                    ? io.github.lamspace.openlatch.protocol.TimerOp
+                                        .TIMER_OP_SCHEDULE
+                                    : io.github.lamspace.openlatch.protocol.TimerOp
+                                        .TIMER_OP_DISARM)
+                            .setEchoGeneration(ts.echoGeneration())
+                            .setEchoFireAtMs(ts.echoFireAtMs()));
+                }
             } else if (isAtomicType(l.lockType)) {
                 // v4 家族字段：仅原子条目写入（其余家族序列化字节零扰动）。
                 lb.setAtomicInitial(l.atomicInitial).setAtomicValue(l.atomicValue)
@@ -996,6 +1070,19 @@ public final class ShadowTable {
                 sl.phaserPrevArrivals = l.getPhaserPrevArrivalsList().stream()
                         .map(a -> new ArrivalRef(a.getSessionId(), a.getRequestId())).toList();
                 locks.put(l.getKey(), sl);
+            } else if (isTimerType(l.getLockTypeValue())) {
+                // v11 延时触发条目装载：账簿原样还原（常驻条目不入 heldIndex；
+                // 无 marked 字段可载——到期共见为读面谓词，还原后照常折算）。
+                sl.timerGeneration = l.getTimerGeneration();
+                sl.timerArmed = l.getTimerArmed();
+                sl.timerFireAtMs = l.getTimerFireAtMs();
+                sl.timerSlots = l.getTimerDedupSlotsList().stream()
+                        .map(ts -> new TimerSlotRef(ts.getSessionId(), ts.getRequestId(),
+                                ts.getOp() == io.github.lamspace.openlatch.protocol.TimerOp
+                                        .TIMER_OP_SCHEDULE,
+                                ts.getEchoGeneration(), ts.getEchoFireAtMs()))
+                        .toList();
+                locks.put(l.getKey(), sl);
             } else if (l.getLockTypeValue() == LockType.LOCK_TYPE_LATCH_VALUE) {
                 sl.latchTotal = l.getLatchTotal();
                 sl.latchCount = l.getLatchCount();
@@ -1121,6 +1208,51 @@ public final class ShadowTable {
     public boolean isPhaser(String key) {
         SLock l = locks.get(key);
         return l != null && isPhaserType(l.lockType);
+    }
+
+    /**
+     * v11：协议数值是否为 TIMER 家族。
+     *
+     * @param lockTypeValue 协议 {@code LockType} 数值
+     * @return TIMER 家族为 {@code true}
+     */
+    public static boolean isTimerType(int lockTypeValue) {
+        return lockTypeValue == LockType.LOCK_TYPE_TIMER_VALUE;
+    }
+
+    /**
+     * v11：指定 key 是否镜像为延时触发条目（受理预检家族判定用）。
+     *
+     * @param key 延时触发键
+     * @return 镜像存在且为 TIMER 家族为 {@code true}
+     */
+    public boolean isTimer(String key) {
+        SLock l = locks.get(key);
+        return l != null && isTimerType(l.lockType);
+    }
+
+    /**
+     * v11：延时触发账簿镜像整体刷新（判例 {@link #phaserMirror}——账簿以引擎
+     * {@code replicatedState} 导出为权威形整体重发布；条目不存在时按镜像建
+     * 条目（引擎建条目应用点先行于本调用）。家族不符零扰动。
+     *
+     * @param key 延时触发键
+     * @param d   引擎导出的逻辑 id 镜像数据
+     */
+    public void timerMirror(String key, TimerMirrorData d) {
+        SLock l = locks.get(key);
+        if (l == null) {
+            l = new SLock(LockType.LOCK_TYPE_TIMER_VALUE, 0, 0, 0);
+            locks.put(key, l);
+        }
+        if (!isTimerType(l.lockType)) {
+            return;
+        }
+        l.timerGeneration = d.generation();
+        l.timerArmed = d.armed();
+        l.timerFireAtMs = d.fireAtMs();
+        l.timerSlots = List.copyOf(d.slots());
+        adminView.put(key, viewOf(l));
     }
 
     /**

@@ -37,6 +37,8 @@ Each node is **the same binary + its own properties file**. One Raft group carri
 | `openlatch.server.limit.max-subscribers-per-key` | `64` | per-key topic subscriber ceiling (v8); an over-limit SUBSCRIBE is ingress-rejected (`REJECT_SUBSCRIBERS`, existing subscribers untouched), range [1, 1024]; bounds broadcast fan-out amplification |
 | `openlatch.server.limit.max-subscription-buffer` | `256` | server-side in-flight buffer depth per subscription (v8, drop-newest trigger line), range [1, 65536]; the SDK keeps a matching local tier (256) |
 | `openlatch.server.limit.max-parties-per-phaser` | `1024` | per-key phaser (v10) registration cap; an over-limit REGISTER is rejected at admission (`OVERLOADED`, existing quotas untouched), range [1, 65536]; checked only at admission (the entry never consultates it — config drift cannot split the ledger). Suspended waits instead share the existing `max-queue-depth-per-key` merged guardrail |
+| `openlatch.server.timer.max-horizon-ms` | `86400000` | per-arm relative-delay cap (v11, default 24h); an over-limit SCHEDULE is rejected at admission (`INVALID_REQUEST` — the parameter line, like lease clamping, not a resource code; existing ledgers untouched), range [1000, 604800000] (1s–7d); checked only at admission (the entry never consultates it). Guards against clocks that never ring squatting the ledger; suspended waits share `max-queue-depth-per-key` (four primitives since v11) |
+| `openlatch.server.timer.ready-tick-ms` | `200` | timer expiry wake sweep period (v11, Leader/standalone scheduling; affects wake latency only, MUST NOT participate in any verdict), floor 10ms; **separate knob and value from the queue tick** — the two wake precisions tune independently |
 | `openlatch.server.metrics.enabled` | `true` | metrics admin endpoint (Prometheus scrapes `http://host:port/metrics`) |
 | `openlatch.server.metrics.port` | `9412` | metrics port (`0` = ephemeral); bind conflict fails startup — distinct per node on shared hosts |
 | `openlatch.server.admin.token` | unset | read-only `ADMIN_*` management token; unset ⇒ every admin request refused |
@@ -187,6 +189,20 @@ availability is carried by the server-side self-healing watchdog, not by restart
   alongside queue "drain first", topic/condition "clean by construction" —
   never cross-read the four.
 
+- **v11 timer rollback window (same caliber as barrier/queue/phaser)**:
+  timers are persistent-state — arms/withdrawals each append a
+  `TIMER_OP_ENTRY` and the ledger writes `timer_*` snapshot fields (entry
+  type 15); older binaries cannot read them — drain in-flight timer traffic
+  before downgrading (waiter bookkeeping is Leader-volatile and needs no
+  care) or accept timer keys being unavailable on the old build (unknown
+  entry types follow the current error path). **"Zero-entry expiry" is NOT
+  "zero persistent state"**: the generation/armed/fire triple and the slot
+  rows remain persistent footprints — strictly separated from the
+  topic/condition "clean by construction" caliber, same "clear in-flight
+  traffic first" family as queue/phaser. Mixed-fleet rule unchanged: v11
+  SDK clients refuse to handshake with a rolled-back v10 server (upgrade
+  server-first, roll back client-first).
+
 ### Queue-dimension snapshot and log governance (v7)
 
 - A single queue key's snapshot residency is bounded by `capacity ×
@@ -273,6 +289,26 @@ availability is carried by the server-side self-healing watchdog, not by restart
   `phaser.parties.registered.max` water mark; when entry rate or snapshot
   duration becomes an operational concern, the WATCHLIST W14 row triggers the
   batched-arrival / read-path evaluation (separate change).
+
+### Timer-dimension arm-rate and wake-latency governance (v11)
+
+- timers are **half-logged**: only arms/withdrawals append `TIMER_OP_ENTRY`,
+  **expiry itself logs nothing** (`marked` is a derived predicate) — entry
+  rate equals your explicit arm frequency, the deliberate contrast with W14
+  (phaser arrival rate grows with parties × phase frequency): timers have no
+  self-triggering steady mutation surface (a top reason periodicity is a
+  Non-Goal);
+- wake latency: expiry-to-settle lag is one `timer-ready-tick-ms` window
+  (the benchmark timer phase provides the baseline distribution); per-sweep
+  cost scales with the count of watched keys — when latency or sweep cost
+  becomes an operational concern the WATCHLIST W15 row triggers the
+  timing-wheel/min-heap evaluation (separate change);
+- ledger footprint: every timer key is a resident entry = the triple + at
+  most one overwritten slot row per session (dropped with the session) —
+  size decoupled from arm rounds (generation history and any "rang" bit
+  are zero-residency; pinned by the zero-footprint and bounded-size
+  snapshot regressions); the horizon cap is the only gate against piles of
+  clocks-that-never-ring.
 
 ### Payload snapshot & log size governance (v6)
 

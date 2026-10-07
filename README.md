@@ -8,12 +8,12 @@
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.lamspace/openlatch-client)](https://central.sonatype.com/artifact/io.github.lamspace/openlatch-client)
 [![Java](https://img.shields.io/badge/Java-25-orange)](#-requirements)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.x-green)](docs/guide/en/04-spring-boot-starter.md)
-[![Protocol](https://img.shields.io/badge/protocol-v10-lightgrey)](docs/guide/en/10-compatibility.md)
+[![Protocol](https://img.shields.io/badge/protocol-v11-lightgrey)](docs/guide/en/10-compatibility.md)
 
 OpenLatch is a lightweight distributed lock service: JUC-style primitives (reentrant /
 simple / read-write / fair locks, semaphore, count-down latch, cyclic barrier, atomic
 long/int/boolean/reference with per-key version stamps, blocking/delay queues,
-publish/subscribe topics, condition variables, phasers) on a **Raft cluster**
+publish/subscribe topics, condition variables, phasers, scheduled one-shot timers) on a **Raft cluster**
 (Apache Ratis, with snapshots) or a **single node**; Protobuf over Netty with leases,
 watchdog renewal and a wait–notify–resend **FIFO fair queue**; a Spring Boot 4 declarative
 `@OpenLatch`, a read-only web **console**, Prometheus **metrics/health**, and optional
@@ -55,7 +55,7 @@ lock-lost callback in every critical path. The full semantics live in the guides
 |---|---|
 | Java | **25** (all artifacts, `release=25`) |
 | Spring Boot starter | **4.x only** (Boot-4-only dependencies); Boot 3.x → assemble the SDK manually |
-| Wire protocol | v1 / v2 / v3 via HELLO negotiation, range `[1,3]`, no implicit compatibility |
+| Wire protocol | v1…v11 via HELLO negotiation, range `[1,11]`, no implicit compatibility |
 | Artifacts | Client SDK chain (`openlatch-protocol` / `openlatch-client` / `openlatch-spring-boot-starter`) published on **Maven Central**, 1.0.0+; server & console executable jars on **GitHub Releases** |
 
 ## 🚀 Quick Start

@@ -206,6 +206,23 @@ auto-convergence after healing; sampler red only if all rounds ABORTED.
   the cap); on AWAIT_ADVANCE it is the merged `max-queue-depth-per-key` wait
   budget (`arriveAndAwaitAdvance`'s wait half is never refused — its arrival
   already counts);
+- **The "scheduled mark never rings" trichotomy** (`await` hangs or `isFired`
+  stays false): ① **tick latency and the gate** — wake precision is one
+  `timer-ready-tick-ms` window (default 200ms), "just past the instant, still
+  parked" is in-contract; check the `timer.total` lines — `INVALID_REQUEST`
+  growth usually means v≤10 sessions hitting the v11 gate (confirm both ends
+  upgraded), `{await,OVERLOADED}` growth means the depth guardrail is
+  refusing new waits; ② **generation was re-armed** — read the admin triple:
+  `timer_generation` advanced while `timer_fire_at_ms` sits later than you
+  expected = someone re-armed (newest generation wins; "never armed" is a key
+  miss / generation 0, a different diagnosis); `timer_armed=false` = the
+  generation was disarmed (new `await`s settle DENIED/exception at once — no
+  sleeping on a withdrawn clock); ③ **failover re-hang** — the wake predicate
+  lives in the replicated ledger and re-hangs self-heal (unlike the
+  condition's signal-loss window, a timer's "not ringing" is rooted in
+  "the clock was moved / the precision window", not a lost event); two machines
+  waking in different orders = the declared clock-skew surface — judge by the
+  raw projected `fire_at_ms`, not each node's instantaneous `isFired` (v11);
 - **Late cross-trip resends count as new arrivals**: a lost reply re-sent after
   two further trips rolls out of the previous-generation window and is counted
   afresh (declared race). React within `requestTimeout`-scale latency; never

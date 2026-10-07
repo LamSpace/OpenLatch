@@ -123,6 +123,32 @@ public final class ReplicationGateway implements ApplyObserver {
         this.queueReadyDriver = driver;
     }
 
+    /** v11 timer 等待簿记（唤醒排空与换主清零钩子；可为未挂载）。 */
+    private volatile io.github.lamspace.openlatch.server.timer.TimerRegistry timerRegistry;
+
+    /** v11 timer 就绪驱动（当选首扫钩子；可为未挂载）。 */
+    private volatile TimerReadyDriver timerReadyDriver;
+
+    /**
+     * 回挂 timer 等待簿记（v11，装配后期绑定）：本网关在 {@code SESSION_CLOSE}
+     * 应用点与到期扫描消费该簿记；账簿本体在复制状态机，{@code null}=夹具形态
+     * 无 timer 面（TIMER_OP 抵达回 INTERNAL_ERROR 记 WARN，判例 phaser 同形）。
+     *
+     * @param registry 簿记实例，可为 {@code null}（摘挂）
+     */
+    public void setTimerRegistry(io.github.lamspace.openlatch.server.timer.TimerRegistry registry) {
+        this.timerRegistry = registry;
+    }
+
+    /**
+     * 回挂 timer 就绪驱动（v11，装配后期绑定）。
+     *
+     * @param driver 就绪驱动，可为 {@code null}（摘挂）
+     */
+    public void setTimerReadyDriver(TimerReadyDriver driver) {
+        this.timerReadyDriver = driver;
+    }
+
     /** v8 topic 登记表（会话摘除与换主清零钩子；可为未挂载）。 */
     private volatile io.github.lamspace.openlatch.server.topic.TopicRegistry topicRegistry;
 
@@ -320,6 +346,17 @@ public final class ReplicationGateway implements ApplyObserver {
             if (qdriver != null) {
                 qdriver.onLeadershipGained();
             }
+            io.github.lamspace.openlatch.server.timer.TimerRegistry timerReg = timerRegistry;
+            if (timerReg != null) {
+                // v11：timer 等待簿记随换主清零——簿记无日志/快照来源；等待项经
+                // 双通道重挂以 AWAIT 重发补登（谓词在复制账簿——已到期即刻了结、
+                // 未到期续挂，重挂无损耗，判例 v10 phaser 同侧证据）。
+                timerReg.clear();
+            }
+            TimerReadyDriver tdriver = timerReadyDriver;
+            if (tdriver != null) {
+                tdriver.onLeadershipGained();
+            }
         }
         SessionCoordinator coordinator = sessionCoordinator;
         if (coordinator != null) {
@@ -400,6 +437,31 @@ public final class ReplicationGateway implements ApplyObserver {
                     }
                 } catch (InvalidProtocolBufferException e) {
                     log.warn("phaser op payload unparsable in side effects (seq={})",
+                            entry.getSeq());
+                }
+            }
+            case TIMER_OP_ENTRY -> {
+                // v11：timer 变异应用点唤醒——DISARM 代终结即时排空（撤销靠事件、
+                // 不等 tick）；SCHEDULE 仅"delay=0 当批即刻共见"形态排空，其余到期
+                // 唤醒由就绪驱动 tick 承载（精度契约句）。推送仅提示——了结由等待方
+                // 重发的谓词重评自决，本臂零日志足迹（"到期/唤醒误入日志即红"的
+                // 驱动侧对偶约束）。
+                try {
+                    var tp = io.github.lamspace.openlatch.protocol.raft.TimerOpPayload
+                            .parseFrom(entry.getCommandPayload().toByteArray());
+                    if (result.getStatus() == ApplyStatus.OK
+                            && result.getTimerGeneration() > 0) {
+                        String tkey = tp.getRequest().getKey();
+                        long tnow = System.currentTimeMillis();
+                        if (tp.getRequest().getOp() == io.github.lamspace.openlatch
+                                .protocol.TimerOp.TIMER_OP_DISARM) {
+                            wakeTimerWaiters(tkey, tnow);
+                        } else if (result.getTimerArmed() && tnow >= result.getTimerFireAtMs()) {
+                            wakeTimerWaiters(tkey, tnow);
+                        }
+                    }
+                } catch (InvalidProtocolBufferException e) {
+                    log.warn("timer op payload unparsable in side effects (seq={})",
                             entry.getSeq());
                 }
             }
@@ -576,6 +638,13 @@ public final class ReplicationGateway implements ApplyObserver {
                     // 与推进判定在条目应用侧，本臂仅簿记回收，判例 v8/v9 同径）。
                     pr.removeSession(sp.getSessionId());
                 }
+                io.github.lamspace.openlatch.server.timer.TimerRegistry trm = timerRegistry;
+                if (trm != null) {
+                    // v11：死亡即退订（订阅面）——摘该会话全部 timer 等待簿记；
+                    // 账簿零扰动（"装载者死亡钟照响"——与 phaser 配额摘除刻意
+                    // 反向的第三种死亡形态，簿记侧仅回收订阅位，判例 v8/v9/v10）。
+                    trm.removeSession(sp.getSessionId());
+                }
                 // v10：隐式摘除驱动的相位推进传播——被推进 key 的存活等待者
                 // （簿记形）收唤醒通知（判例 barrier_released_keys 臂）。
                 for (String pkey : result.getPhaserAdvancedKeysList()) {
@@ -708,6 +777,62 @@ public final class ReplicationGateway implements ApplyObserver {
         for (var w : pr.wake(key, view.phaserPhase())) {
             pushAwaitNotify(new WaitQueue.Waiter(w.sessionId(), w.requestId(), key), key);
         }
+    }
+
+    /**
+     * 排空唤醒指定 timer key 的全部在簿等待项（到期与代终结两种唤醒源共用，
+     * 判例 {@link #wakePhaserWaiters}——timer 等待不携代次入参，谓词对全员同时
+     * 成立，wakeAll 即全体）。
+     *
+     * @param key 延时触发键
+     * @param now 当前时刻（簿记侧未消费，保形参一致）
+     */
+    private void wakeTimerWaiters(String key, long now) {
+        io.github.lamspace.openlatch.server.timer.TimerRegistry tr = timerRegistry;
+        if (tr == null) {
+            return;
+        }
+        for (var w : tr.wakeAll(key)) {
+            pushAwaitNotify(new WaitQueue.Waiter(w.sessionId(), w.requestId(), key), key);
+        }
+    }
+
+    /**
+     * timer 就绪扫描（v11，判例 {@link #sweepQueueReady}）：Leader-only；对
+     * "有挂起等待者且影子账簿 {@code armed ∧ now ≥ fire_at_ms}"的键排空唤醒。
+     * 谓词全部基于影子表（复制状态镜像）判定——本方法零状态变更、零日志足迹
+     * （唤醒是纯提示；无等待者的到期键零动作，"到期发生于谓词"）。
+     *
+     * @param now 扫描时刻（epoch 毫秒，与条目折算到期时刻同域）
+     * @return 本轮唤醒集合事件数（每键每轮至多计一次，供 {@code timer.fired.total}
+     *         唤醒面口径消费；无在簿等待者的键不计）
+     */
+    public int sweepTimerReady(long now) {
+        if (!isLeaderAuthoritative()) {
+            return 0;
+        }
+        io.github.lamspace.openlatch.server.timer.TimerRegistry tr = timerRegistry;
+        if (tr == null) {
+            return 0;
+        }
+        int events = 0;
+        for (String key : tr.pendingKeys()) {
+            var view = kernel.shadow().adminEntry(key);
+            if (view == null || !ShadowTable.isTimerType(view.lockType())) {
+                continue;
+            }
+            if (!view.timerArmed() || view.timerFireAtMs() > now) {
+                continue;
+            }
+            var woken = tr.wakeAll(key);
+            if (!woken.isEmpty()) {
+                events++; // 唤醒集合事件（每键每轮至多一次——fired 口径）
+                for (var w : woken) {
+                    pushAwaitNotify(new WaitQueue.Waiter(w.sessionId(), w.requestId(), key), key);
+                }
+            }
+        }
+        return events;
     }
 
     /**

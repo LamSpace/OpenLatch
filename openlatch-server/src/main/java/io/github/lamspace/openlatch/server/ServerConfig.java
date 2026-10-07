@@ -67,6 +67,17 @@ import java.util.Properties;
  *                                 {@code OVERLOADED}、既有参与者零扰动，
  *                                 仅接入层/受理点判定——条目应用侧不复核，
  *                                 配置漂移不撕裂账簿，判例 maxQueueCapacity）
+ * @param maxTimerHorizonMs        单装载相对延迟上限（v11，默认 24h；
+ *                                 {@code SCHEDULE} 越界在带拒绝
+ *                                 {@code INVALID_REQUEST}（参数越界线——租约
+ *                                 越界判例，非资源护栏码）、防"永远不响的钟"
+ *                                 占驻账簿；仅接入层/受理点判定——条目应用侧
+ *                                 不复核，判例 maxPartiesPerPhaser）
+ * @param timerReadyTickMs         timer 就绪扫描周期（v11，默认 200ms；到期
+ *                                 唤醒精度，仅 Leader/单机调度消费，MUST NOT
+ *                                 参与任何状态判定；与队列 ready-tick 分名分
+ *                                 值分轨——两原语唤醒精度独立可调、互不耦合
+ *                                 调参）
  */
 public record ServerConfig(
         int port,
@@ -86,7 +97,9 @@ public record ServerConfig(
         long queueReadyTickMs,
         int maxSubscribersPerKey,
         int maxSubscriptionBuffer,
-        int maxPartiesPerPhaser) {
+        int maxPartiesPerPhaser,
+        long maxTimerHorizonMs,
+        long timerReadyTickMs) {
 
     /** 指定配置文件路径的系统属性键。 */
     public static final String CONFIG_PATH_PROPERTY = "openlatch.config";
@@ -140,6 +153,16 @@ public record ServerConfig(
     public static final int MAX_PARTIES_PER_PHASER_CEILING = 65_536;
     /** 有值引用载荷字节上限的可配置上界（512KiB，为 1MiB 帧上限留信封编解码边际）。 */
     public static final int MAX_VALUE_BYTES_CEILING = 512 * 1024;
+    /** 单装载相对延迟上限默认值（v11，24h 毫秒）。 */
+    public static final long DEFAULT_MAX_TIMER_HORIZON_MS = 86_400_000L;
+    /** 单装载相对延迟上限的配置下限（v11，毫秒——防 0 延迟退化）。 */
+    public static final long MIN_TIMER_HORIZON_MS = 1_000L;
+    /** 单装载相对延迟上限的配置顶格（v11，7 天毫秒——防账簿陈旧 PENDING 治理面）。 */
+    public static final long MAX_TIMER_HORIZON_CEILING = 604_800_000L;
+    /** timer 就绪扫描周期默认值（v11，毫秒——与队列 tick 分轨）。 */
+    public static final long DEFAULT_TIMER_READY_TICK_MS = 200L;
+    /** timer 就绪扫描周期下限（v11，毫秒——与队列 tick 同界）。 */
+    public static final long MIN_TIMER_READY_TICK_MS = 10L;
 
     /**
      * v6 之前的十一参形态：载荷上限取内置默认 4096（既有构造调用点与测试
@@ -165,7 +188,8 @@ public record ServerConfig(
                 maxInflightPerConnection, DEFAULT_MAX_VALUE_BYTES,
                 DEFAULT_MAX_QUEUE_CAPACITY, DEFAULT_MAX_DRAIN_BYTES, DEFAULT_QUEUE_READY_TICK_MS,
                 DEFAULT_MAX_SUBSCRIBERS_PER_KEY, DEFAULT_MAX_SUBSCRIPTION_BUFFER,
-                DEFAULT_MAX_PARTIES_PER_PHASER);
+                DEFAULT_MAX_PARTIES_PER_PHASER, DEFAULT_MAX_TIMER_HORIZON_MS,
+                DEFAULT_TIMER_READY_TICK_MS);
     }
 
     /**
@@ -199,7 +223,44 @@ public record ServerConfig(
                 leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
                 maxInflightPerConnection, maxValueBytes, maxQueueCapacity, maxDrainBytes,
                 queueReadyTickMs, maxSubscribersPerKey, maxSubscriptionBuffer,
-                DEFAULT_MAX_PARTIES_PER_PHASER);
+                DEFAULT_MAX_PARTIES_PER_PHASER, DEFAULT_MAX_TIMER_HORIZON_MS,
+                DEFAULT_TIMER_READY_TICK_MS);
+    }
+
+    /**
+     * v11 之前的十八参形态：timer 延迟上限与就绪扫描周期取内置默认（既有
+     * 全参构造调用点与测试夹具零改动，需自定义 timer 限额的用例走全参构造
+     * ——判例 v10 十七参兼容通道）。
+     *
+     * @param port                     监听端口
+     * @param workerThreads            worker 线程数
+     * @param idleTimeoutMs            空闲超时
+     * @param defaultLeaseMs           默认租约
+     * @param minLeaseMs               租约下限
+     * @param maxLeaseMs               租约上限
+     * @param leaseTickIntervalMs      扫描周期
+     * @param headReplyTimeoutMs       队首响应超时
+     * @param maxKeyLength             键长上限
+     * @param maxQueueDepthPerKey      队列深度上限
+     * @param maxInflightPerConnection 在途上限
+     * @param maxValueBytes            载荷字节上限
+     * @param maxQueueCapacity         队列定型容量上限
+     * @param maxDrainBytes            drainTo 应答字节预算
+     * @param queueReadyTickMs         队列就绪扫描周期
+     * @param maxSubscribersPerKey     单 key 订阅数上限
+     * @param maxSubscriptionBuffer    每订阅在途缓冲条数上限
+     * @param maxPartiesPerPhaser      单相位器注册总数上限
+     */
+    public ServerConfig(int port, int workerThreads, long idleTimeoutMs, long defaultLeaseMs,
+            long minLeaseMs, long maxLeaseMs, long leaseTickIntervalMs, long headReplyTimeoutMs,
+            int maxKeyLength, int maxQueueDepthPerKey, int maxInflightPerConnection,
+            int maxValueBytes, int maxQueueCapacity, long maxDrainBytes, long queueReadyTickMs,
+            int maxSubscribersPerKey, int maxSubscriptionBuffer, int maxPartiesPerPhaser) {
+        this(port, workerThreads, idleTimeoutMs, defaultLeaseMs, minLeaseMs, maxLeaseMs,
+                leaseTickIntervalMs, headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
+                maxInflightPerConnection, maxValueBytes, maxQueueCapacity, maxDrainBytes,
+                queueReadyTickMs, maxSubscribersPerKey, maxSubscriptionBuffer,
+                maxPartiesPerPhaser, DEFAULT_MAX_TIMER_HORIZON_MS, DEFAULT_TIMER_READY_TICK_MS);
     }
 
     /**
@@ -226,7 +287,9 @@ public record ServerConfig(
                 DEFAULT_QUEUE_READY_TICK_MS,
                 DEFAULT_MAX_SUBSCRIBERS_PER_KEY,
                 DEFAULT_MAX_SUBSCRIPTION_BUFFER,
-                DEFAULT_MAX_PARTIES_PER_PHASER);
+                DEFAULT_MAX_PARTIES_PER_PHASER,
+                DEFAULT_MAX_TIMER_HORIZON_MS,
+                DEFAULT_TIMER_READY_TICK_MS);
     }
 
     /**
@@ -271,7 +334,11 @@ public record ServerConfig(
                 intOf(props, "openlatch.server.limit.max-subscription-buffer",
                         base.maxSubscriptionBuffer()),
                 intOf(props, "openlatch.server.limit.max-parties-per-phaser",
-                        base.maxPartiesPerPhaser()));
+                        base.maxPartiesPerPhaser()),
+                longOf(props, "openlatch.server.timer.max-horizon-ms",
+                        base.maxTimerHorizonMs()),
+                longOf(props, "openlatch.server.timer.ready-tick-ms",
+                        base.timerReadyTickMs()));
         cfg.validate();
         return cfg;
     }
@@ -285,7 +352,7 @@ public record ServerConfig(
         return new CoreConfig(
                 defaultLeaseMs, minLeaseMs, maxLeaseMs,
                 headReplyTimeoutMs, maxKeyLength, maxQueueDepthPerKey,
-                maxPartiesPerPhaser);
+                maxPartiesPerPhaser, maxTimerHorizonMs);
     }
 
     /**
@@ -432,6 +499,17 @@ public record ServerConfig(
             throw new IllegalArgumentException(
                     "配置项 openlatch.server.limit.max-parties-per-phaser 非法（应为 1–"
                             + MAX_PARTIES_PER_PHASER_CEILING + "）: " + maxPartiesPerPhaser);
+        }
+        if (maxTimerHorizonMs < MIN_TIMER_HORIZON_MS
+                || maxTimerHorizonMs > MAX_TIMER_HORIZON_CEILING) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.timer.max-horizon-ms 非法（应为 1000–"
+                            + MAX_TIMER_HORIZON_CEILING + "）: " + maxTimerHorizonMs);
+        }
+        if (timerReadyTickMs < MIN_TIMER_READY_TICK_MS) {
+            throw new IllegalArgumentException(
+                    "配置项 openlatch.server.timer.ready-tick-ms 非法（应 >= "
+                            + MIN_TIMER_READY_TICK_MS + "）: " + timerReadyTickMs);
         }
     }
 }

@@ -51,6 +51,9 @@ class ServerConfigTest {
         assertThat(cfg.maxKeyLength()).isEqualTo(512);
         assertThat(cfg.maxQueueDepthPerKey()).isEqualTo(4096);
         assertThat(cfg.maxInflightPerConnection()).isEqualTo(1024);
+        // v11：timer 两限额默认（horizon 24h、tick 200ms——与队列 tick 分轨）。
+        assertThat(cfg.maxTimerHorizonMs()).isEqualTo(86_400_000L);
+        assertThat(cfg.timerReadyTickMs()).isEqualTo(200L);
     }
 
     @Test
@@ -257,6 +260,37 @@ class ServerConfigTest {
     }
 
     @Test
+    void v11_timer_limits_out_of_range_fail_fast() throws IOException {
+        // 逐界：horizon 下界 1000/顶格 7d 外、tick 下限 10 外；键名入错误信息。
+        for (String line : new String[] {
+                "openlatch.server.timer.max-horizon-ms = 999",
+                "openlatch.server.timer.max-horizon-ms = 604800001",
+                "openlatch.server.timer.max-horizon-ms = 0",
+                "openlatch.server.timer.ready-tick-ms = 9",
+        }) {
+            Path file = tempDir.resolve("bad-timer-limit.properties");
+            Files.writeString(file, line + "\n");
+            String key = line.substring(0, line.indexOf(' '));
+            assertThatThrownBy(() -> ServerConfig.load(file.toString()))
+                    .as("越界值应拒绝: %s", line)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(key);
+        }
+    }
+
+    @Test
+    void v11_timer_limits_override_and_core_mapping() throws IOException {
+        Path file = tempDir.resolve("timer-limits.properties");
+        Files.writeString(file, "openlatch.server.timer.max-horizon-ms = 3600000\n"
+                + "openlatch.server.timer.ready-tick-ms = 50\n");
+        ServerConfig cfg = ServerConfig.load(file.toString());
+        assertThat(cfg.maxTimerHorizonMs()).isEqualTo(3_600_000L);
+        assertThat(cfg.timerReadyTickMs()).isEqualTo(50L);
+        // 受理通道经 CoreConfig 消费 horizon（复制通道不复核的分岔在引擎侧）。
+        assertThat(cfg.toCoreConfig().maxTimerHorizonMs()).isEqualTo(3_600_000L);
+    }
+
+    @Test
     void to_core_config_maps_fields() {
         ServerConfig cfg = ServerConfig.load(null);
         var core = cfg.toCoreConfig();
@@ -267,5 +301,7 @@ class ServerConfigTest {
         assertThat(core.headReplyTimeoutMs()).isEqualTo(cfg.headReplyTimeoutMs());
         assertThat(core.maxKeyLength()).isEqualTo(cfg.maxKeyLength());
         assertThat(core.maxQueueDepthPerKey()).isEqualTo(cfg.maxQueueDepthPerKey());
+        assertThat(core.maxPartiesPerPhaser()).isEqualTo(cfg.maxPartiesPerPhaser());
+        assertThat(core.maxTimerHorizonMs()).isEqualTo(cfg.maxTimerHorizonMs());
     }
 }

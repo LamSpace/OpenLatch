@@ -79,3 +79,12 @@ belong to the wait-queue counts). The wait set is Leader-local state, so conditi
 detail is non-zero only from the Leader's view (followers read an honest zero — the
 same Leader-only surface as the topic registry); the condition name is addressing
 text itself and this surface ships no content.
+
+TIMER keys (v11) share the two-speed shape: the ledger triple
+(`timer_generation`/`timer_armed`/`timer_fire_at_ms`) is replicated and
+byte-identical on every node, while the waiter list is Leader-only and
+honestly empty elsewhere. The timer projection **never converts** the fired
+verdict — raw absolute expiry times only (`marked` is folded solely on
+Leader reply lines at the evaluating node's clock); a DISARMED key shows
+`timer_armed=false` honestly rather than disappearing, and no "rang" flag is
+ever rendered.

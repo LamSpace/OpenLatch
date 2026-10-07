@@ -62,4 +62,10 @@
 | 隐式摘除 | implicit quota removal | 参与者会话死亡时服务端自动减其注册配额、不撤销其已到场事实的死亡语义（v10）：应到集合缩小可当场合拢（不空转），与屏障"死亡即破障"刻意对照（单死者不炸锅） |
 | 空转复活 | idle-then-revive | 相位器注册归零的非终止语义（v10）：账簿空转（相位保持、配额 0），后续注册自当前相位恢复运转——与 JDK"归零即终止粘滞"相反 |
 | 换代窗口 | previous-generation window | 相位推进时保留的上一周期到场身份集与到场相位（v10）：跨推进的同请求重发据此终态回显、不双计数；再推进即滚出，更早迟到按新到场计（声明竞态，窗口下界同屏障了结记录口径） |
+| 装载与清钟 | schedule & clock clear | timer 每次 `schedule` 产生新代次并把上一代的粘滞标记归伪（v11）：round 语义由"粘滞 + 换代清零"承载，改期以最新代为准 |
+| 到期派生谓词 | derived expiry predicate | `marked = armed ∧ 判定时刻 ≥ fire_at_ms`——到期不是状态迁移而是账簿与钟的纯函数（v11）：装载/撤销入日志、时钟过点日志恒零新增，与租约"到期是状态迁移故入日志"构成判例族两端 |
+| 共见标记 | shared mark | timer 到期后标记对一切到达者可见、不被消耗（v11）：与队列"一元素一消费者"的交接形态相对，广播单次标记语义的本体 |
+| 代终结 | generation terminal | `disarm` 使当代永不再可标记直至下一次装载（v11）：在等旁观者以 `DENIED` 终态/异常即时收束（撤销靠事件唤醒、不等到期 tick），新到达者同样即刻 DENIED |
+| 唤醒面与到期面之辨 | wake-side vs fire-side | `timer.fired.total` 只在"扫描到点且当批有在等者可唤醒"时计数（v11）：无观察者的静默到期在线路上零足迹——到期发生于谓词，fired 是唤醒面计数，判读勿与到期总数混读 |
+| 呈现面时钟无关 | clock-free projection | timer 管理呈现恒呈原始 `{generation, armed, fire_at_ms}` 不折算 marked（v11）：各节点逐字节等；"已否到期"的折算只发生在 Leader 应答线，跨节点偏差 ≤ 时钟偏移为声明契约 |
 | 双速呈现 | two-speed projection | phaser 管理观察的 Follower 口径（v10）：账簿三计数与配额为复制态照常可读、挂起等待明细为 Leader 本地态如实零——两区速度不同属如实呈现，MUST NOT 以计数可读误判"无人等待" |

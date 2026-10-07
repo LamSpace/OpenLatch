@@ -140,14 +140,14 @@ class StateMachineConditionTest {
     void replicationSurfaceCarriesNoConditionTypes() {
         // 编号证据：条件维自 v9 起条目类型零占用——await 复用既有
         // LOCK_ACQUIRE_ENTRY、signal 家族零条目，值域中无 CONDITION 取值
-        // （v10 上界升至 14 且 14 为 PHASER_OP_ENTRY 专用值，与条件边界无涉——
+        // （v11 上界升至 15 且 15 为 TIMER_OP_ENTRY 专用值，与条件边界无涉——
         // 证据线为版本相对口径而非绝对上界；UNRECOGNIZED 为 protobuf 哨兵值，
         // 取号即抛，不入值域断言）。
         for (RaftEntryType t : RaftEntryType.values()) {
             if (t == RaftEntryType.UNRECOGNIZED) {
                 continue;
             }
-            assertThat(t.getNumber()).isLessThanOrEqualTo(14);
+            assertThat(t.getNumber()).isLessThanOrEqualTo(15);
             assertThat(t.name()).doesNotContain("CONDITION");
         }
         // 快照面：SnapshotLock 字段零 condition（等待集不入快照，await 的复制

@@ -1,429 +1,463 @@
 # openlatch.proto 全量契约：由 OpenlatchProtoContractFreezeTest 与生成描述符逐行比对
 # 新增字段/枚举值/消息必须显式追加本文件（评审可见）；既有编号任何变更即构建失败
 enum MessageType
-  MESSAGE_TYPE_UNKNOWN 0
-  HELLO 1
-  LOCK_ACQUIRE 2
-  LOCK_RELEASE 3
-  LEASE_RENEW 4
-  PING 5
-  AWAIT_NOTIFY 6
-  CLUSTER_VIEW 7
-  LATCH_COUNT_DOWN 8
-  LATCH_AWAIT 9
-  ADMIN_SUMMARY 10
-  ADMIN_LIST_KEYS 11
-  ADMIN_KEY_DETAIL 12
-  ADMIN_LIST_SESSIONS 13
-  ATOMIC_OP 14
-  BARRIER_AWAIT 15
-  BARRIER_LEAVE 16
-  BARRIER_ACTION_DONE 17
-  QUEUE_OP 18
-  TOPIC_OP 19
-  TOPIC_MESSAGE 20
-  CONDITION_OP 21
-  PHASER_OP 22
+MESSAGE_TYPE_UNKNOWN 0
+HELLO 1
+LOCK_ACQUIRE 2
+LOCK_RELEASE 3
+LEASE_RENEW 4
+PING 5
+AWAIT_NOTIFY 6
+CLUSTER_VIEW 7
+LATCH_COUNT_DOWN 8
+LATCH_AWAIT 9
+ADMIN_SUMMARY 10
+ADMIN_LIST_KEYS 11
+ADMIN_KEY_DETAIL 12
+ADMIN_LIST_SESSIONS 13
+ATOMIC_OP 14
+BARRIER_AWAIT 15
+BARRIER_LEAVE 16
+BARRIER_ACTION_DONE 17
+QUEUE_OP 18
+TOPIC_OP 19
+TOPIC_MESSAGE 20
+CONDITION_OP 21
+PHASER_OP 22
+TIMER_OP 23
 enum LockType
-  LOCK_TYPE_REENTRANT 0
-  LOCK_TYPE_SIMPLE 1
-  LOCK_TYPE_READ 2
-  LOCK_TYPE_WRITE 3
-  LOCK_TYPE_FAIR 4
-  LOCK_TYPE_SEMAPHORE 5
-  LOCK_TYPE_LATCH 6
-  LOCK_TYPE_ATOMIC_LONG 7
-  LOCK_TYPE_ATOMIC_INTEGER 8
-  LOCK_TYPE_ATOMIC_BOOLEAN 9
-  LOCK_TYPE_BARRIER 10
-  LOCK_TYPE_ATOMIC_REFERENCE 11
-  LOCK_TYPE_QUEUE 12
-  LOCK_TYPE_DELAY_QUEUE 13
-  LOCK_TYPE_PHASER 14
+LOCK_TYPE_REENTRANT 0
+LOCK_TYPE_SIMPLE 1
+LOCK_TYPE_READ 2
+LOCK_TYPE_WRITE 3
+LOCK_TYPE_FAIR 4
+LOCK_TYPE_SEMAPHORE 5
+LOCK_TYPE_LATCH 6
+LOCK_TYPE_ATOMIC_LONG 7
+LOCK_TYPE_ATOMIC_INTEGER 8
+LOCK_TYPE_ATOMIC_BOOLEAN 9
+LOCK_TYPE_BARRIER 10
+LOCK_TYPE_ATOMIC_REFERENCE 11
+LOCK_TYPE_QUEUE 12
+LOCK_TYPE_DELAY_QUEUE 13
+LOCK_TYPE_PHASER 14
+LOCK_TYPE_TIMER 15
 enum StatusCode
-  OK 0
-  QUEUED 1
-  DENIED 2
-  INVALID_TOKEN 3
-  NOT_HELD 4
-  SESSION_EXPIRED 5
-  OVERLOADED 6
-  KEY_TOO_LONG 7
-  KEY_EMPTY 8
-  INVALID_REQUEST 9
-  NOT_LEADER 10
-  INTERNAL_ERROR 11
-  BARRIER_BROKEN 12
-  REJECT_SUBSCRIBERS 13
+OK 0
+QUEUED 1
+DENIED 2
+INVALID_TOKEN 3
+NOT_HELD 4
+SESSION_EXPIRED 5
+OVERLOADED 6
+KEY_TOO_LONG 7
+KEY_EMPTY 8
+INVALID_REQUEST 9
+NOT_LEADER 10
+INTERNAL_ERROR 11
+BARRIER_BROKEN 12
+REJECT_SUBSCRIBERS 13
 enum AtomicOp
-  ATOMIC_GET 0
-  ATOMIC_SET 1
-  ATOMIC_GET_AND_SET 2
-  ATOMIC_ADD 3
-  ATOMIC_CAS 4
-  ATOMIC_CAS_STAMPED 5
+ATOMIC_GET 0
+ATOMIC_SET 1
+ATOMIC_GET_AND_SET 2
+ATOMIC_ADD 3
+ATOMIC_CAS 4
+ATOMIC_CAS_STAMPED 5
 enum QueueOp
-  QUEUE_OP_PUT 0
-  QUEUE_OP_TAKE 1
-  QUEUE_OP_DRAIN 2
-  QUEUE_OP_PEEK 3
-  QUEUE_OP_SIZE 4
+QUEUE_OP_PUT 0
+QUEUE_OP_TAKE 1
+QUEUE_OP_DRAIN 2
+QUEUE_OP_PEEK 3
+QUEUE_OP_SIZE 4
 enum TopicOp
-  TOPIC_OP_SUBSCRIBE 0
-  TOPIC_OP_UNSUBSCRIBE 1
-  TOPIC_OP_PUBLISH 2
+TOPIC_OP_SUBSCRIBE 0
+TOPIC_OP_UNSUBSCRIBE 1
+TOPIC_OP_PUBLISH 2
 enum ConditionOp
-  CONDITION_OP_SIGNAL 0
-  CONDITION_OP_SIGNAL_ALL 1
-  CONDITION_OP_LEAVE 2
+CONDITION_OP_SIGNAL 0
+CONDITION_OP_SIGNAL_ALL 1
+CONDITION_OP_LEAVE 2
 enum PhaserOp
-  PHASER_OP_REGISTER 0
-  PHASER_OP_ARRIVE 1
-  PHASER_OP_ARRIVE_AND_AWAIT 2
-  PHASER_OP_ARRIVE_AND_DEREGISTER 3
-  PHASER_OP_AWAIT_ADVANCE 4
-  PHASER_OP_CANCEL 5
-  PHASER_OP_QUERY 6
+PHASER_OP_REGISTER 0
+PHASER_OP_ARRIVE 1
+PHASER_OP_ARRIVE_AND_AWAIT 2
+PHASER_OP_ARRIVE_AND_DEREGISTER 3
+PHASER_OP_AWAIT_ADVANCE 4
+PHASER_OP_CANCEL 5
+PHASER_OP_QUERY 6
+enum TimerOp
+TIMER_OP_SCHEDULE 0
+TIMER_OP_DISARM 1
+TIMER_OP_AWAIT 2
+TIMER_OP_CANCEL 3
+TIMER_OP_QUERY 4
 message Envelope
-  protocol_version 1
-  type 2
-  request_id 3
-  hello_request 10
-  hello_response 11
-  acquire_request 12
-  acquire_response 13
-  release_request 14
-  release_response 15
-  lease_renew_request 16
-  lease_renew_response 17
-  await_notify 18
-  cluster_view 19
-  latch_count_down_request 20
-  latch_count_down_response 21
-  latch_await_request 22
-  latch_await_response 23
-  admin_summary_request 24
-  admin_summary_response 25
-  admin_list_keys_request 26
-  admin_list_keys_response 27
-  admin_key_detail_request 28
-  admin_key_detail_response 29
-  admin_list_sessions_request 30
-  admin_list_sessions_response 31
-  atomic_op_request 32
-  atomic_op_response 33
-  barrier_await_request 34
-  barrier_await_response 35
-  barrier_leave_request 36
-  barrier_leave_response 37
-  barrier_action_done_request 38
-  barrier_action_done_response 39
-  queue_op_request 40
-  queue_op_response 41
-  topic_op_request 42
-  topic_op_response 43
-  topic_message 44
-  condition_op_request 45
-  condition_op_response 46
-  phaser_op_request 47
-  phaser_op_response 48
+protocol_version 1
+type 2
+request_id 3
+hello_request 10
+hello_response 11
+acquire_request 12
+acquire_response 13
+release_request 14
+release_response 15
+lease_renew_request 16
+lease_renew_response 17
+await_notify 18
+cluster_view 19
+latch_count_down_request 20
+latch_count_down_response 21
+latch_await_request 22
+latch_await_response 23
+admin_summary_request 24
+admin_summary_response 25
+admin_list_keys_request 26
+admin_list_keys_response 27
+admin_key_detail_request 28
+admin_key_detail_response 29
+admin_list_sessions_request 30
+admin_list_sessions_response 31
+atomic_op_request 32
+atomic_op_response 33
+barrier_await_request 34
+barrier_await_response 35
+barrier_leave_request 36
+barrier_leave_response 37
+barrier_action_done_request 38
+barrier_action_done_response 39
+queue_op_request 40
+queue_op_response 41
+topic_op_request 42
+topic_op_response 43
+topic_message 44
+condition_op_request 45
+condition_op_response 46
+phaser_op_request 47
+phaser_op_response 48
+timer_op_request 49
+timer_op_response 50
 message HelloRequest
-  client_protocol_version 1
-  client_name 2
-  auth_token 3
+client_protocol_version 1
+client_name 2
+auth_token 3
 message HelloResponse
-  status 1
-  session_id 2
-  server_protocol_version 3
-  default_lease_ms 4
-  leader_hint 5
-  leader_address 6
+status 1
+session_id 2
+server_protocol_version 3
+default_lease_ms 4
+leader_hint 5
+leader_address 6
 message AcquireRequest
-  key 1
-  lock_type 2
-  thread_id 3
-  lease_ms 4
-  wait_ms 5
-  permits 6
-  permits_total 7
-  condition 8
+key 1
+lock_type 2
+thread_id 3
+lease_ms 4
+wait_ms 5
+permits 6
+permits_total 7
+condition 8
 message AcquireResponse
-  status 1
-  lease_token 2
-  lease_expires_at_ms 3
-  queue_position 4
-  granted_lease_ms 5
-  leader_node_id 6
-  leader_address 7
+status 1
+lease_token 2
+lease_expires_at_ms 3
+queue_position 4
+granted_lease_ms 5
+leader_node_id 6
+leader_address 7
 message ReleaseRequest
-  key 1
-  lease_token 2
-  thread_id 3
-  permits 4
+key 1
+lease_token 2
+thread_id 3
+permits 4
 message ReleaseResponse
-  status 1
-  fully_released 2
-  leader_node_id 3
-  leader_address 4
+status 1
+fully_released 2
+leader_node_id 3
+leader_address 4
 message LeaseRenewRequest
-  key 1
-  lease_token 2
-  lease_ms 3
+key 1
+lease_token 2
+lease_ms 3
 message LeaseRenewResponse
-  status 1
-  lease_expires_at_ms 2
-  leader_node_id 3
-  leader_address 4
+status 1
+lease_expires_at_ms 2
+leader_node_id 3
+leader_address 4
 message AwaitNotify
-  key 1
-  request_id_ref 2
+key 1
+request_id_ref 2
 message LatchCountDownRequest
-  key 1
-  count 2
-  total 3
+key 1
+count 2
+total 3
 message LatchCountDownResponse
-  status 1
-  remaining 2
+status 1
+remaining 2
 message LatchAwaitRequest
-  key 1
-  total 2
+key 1
+total 2
 message LatchAwaitResponse
-  status 1
-  queue_position 2
+status 1
+queue_position 2
 message ClusterView
-  nodes 1
-  status 2
+nodes 1
+status 2
 message NodeInfo
-  node_id 1
-  address 2
-  is_leader 3
+node_id 1
+address 2
+is_leader 3
 message AdminSummaryRequest
-  token 1
+token 1
 message AdminSummaryResponse
-  status 1
-  held_locks 2
-  held_semaphores 3
-  latch_entries 4
-  total_waiters 5
-  session_count 6
-  node_role 7
-  uptime_ms 8
-  version 9
-  atomic_entries 10
-  barrier_entries 11
-  queue_entries 12
-  topic_entries 13
-  phaser_entries 14
+status 1
+held_locks 2
+held_semaphores 3
+latch_entries 4
+total_waiters 5
+session_count 6
+node_role 7
+uptime_ms 8
+version 9
+atomic_entries 10
+barrier_entries 11
+queue_entries 12
+topic_entries 13
+phaser_entries 14
+timer_entries 15
 message AdminListKeysRequest
-  token 1
-  page 2
-  page_size 3
-  prefix 4
+token 1
+page 2
+page_size 3
+prefix 4
 message AdminKeyInfo
-  key 1
-  family 2
-  holders 3
-  remaining_lease_ms 4
-  waiter_count 5
-  atomic_kind 6
-  atomic_value 7
-  barrier_parties 8
-  barrier_generation 9
-  barrier_arrived 10
-  atomic_payload_size 11
-  atomic_payload_preview 12
-  queue_capacity 13
-  queue_depth 14
-  queue_head_payload_size 15
-  queue_head_payload_preview 16
-  topic_subscribers 17
-  condition_waiters 18
-  phaser_phase 19
-  phaser_registered 20
-  phaser_arrived 21
+key 1
+family 2
+holders 3
+remaining_lease_ms 4
+waiter_count 5
+atomic_kind 6
+atomic_value 7
+barrier_parties 8
+barrier_generation 9
+barrier_arrived 10
+atomic_payload_size 11
+atomic_payload_preview 12
+queue_capacity 13
+queue_depth 14
+queue_head_payload_size 15
+queue_head_payload_preview 16
+topic_subscribers 17
+condition_waiters 18
+phaser_phase 19
+phaser_registered 20
+phaser_arrived 21
+timer_generation 22
+timer_armed 23
+timer_fire_at_ms 24
 message AdminListKeysResponse
-  status 1
-  total_matched 2
-  page 3
-  page_size 4
-  items 5
+status 1
+total_matched 2
+page 3
+page_size 4
+items 5
 message AdminKeyDetailRequest
-  token 1
-  key 2
+token 1
+key 2
 message AdminKeyHolderInfo
-  session_id 1
-  thread_id 2
-  count 3
-  role 4
+session_id 1
+thread_id 2
+count 3
+role 4
 message AdminKeyWaiterInfo
-  position 1
-  session_id 2
-  request_id 3
-  waited_ms 4
-  permits 5
-  notified 6
-  queue_track 7
+position 1
+session_id 2
+request_id 3
+waited_ms 4
+permits 5
+notified 6
+queue_track 7
 message AdminTopicSubscriberInfo
-  session_id 1
-  subscription_id 2
-  subscribed_at_ms 3
+session_id 1
+subscription_id 2
+subscribed_at_ms 3
 message AdminConditionWaiterInfo
-  condition 1
-  session_id 2
-  request_id 3
-  thread_id 4
-  registered_at_ms 5
+condition 1
+session_id 2
+request_id 3
+thread_id 4
+registered_at_ms 5
 message AdminKeyDetailResponse
-  status 1
-  family 2
-  holders 3
-  waiters 4
-  lease_expires_at_ms 5
-  remaining_lease_ms 6
-  permits_total 7
-  permits_available 8
-  latch_total 9
-  latch_remaining 10
-  wait_queue_leader_only 11
-  atomic_kind 12
-  atomic_initial 13
-  atomic_value 14
-  atomic_version 15
-  barrier_parties 16
-  barrier_generation 17
-  barrier_arrived 18
-  barrier_action_pending 19
-  barrier_last_final 20
-  atomic_payload_size 21
-  atomic_payload_preview 22
-  queue_capacity 23
-  queue_depth 24
-  queue_head_expiry_ms 25
-  queue_total_payload_bytes 26
-  queue_head_payload_size 27
-  queue_head_payload_preview 28
-  topic_subscribers 29
-  topic_subscribers_info 30
-  condition_waiters 31
-  condition_waiters_info 32
-  phaser_phase 33
-  phaser_registered 34
-  phaser_arrived 35
-  phaser_waiters_info 36
-  phaser_parties_info 37
+status 1
+family 2
+holders 3
+waiters 4
+lease_expires_at_ms 5
+remaining_lease_ms 6
+permits_total 7
+permits_available 8
+latch_total 9
+latch_remaining 10
+wait_queue_leader_only 11
+atomic_kind 12
+atomic_initial 13
+atomic_value 14
+atomic_version 15
+barrier_parties 16
+barrier_generation 17
+barrier_arrived 18
+barrier_action_pending 19
+barrier_last_final 20
+atomic_payload_size 21
+atomic_payload_preview 22
+queue_capacity 23
+queue_depth 24
+queue_head_expiry_ms 25
+queue_total_payload_bytes 26
+queue_head_payload_size 27
+queue_head_payload_preview 28
+topic_subscribers 29
+topic_subscribers_info 30
+condition_waiters 31
+condition_waiters_info 32
+phaser_phase 33
+phaser_registered 34
+phaser_arrived 35
+phaser_waiters_info 36
+phaser_parties_info 37
+timer_generation 38
+timer_armed 39
+timer_fire_at_ms 40
+timer_waiters_info 41
+message AdminTimerWaiterInfo
+session_id 1
+request_id 2
+armed_at_ms 3
 message AdminPhaserWaiterInfo
-  session_id 1
-  request_id 2
-  expected_phase 3
-  registered_at_ms 4
+session_id 1
+request_id 2
+expected_phase 3
+registered_at_ms 4
 message AdminPhaserPartyInfo
-  session_id 1
-  parties 2
+session_id 1
+parties 2
 message AdminSessionInfo
-  session_id 1
-  node_id 2
-  connected_at_ms 3
-  held_keys 4
-  waiting_keys 5
+session_id 1
+node_id 2
+connected_at_ms 3
+held_keys 4
+waiting_keys 5
 message AdminListSessionsRequest
-  token 1
+token 1
 message AdminListSessionsResponse
-  status 1
-  sessions 2
+status 1
+sessions 2
 message AtomicOpRequest
-  key 1
-  op 2
-  lock_type 3
-  operand 4
-  expected 5
-  expected_version 6
-  initial_value 7
-  op_seq 8
-  operand_bytes 9
-  expected_bytes 10
-  initial_bytes 11
+key 1
+op 2
+lock_type 3
+operand 4
+expected 5
+expected_version 6
+initial_value 7
+op_seq 8
+operand_bytes 9
+expected_bytes 10
+initial_bytes 11
 message AtomicOpResponse
-  status 1
-  op 2
-  applied 3
-  old_value 4
-  value 5
-  version 6
-  old_value_bytes 7
-  value_bytes 8
+status 1
+op 2
+applied 3
+old_value 4
+value 5
+version 6
+old_value_bytes 7
+value_bytes 8
 message BarrierAwaitRequest
-  key 1
-  parties 2
-  carries_action 3
+key 1
+parties 2
+carries_action 3
 message BarrierAwaitResponse
-  status 1
-  queue_position 2
-  generation 3
-  executor 4
-  parties 5
+status 1
+queue_position 2
+generation 3
+executor 4
+parties 5
 message BarrierLeaveRequest
-  key 1
-  await_request_id 2
+key 1
+await_request_id 2
 message BarrierLeaveResponse
-  status 1
+status 1
 message BarrierActionDoneRequest
-  key 1
-  generation 2
+key 1
+generation 2
 message BarrierActionDoneResponse
-  status 1
+status 1
 message QueueOpRequest
-  key 1
-  op 2
-  lock_type 3
-  blocking 4
-  capacity 5
-  element_bytes 6
-  delay_ms 7
-  max_elements 8
-  op_seq 9
+key 1
+op 2
+lock_type 3
+blocking 4
+capacity 5
+element_bytes 6
+delay_ms 7
+max_elements 8
+op_seq 9
 message QueueOpResponse
-  status 1
-  op 2
-  queue_position 3
-  element_bytes 4
-  drained_bytes 5
-  size 6
-  capacity 7
+status 1
+op 2
+queue_position 3
+element_bytes 4
+drained_bytes 5
+size 6
+capacity 7
 message TopicOpRequest
-  key 1
-  op 2
-  payload_bytes 3
-  op_seq 4
+key 1
+op 2
+payload_bytes 3
+op_seq 4
 message TopicOpResponse
-  status 1
-  op 2
-  subscription_id 3
-  topic_seq 4
+status 1
+op 2
+subscription_id 3
+topic_seq 4
 message TopicMessage
-  key 1
-  subscription_id 2
-  topic_seq 3
-  publisher_sid 4
-  publish_ts_ms 5
-  payload_bytes 6
+key 1
+subscription_id 2
+topic_seq 3
+publisher_sid 4
+publish_ts_ms 5
+payload_bytes 6
 message ConditionOpRequest
-  key 1
-  op 2
-  condition 3
-  thread_id 4
-  await_request_id 5
+key 1
+op 2
+condition 3
+thread_id 4
+await_request_id 5
 message ConditionOpResponse
-  status 1
-  op 2
+status 1
+op 2
 message PhaserOpRequest
-  key 1
-  op 2
-  parties 3
-  expected_phase 4
-  await_request_id 5
+key 1
+op 2
+parties 3
+expected_phase 4
+await_request_id 5
 message PhaserOpResponse
-  status 1
-  op 2
-  phase 3
-  registered 4
-  arrived 5
+status 1
+op 2
+phase 3
+registered 4
+arrived 5
+message TimerOpRequest
+key 1
+op 2
+delay_ms 3
+await_request_id 4
+message TimerOpResponse
+status 1
+op 2
+generation 3
+armed 4
+fire_at_ms 5
+marked 6
