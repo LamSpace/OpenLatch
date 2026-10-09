@@ -56,7 +56,7 @@ import java.util.function.IntConsumer;
  * （{@code StateMachineUpdater} 以 {@code applied < committedIndex} 推进，
  * Leader 与 Follower 同线程同规则），因此：①客户端在应用回执后应答即天然
  * "提交后应答"；②被截断（未提交）的条目从未进入过本状态机，降级/回滚
- * 无需任何补偿；③应用线程单线程串行，{@link EntryClock} 的 thread-local
+ * 无需任何补偿；③应用线程单线程串行，{@link EntryClock} 的有界作用域
  * 条目时刻契约成立。
  *
  * <p><b>快照通道</b>：{@link #takeSnapshot()}

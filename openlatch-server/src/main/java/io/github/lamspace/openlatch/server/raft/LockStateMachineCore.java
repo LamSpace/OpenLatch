@@ -270,34 +270,47 @@ public final class LockStateMachineCore {
      */
     public ApplyResult apply(RaftLogEntry entry) {
         synchronized (applyLock) {
-            EntryClock.setApplyNow(0);
             try {
                 long t = entry.getWallClockMs();
-                EntryClock.setApplyNow(t);
-                return switch (entry.getType()) {
-                    case SESSION_OPEN -> applySessionOpen(entry);
-                    case SESSION_CLOSE -> applySessionClose(entry);
-                    case LOCK_ACQUIRE_ENTRY -> applyAcquire(entry);
-                    case LOCK_RELEASE_ENTRY -> applyRelease(entry);
-                    case LEASE_RENEW_ENTRY -> applyRenew(entry);
-                    case LEASE_EXPIRE_ENTRY -> applyExpire(entry, t);
-                    case LATCH_COUNT_DOWN_ENTRY -> applyLatchCountDown(entry);
-                    case ATOMIC_OP_ENTRY -> applyAtomicOp(entry);
-                    case BARRIER_AWAIT_ENTRY -> applyBarrierAwait(entry);
-                    case BARRIER_LEAVE_ENTRY -> applyBarrierLeave(entry);
-                    case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
-                    case QUEUE_OP_ENTRY -> applyQueueOp(entry);
-                    case PHASER_OP_ENTRY -> applyPhaserOp(entry);
-                    case TIMER_OP_ENTRY -> applyTimerOp(entry);
-                    case NOOP -> ok(0).build();
-                    default -> error("unknown entry type " + entry.getType(), entry);
-                };
+                return EntryClock.withApplyNow(t, () -> applyBody(entry, t));
             } catch (InvalidProtocolBufferException | RuntimeException e) {
                 return error("apply failed: type=" + entry.getType(), entry, e);
-            } finally {
-                EntryClock.clearApplyNow();
             }
         }
+    }
+
+    /**
+     * 应用入口的条目类型分发（在条目时刻作用域内由 {@link #apply} 调用）。
+     *
+     * <p>判定顺序：条目类型分发（未知类型 → {@link ApplyStatus#INTERNAL_ERROR}）；
+     * 载荷解析失败同判 {@code INTERNAL_ERROR}（MUST NOT 抛出——抛出会经 Ratis
+     * 关闭整个复制服务，坏条目应显式失败并被观测）。会话未登记时写请求拒入
+     * （{@link ApplyStatus#REJECT_SESSION}）且不产生任何状态迁移。
+     *
+     * @param entry 复制条目
+     * @param t     条目携带时刻（应用点折算基准，如租约/队列/定时到期折算）
+     * @return 应用回执
+     * @throws InvalidProtocolBufferException 载荷不可解析（由 {@link #apply} 转 {@code INTERNAL_ERROR}）
+     */
+    private ApplyResult applyBody(RaftLogEntry entry, long t) throws InvalidProtocolBufferException {
+        return switch (entry.getType()) {
+            case SESSION_OPEN -> applySessionOpen(entry);
+            case SESSION_CLOSE -> applySessionClose(entry);
+            case LOCK_ACQUIRE_ENTRY -> applyAcquire(entry);
+            case LOCK_RELEASE_ENTRY -> applyRelease(entry);
+            case LEASE_RENEW_ENTRY -> applyRenew(entry);
+            case LEASE_EXPIRE_ENTRY -> applyExpire(entry, t);
+            case LATCH_COUNT_DOWN_ENTRY -> applyLatchCountDown(entry);
+            case ATOMIC_OP_ENTRY -> applyAtomicOp(entry);
+            case BARRIER_AWAIT_ENTRY -> applyBarrierAwait(entry);
+            case BARRIER_LEAVE_ENTRY -> applyBarrierLeave(entry);
+            case BARRIER_ACTION_DONE_ENTRY -> applyBarrierActionDone(entry);
+            case QUEUE_OP_ENTRY -> applyQueueOp(entry);
+            case PHASER_OP_ENTRY -> applyPhaserOp(entry);
+            case TIMER_OP_ENTRY -> applyTimerOp(entry);
+            case NOOP -> ok(0).build();
+            default -> error("unknown entry type " + entry.getType(), entry);
+        };
     }
 
     /**
