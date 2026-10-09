@@ -2,10 +2,11 @@
 
 本表是主动演进方向与次序的决策清单,与 `WATCHLIST.md`(被动观察项)配对。
 裁决、状态、次序的单一事实源在本文件;原语的契约细节永远沉淀在各自的提案与规格里。
-最后更新:2026-10-07。
+最后更新:2026-10-09。
 
 ## 决策记录
 
+- **2026-10-09 上下文传播评估裁决(工程改进第三项)**:评估结论=客户端**无 ambient 上下文需求**——会话身份全程显式传递(`SessionContext` 经 `Route` 捕获 + `Thread.currentThread().threadId()` 显式读),ROADMAP 原措辞设想的"线程本地袋"不存在;全仓库唯一真 `ThreadLocal` 在服务端 `EntryClock.APPLY_NOW`(apply 期入口)。落点据此收敛为**该 ThreadLocal 的 ScopedValue 机制替换**(纯内部、行为零变化,`skip_specs`)。实证:JEP 506 final 版 ScopedValue 绑定**仅**经 `StructuredTaskScope.fork` 继承(`Thread.start`/`ofPlatform`/`ofVirtual`/线程池一律不继承),故传播边界与 ThreadLocal 逐格相同、不引入语义变宽;`StructuredTaskScope` 仍预览(禁令排除)故不追求跨线程继承。第 52 行原"客户端内部会话/追踪上下文传递"定位据实校正为服务端机制替换。
 - **2026-09-16 定位裁决**:采纳"B——允许小载荷协调数据结构"(每 key 限额、默认 4KB、服务端钳制)为能力边界;落地次序按"A——纯协调面先行"。来源:JDK 并发原语扩展的可行性分析(五轴:定位契合/机制复用/协议成本/语义保真/竞品先例)。
 - **2026-10-01 发布裁决**:1.0.0 发布并打 tag `v1.0.0`;Maven Central 发布范围收窄至客户端 SDK 链(protocol/client/starter),core/server/console 退出中央仓库、服务端与控制台改经 GitHub Releases 可执行 jar 分发。WATCHLIST W5 发布挂账就此清账。
 - **2026-10-07 三档立项裁决(OTimer)**:OCondition/OPhaser 同型复刻——"延时触发(定时单次标记)"于需求信号未至时提前立项(用户裁决"按 OCondition/OPhaser 先例登记决策行立项走 B";放行依据即本行)。立项前置核验收窄第 43 行既有"覆盖即可"结论:队列延时形态覆盖**延时交接**(一元素一消费者),但**广播单次标记**(一次到期全体共见)与**改期/撤销**两类 Timer 语义不可表达——该缺口即本原语的存在理由。协议升至 v11 门;架构裁决=**到期派生零条目**(装载/撤销入日志沿"迁移入日志"纪律,fire 为账簿与判定时刻的纯函数——"到期不是迁移,是时间的兑现",与租约"到期是状态迁移故入日志"构成判例族两端)、等待/取消/查询零日志(v9/v10 类目直接延伸)、DISARM 以既有 DENIED 首次可达面了结等待(StatusCode 连续三代零新增)、死亡不撤钟(绑定 key,队列"死亡不吞元素"同轴、与屏障破障/phaser 摘除并列死亡三形态);三 Non-Goal=周期重挂/任务回调/绝对时刻装载均不做(用户裁决,理由钉入 design)。
@@ -49,7 +50,7 @@
 |---|---|---|---|
 | 影子到期误摘 PHASER 修复(`ShadowTable.expireUpTo`) | —(非对外 API 面,镜像投影缺陷) | v11 落地审查发现的理论窗:`expireUpTo`(LEASE_EXPIRE_ENTRY 应用点的影子清扫)无租约跳过清单含 LATCH/BARRIER/QUEUE/ATOMIC/TIMER(v11 已带)而**独缺 PHASER**——phaser 镜像条目 `expiresAtMs` 恒 0,任一租约到期扫描会把它误摘→管理面 phaser 键瞬时失踪(引擎账簿无恙,后续镜像事件即自愈,故为观察面瞬时缺陷非状态腐化);一行修复+夹具:跳过清单补 `isPhaserType`,以"phaser 键与到期锁共存"回归红先钉住 | 已落地([change](openspec/changes/archive/2026-10-07-fix-shadow-sweep-phaser/),来源:PR #15 备注与 add-otimer 归档过程记录) |
 | 客户端虚拟线程化 | `Thread.ofVirtual` | 阻塞 API 桥接与看门狗线程模型评估(`maven.compiler.release=25` 已就位);评估结论=桥接面 JDK25 下零钉扎、看门狗现形态(共享定时器驱动零按锁线程)保持不动,唯一实体线程点 OTopic 派发虚拟线程化 | 已落地([change](openspec/changes/archive/2026-10-07-client-virtual-threads/)) |
-| 上下文传播 | `ScopedValue`(25 已转正) | 客户端内部会话/追踪上下文传递评估,替代线程本地袋 | 未启动 |
+| 上下文传播 | `ScopedValue`(25 已转正) | 评估结论=客户端无 ambient 上下文需求(会话身份全程显式传递);全仓库唯一真 ThreadLocal 在服务端 `EntryClock`,以其 ScopedValue 机制替换兑现。JEP 506 final ScopedValue 仅经 `StructuredTaskScope.fork` 继承,边界与 ThreadLocal 逐格相同——纯内部重构、行为零变化(决策见"决策记录"2026-10-09 行) | 已落地([change](openspec/changes/archive/2026-10-09-refactor-entry-clock-scoped-value/)) |
 | 结构化并发 | `StructuredTaskScope` | 25 仍预览且发布禁止 `--enable-preview`——挂起至转正 | 挂起 |
 
 ## 不做清单(冻结,重启需在此登记决策)

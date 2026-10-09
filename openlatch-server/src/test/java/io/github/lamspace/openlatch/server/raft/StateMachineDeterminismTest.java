@@ -1,5 +1,6 @@
 package io.github.lamspace.openlatch.server.raft;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.lamspace.openlatch.core.CoreConfig;
 import io.github.lamspace.openlatch.protocol.LockType;
 import io.github.lamspace.openlatch.protocol.raft.ApplyResult;
@@ -12,10 +13,13 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
@@ -247,8 +251,8 @@ class StateMachineDeterminismTest {
 
     @Test
     void concurrentAppliesDoNotCrossLeakEntryClock() throws Exception {
-        // EntryClock 为 thread-local：两线程并发应用不同时刻序列，结果与
-        // 单线程一致（若标记跨线程泄漏，digest 必偏离）。
+        // EntryClock 为有界作用域：两线程并发应用不同时刻序列，结果与
+        // 单线程一致（若绑定跨线程泄漏，digest 必偏离）。
         Random r = new Random(2026);
         List<RaftLogEntry> seqA = randomSequence(r);
         List<RaftLogEntry> seqB = randomSequence(new Random(1234));
@@ -265,21 +269,122 @@ class StateMachineDeterminismTest {
         }
     }
 
+    // ---- 条目时刻作用域传播边界矩阵（常驻回归绊线）----
+    // 五格：域内同线程可见 / 域外同线程回落 / 既有非派生线程回落 /
+    // 域内新建子线程不继承（JEP 506 final：ScopedValue 仅经 StructuredTaskScope.fork
+    // 继承，本项目禁用结构化并发）/ 并发作用域互不串扰。两种机制下逐格一致（纯重构）；
+    // 矩阵价值在"未来改动改变边界或重新引入跨线程泄漏即红"。
+
     @Test
-    void entryClockFallsBackToSystemClockOutsideApply() {
+    void entryTimeVisibleInsideScopeOnSameThread() {
+        long entryTime = 4_242L;
+        long[] read = new long[1];
+        inApplyScope(entryTime, () -> read[0] = new EntryClock().nowMs());
+        assertThat(read[0]).isEqualTo(entryTime);
+    }
+
+    @Test
+    void systemClockFallsBackOutsideScopeForSameAndPreexistingThread() throws Exception {
+        long entryTime = 4_242L;
+
+        // 作用域退出后的同线程：回落系统时钟，不残留陈旧条目时刻。
+        inApplyScope(entryTime, () -> { });
         long before = System.currentTimeMillis();
-        EntryClock.clearApplyNow(); // 确保无残留标记
-        long read = new EntryClock().nowMs();
-        assertThat(read).isBetween(before, System.currentTimeMillis() + 50);
-        // 应用线程内的 set 对主线程不可见（thread-local 隔离的串扰反例）。
-        Thread t = new Thread(() -> EntryClock.setApplyNow(12345));
-        t.start();
+        long fallback = new EntryClock().nowMs();
+        assertThat(fallback).isBetween(before, System.currentTimeMillis() + 50);
+
+        // 既有（非派生）线程在他人作用域进行中读取：仍回落系统时钟。
+        AtomicLong preexistingRead = new AtomicLong(Long.MIN_VALUE);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        Thread preexisting = Thread.ofPlatform().start(() -> {
+            started.countDown();
+            awaitQuietly(released);
+            preexistingRead.set(new EntryClock().nowMs());
+        });
+        assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+        long scopeStart = System.currentTimeMillis();
+        inApplyScope(entryTime, () -> {
+            released.countDown();
+            try {
+                preexisting.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(preexistingRead.get()).isBetween(scopeStart, System.currentTimeMillis() + 50);
+    }
+
+    @Test
+    void childThreadCreatedInScopeDoesNotInheritEntryTime() throws Exception {
+        // JEP 506 final：ScopedValue 仅经 StructuredTaskScope.fork 继承（本项目禁用
+        // 结构化并发），作用域内新建的普通线程不继承——与 thread-local 逐格一致。
+        long entryTime = 4_242L;
+        long before = System.currentTimeMillis();
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicLong childRead = new AtomicLong(Long.MIN_VALUE);
+        inApplyScope(entryTime, () -> {
+            Thread child = Thread.ofPlatform().start(() -> {
+                childRead.set(new EntryClock().nowMs());
+                done.countDown();
+            });
+            try {
+                done.await();
+                child.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(childRead.get()).isBetween(before, System.currentTimeMillis() + 50);
+    }
+
+    @Test
+    void concurrentScopesDoNotCrossLeakEntryTime() throws Exception {
+        long timeA = 111_111L;
+        long timeB = 222_222L;
+        CountDownLatch bothInScope = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicLong readA = new AtomicLong();
+        AtomicLong readB = new AtomicLong();
+        try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+            Future<?> fa = pool.submit(() -> inApplyScope(timeA, () -> {
+                bothInScope.countDown();
+                awaitQuietly(release);
+                readA.set(new EntryClock().nowMs());
+            }));
+            Future<?> fb = pool.submit(() -> inApplyScope(timeB, () -> {
+                bothInScope.countDown();
+                awaitQuietly(release);
+                readB.set(new EntryClock().nowMs());
+            }));
+            assertThat(bothInScope.await(5, TimeUnit.SECONDS)).isTrue();
+            release.countDown();
+            fa.get();
+            fb.get();
+        }
+        assertThat(readA.get()).isEqualTo(timeA);
+        assertThat(readB.get()).isEqualTo(timeB);
+    }
+
+    /** 在单条目应用作用域内执行 body。 */
+    private static void inApplyScope(long entryTimeMs, Runnable body) {
         try {
-            t.join();
+            EntryClock.withApplyNow(entryTimeMs, () -> {
+                body.run();
+                return null;
+            });
+        } catch (InvalidProtocolBufferException e) {
+            throw new AssertionError("test apply op must not throw checked exception", e);
+        }
+    }
+
+    /** 限时等待闩，被中断即恢复标志返回（测试辅助，不承载语义）。 */
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        assertThat(new EntryClock().nowMs()).isNotEqualTo(12345);
     }
 
     /**
