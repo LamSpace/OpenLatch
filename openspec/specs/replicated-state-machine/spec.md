@@ -3,6 +3,7 @@
 ## Purpose
 
 定义锁服务集群复制状态机的行为契约：哪些锁状态经日志复制到多数派、以何种条目格式复制、回放如何保持确定性（时间语义、幂等），以及 Leader 处理写请求、会话集群登记与租约到期驱动的可观察行为，使"已确认授予的锁不丢、任何时刻同 key 至多一个持有者"的保证可验证。
+
 ## Requirements
 
 ### Requirement: 复制边界
@@ -309,7 +310,7 @@ QUEUE 家族的队列操作 SHALL 以新条目类型 `RaftEntryType.QUEUE_OP_ENT
 
 ### Requirement: topic 零复制日志边界
 
-topic 为项目首个零复制日志原语：SUBSCRIBE/UNSUBSCRIBE/PUBLISH 与全部 fan-out 交付 MUST NOT 产生任何 Raft 日志条目，MUST NOT 触达状态机 apply 路径、`ApplyResult` 或 Leader 提交通道（判例对偶：队列"等待不入日志"，topic 更进一步——**连状态迁移都不入日志**，因 topic 无复制态）。由此推导的常驻守卫断言（防后续演进按"读写皆经提交"惯性误塞日志，改动本条款 MUST 先经 ROADMAP 决策记录登记）：
+topic 为项目首个零复制日志原语：SUBSCRIBE/UNSUBSCRIBE/PUBLISH 与全部 fan-out 交付 MUST NOT 产生任何 Raft 日志条目，MUST NOT 触达状态机 apply 路径、`ApplyResult` 或 Leader 提交通道（判例对偶：队列"等待不入日志"，topic 更进一步——**连状态迁移都不入日志**，因 topic 无复制态）。由此推导的常驻守卫断言（防后续演进按"读写皆经提交"惯性误塞日志，改动本条款 MUST 先经 DECISIONS.md 决策记录登记）：
 
 1. 纯 topic 流量（订阅、发布、退订、换主）下，各副本复制状态 digest MUST 逐字节一致且等于无 topic 流量时的基线；
 2. 日志条目总数 MUST NOT 因 topic 流量增长（`SESSION_OPEN`/`SESSION_CLOSE`/NOOP 等既有系统条目不计入本断言增量）；
@@ -330,11 +331,12 @@ topic 为项目首个零复制日志原语：SUBSCRIBE/UNSUBSCRIBE/PUBLISH 与�
 
 - **WHEN** 未来变更在 topic 分发路径引入状态机提交调用
 - **THEN** 本条款的日志零增长断言（topic 流量对照基线）转红，变更被打回规格修订流程
+
 ### Requirement: 条件复制边界——await 折叠既有条目、signal 家族零日志
 
 条件原语采用半入日志边界：await 折叠形态（携带 `condition` 的 ACQUIRE）MUST 恰产生**一条既有 `LOCK_ACQUIRE_ENTRY` 类型**条目（`command_payload` 为请求消息序列化，新字段天然透传）——`RaftEntryType` MUST NOT 因本原语新增取值（v9 定型的编号证据以版本相对口径常驻：条件维度自 v9 起条目类型零占用、仅复用既有条目——v10 为 phaser 新增 `PHASER_OP_ENTRY = 14` 不构成条件边界的变更，14 非条件占用值）；SIGNAL/SIGNAL_ALL/LEAVE MUST NOT 产生任何日志条目、MUST NOT 触达提交通道与状态机 apply 路径（纯 Leader 本地裁决——v8 topic 零日志豁免判例的类目化：等待集→等待队列的位次搬运与推送事件不改变任何复制态，"signal 是事件不是状态"）。
 
-await 条目的应用语义 MUST 跨副本确定：释放半程（持有归属匹配则重入一步清零+清租约，不匹配则零操作）为复制态迁移，全部副本一致重放；登记半程（条件等待集写入）MUST 为 Leader-only 应用副作用，不进入任何副本的复制状态、不产生观察 digest 差异。由此推导的换主/重启语义契约：**等待是承诺**——await 条目重放使释放半程确定生效，等待集随 term 清零后由客户端重挂补登记（重挂非双登记、重挂会话非持有者属常态）；**signal 是事件**——搬运与通知不经日志、不重放、不补偿，换主窗内已发出未送达的唤醒不保证。守卫断言（常驻，防后续演进误塞日志或误持久化等待集，改动本条款 MUST 先经 ROADMAP 决策记录登记）：
+await 条目的应用语义 MUST 跨副本确定：释放半程（持有归属匹配则重入一步清零+清租约，不匹配则零操作）为复制态迁移，全部副本一致重放；登记半程（条件等待集写入）MUST 为 Leader-only 应用副作用，不进入任何副本的复制状态、不产生观察 digest 差异。由此推导的换主/重启语义契约：**等待是承诺**——await 条目重放使释放半程确定生效，等待集随 term 清零后由客户端重挂补登记（重挂非双登记、重挂会话非持有者属常态）；**signal 是事件**——搬运与通知不经日志、不重放、不补偿，换主窗内已发出未送达的唤醒不保证。守卫断言（常驻，防后续演进误塞日志或误持久化等待集，改动本条款 MUST 先经 DECISIONS.md 决策记录登记）：
 
 1. 纯条件流量（折叠 await、SIGNAL/SIGNAL_ALL/LEAVE、换主重挂）下，各副本复制状态 digest MUST 逐字节一致且等于对照基线（无 signal 类状态可分岔）；
 2. await 数与既有类型条目增量 MUST 恰为一对一，signal 家族条目贡献恒零；
@@ -363,7 +365,7 @@ await 条目的应用语义 MUST 跨副本确定：释放半程（持有归属�
 
 ### Requirement: phaser 操作复制边界与重放确定性
 
-phaser 采用**变异全入日志、等待与观察零日志**的复制边界（沿 v5 Barrier"到场是状态迁移"判例，与 v8/v9 的零日志豁免类目相对——落地纪律第 2 条对本原语不适用豁免）：REGISTER/ARRIVE/ARRIVE_AND_AWAIT（到场半程）/ARRIVE_AND_DEREGISTER 每一变异操作 MUST 恰产生**一条 `PHASER_OP_ENTRY`**（`command_payload` 为 `PhaserOpRequest` 序列化+会话包装，判例既有命令条目载荷形态）；AWAIT_ADVANCE/CANCEL/QUERY MUST NOT 产生任何日志条目、MUST NOT 触达提交通道与 apply 路径（等待登记/摘除/读数为 Leader 本地裁决——"等待是订阅不是状态"与"观察不是迁移"两类目并入既有"等待不入日志"判例族）。由此推导的常驻守卫断言（改动本条款 MUST 先经 ROADMAP 决策记录登记）：
+phaser 采用**变异全入日志、等待与观察零日志**的复制边界（沿 v5 Barrier"到场是状态迁移"判例，与 v8/v9 的零日志豁免类目相对——落地纪律第 2 条对本原语不适用豁免）：REGISTER/ARRIVE/ARRIVE_AND_AWAIT（到场半程）/ARRIVE_AND_DEREGISTER 每一变异操作 MUST 恰产生**一条 `PHASER_OP_ENTRY`**（`command_payload` 为 `PhaserOpRequest` 序列化+会话包装，判例既有命令条目载荷形态）；AWAIT_ADVANCE/CANCEL/QUERY MUST NOT 产生任何日志条目、MUST NOT 触达提交通道与 apply 路径（等待登记/摘除/读数为 Leader 本地裁决——"等待是订阅不是状态"与"观察不是迁移"两类目并入既有"等待不入日志"判例族）。由此推导的常驻守卫断言（改动本条款 MUST 先经 DECISIONS.md 决策记录登记）：
 
 1. 相位推进、配额与到场计数为纯确定性 apply 迁移：合拢判定只依赖账簿内计数（`arrived ≥ registered`），MUST NOT 依赖墙钟、 Leader 身份或本地随机数——跨副本 digest MUST 逐字节一致；
 2. 三副本 digest 在含合拢、中途注册、离场减员、死亡摘除（`SESSION_CLOSE` apply 内确定性减配额）的全流量下逐项一致；了结时刻的唤醒为 Leader 本地副作用，不入 digest；
@@ -399,7 +401,7 @@ phaser 采用**变异全入日志、等待与观察零日志**的复制边界（
 
 ### Requirement: timer 操作复制边界与重放确定性
 
-timer 采用**装载/撤销入日志、到期与观察零日志**的复制边界（半入日志家族：沿 v5/v10"迁移入日志"纪律——装载决定"未来某刻对谁可见"是复制态迁移，落地纪律第 2 条对本原语不适用豁免；**到期是派生谓词不是迁移**——`marked = armed ∧ 判定时刻 ≥ fire_at_ms` 为复制数据与钟的纯函数，v7 就绪驱动"到期是可见性判定而非复制状态迁移"公式的类目化，与 v3 租约到期"到期是状态迁移故入日志"构成判例族两端对照）：SCHEDULE/DISARM 每一变异操作 MUST 恰产生**一条 `TIMER_OP_ENTRY`**（`command_payload` 为 `TimerOpRequest` 序列化+会话包装，判例既有命令条目载荷形态）；AWAIT/CANCEL/QUERY MUST NOT 产生任何日志条目、MUST NOT 触达提交通道与 apply 路径（"等待是订阅不是状态"与"观察不是迁移"两判例族直接延伸）；**到期（时钟越过 `fire_at_ms`）MUST NOT 产生任何日志条目**——不存在"fire 事件"的复制形态，唤醒为 Leader 本地扫描提示、终态为等待方重发时的谓词重评。由此推导的常驻守卫断言（改动本条款 MUST 先经 ROADMAP 决策记录登记）：
+timer 采用**装载/撤销入日志、到期与观察零日志**的复制边界（半入日志家族：沿 v5/v10"迁移入日志"纪律——装载决定"未来某刻对谁可见"是复制态迁移，落地纪律第 2 条对本原语不适用豁免；**到期是派生谓词不是迁移**——`marked = armed ∧ 判定时刻 ≥ fire_at_ms` 为复制数据与钟的纯函数，v7 就绪驱动"到期是可见性判定而非复制状态迁移"公式的类目化，与 v3 租约到期"到期是状态迁移故入日志"构成判例族两端对照）：SCHEDULE/DISARM 每一变异操作 MUST 恰产生**一条 `TIMER_OP_ENTRY`**（`command_payload` 为 `TimerOpRequest` 序列化+会话包装，判例既有命令条目载荷形态）；AWAIT/CANCEL/QUERY MUST NOT 产生任何日志条目、MUST NOT 触达提交通道与 apply 路径（"等待是订阅不是状态"与"观察不是迁移"两判例族直接延伸）；**到期（时钟越过 `fire_at_ms`）MUST NOT 产生任何日志条目**——不存在"fire 事件"的复制形态，唤醒为 Leader 本地扫描提示、终态为等待方重发时的谓词重评。由此推导的常驻守卫断言（改动本条款 MUST 先经 DECISIONS.md 决策记录登记）：
 
 1. 代次、装载态与绝对到期时刻为纯确定性 apply 迁移：SCHEDULE 的 `fire_at_ms` 由**条目携带时刻**（`wall_clock_ms`）加 `delay` 在应用点折算——回放与 live 应用同值（判例 v7 队列到期折算逐字适用），MUST NOT 依赖接收时刻、Leader 身份或本地随机数；跨副本 digest MUST 逐字节一致；
 2. **到期零条目反向守卫**：纯 timer 流量下，日志仅在 SCHEDULE/DISARM 受理时新增；让时钟越过全体到期点后日志条数、digest 与快照 MUST 恒不变（等待/查询读数变化不进入任何复制面）——"到期误入日志即红"与"等待误入日志即红"构成对偶双守卫；
