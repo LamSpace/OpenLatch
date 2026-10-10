@@ -31,7 +31,15 @@ alerts against these:
 - killing a follower: no client-visible impact (quorum intact);
 - rolling restarts: visible errors cluster into 2–3s windows per node; after the last
   window + 45s self-heal budget, **residual errors must be 0**;
-- queue positions reshuffle on leader change (expected, not an incident).
+- queue positions reshuffle on leader change (expected, not an incident);
+- **reroute convergence**: while the home session stays resident the client reconciles the
+  current leader every 1s via `CLUSTER_VIEW` — when home is alive but non-authoritative, or
+  the startup hint lags, queue/atomic/barrier/latch/pub-sub/phaser/timer requests reroute to
+  the real leader within a few seconds instead of burning the wait budget. The check is a
+  pure hint refresh and degrades silently: single-node mode, servers without the message, a
+  failed probe, or no current leader never issue or act, and are never counted as a business
+  failure. It converges **routing** only; latch/barrier waits still treat `NOT_LEADER` as a
+  terminal status code per contract.
 
 ## 3. Repeated `NOT_LEADER` / no leader found
 

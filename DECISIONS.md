@@ -6,6 +6,7 @@
 
 ## 决策记录
 
+- **2026-10-10 在册事项优先级裁决**:执行序(轴=触发接近度×后果严重度×解锁成本)=W11 > W8(已触发但按动作列改道并入 W4) > W4 > W13 > W12 > W3 > W2 > W1 > W9 > W6 > W14 > W7 > W15 > W16;依据=WATCHLIST 各行触发口径与 v4–v11 设计裁决,本序不改变任何行的触发门槛(未触发=不动),重排须在本表补行;同日 W5 发布挂账随 2026-10-01 发布清账自 WATCHLIST 删行(编号留空不重用)。
 - **2026-10-10 结构化并发评估裁决(工程改进第四项)**:评估结论=库内**无结构化并发落点**(R1 空集:客户端 RPC 单 future、屏障/闩/相位器/定时器的 `register + send` 刻意有序、服务端 topic 扇出在 Raft apply 线程内**串行**、复制扇出在 Ratis 内——均非 fork+join);定性=R1(内部采纳,非对外契约,双语指南零触碰)。`StructuredTaskScope` JDK 25=第五预览(JEP 505)、26=第六预览(JEP 525)且 API 仍改名,`--enable-preview` 对已发布库无例外窗口。转正触发器=JEP final **且** API 连续 ≥2 发布稳定(严于单纯"转正"),届时基线若落 JDK 27 接受 `maven.compiler.release` 25→27 抬升。该事项自本表工程改进行**退役入 WATCHLIST**(W16);路线图表格的物理退役与 `ROADMAP.md → DECISIONS.md` 改名由后续独立治理 change 承担。与第三项耦合:`EntryClock` 作用域继承面仅经 `StructuredTaskScope.fork`,采纳即令第三项边界矩阵绊线按设计翻红(落地 change 须显式对账)。
 - **2026-10-09 上下文传播评估裁决(工程改进第三项)**:评估结论=客户端**无 ambient 上下文需求**——会话身份全程显式传递(`SessionContext` 经 `Route` 捕获 + `Thread.currentThread().threadId()` 显式读),ROADMAP 原措辞设想的"线程本地袋"不存在;全仓库唯一真 `ThreadLocal` 在服务端 `EntryClock.APPLY_NOW`(apply 期入口)。落点据此收敛为**该 ThreadLocal 的 ScopedValue 机制替换**(纯内部、行为零变化,`skip_specs`)。实证:JEP 506 final 版 ScopedValue 绑定**仅**经 `StructuredTaskScope.fork` 继承(`Thread.start`/`ofPlatform`/`ofVirtual`/线程池一律不继承),故传播边界与 ThreadLocal 逐格相同、不引入语义变宽;`StructuredTaskScope` 仍预览(禁令排除)故不追求跨线程继承。第 52 行原"客户端内部会话/追踪上下文传递"定位据实校正为服务端机制替换。
 - **2026-09-16 定位裁决**:采纳"B——允许小载荷协调数据结构"(每 key 限额、默认 4KB、服务端钳制)为能力边界;落地次序按"A——纯协调面先行"。来源:JDK 并发原语扩展的可行性分析(五轴:定位契合/机制复用/协议成本/语义保真/竞品先例)。

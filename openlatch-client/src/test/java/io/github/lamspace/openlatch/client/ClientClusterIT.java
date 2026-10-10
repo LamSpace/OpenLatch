@@ -336,6 +336,30 @@ class ClientClusterIT {
         }
     }
 
+    /**
+     * W11 驻留窗确定性夹具（home 驻留非权威节点）：客户端 home 直连当值
+     * Leader（HELLO 提示自指，故无获取车道），该节点<b>存活让位</b>后连接与
+     * 会话保留、但已非权威——非 ACQUIRE 车道既无 NOT_LEADER 提示可依、
+     * home 又不断连。修前队列请求 churn 满等待预算显式超时；修后经驻留期
+     * 周期核对发现新主并收敛。与概率锚（真杀主 + 漂移）刻意不同：本夹具
+     * 的窗口由"让位"单向构造，可重复。
+     */
+    @Test
+    void residentNonAuthoritativeHomeConvergesQueueRequest() throws Exception {
+        startCluster(3);
+        NodeRef oldLeader = leader();
+        NodeRef target = nodes.stream().filter(n -> n != oldLeader).findFirst().orElseThrow();
+        try (OpenLatchClient client = clientTo(oldLeader.address())) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OBlockingQueue q = client.newBlockingQueue("resident-reroute", 4);
+            q.put("a"); // home 即当值 Leader：无车道即正常受理
+            transferLeadership(target);
+            awaitTrue(() -> target.isLeader() && !oldLeader.isLeader(), "让位完成（home 降级但仍连通）");
+            q.put("b"); // 未收敛即在此耗尽等待预算抛超时
+            assertThat(q.size()).isEqualTo(2);
+        }
+    }
+
     // ---------- 场景"failover 期间持锁不丢"（端到端） ----------
 
     @Test

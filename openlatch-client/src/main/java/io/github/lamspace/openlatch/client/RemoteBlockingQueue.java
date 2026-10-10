@@ -433,7 +433,11 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 }
                 if (status == StatusCode.NOT_LEADER) {
                     // 非权威拒绝=明确零生效：允许随后的会话切换重建续发。
+                    // 必须重取路由：驻留期核对或提示建道可能已就位新的当值
+                    // Leader 车道，不重取则本环钉死在旧路由上耗尽整个预算
+                    // （判例同本环的瞬态/缺码形分支，二者均已重取）。
                     noEffectReject = true;
+                    route = client.latchRoute();
                     continue;
                 }
                 throw new OpenLatchException(status, "queue op on '" + key

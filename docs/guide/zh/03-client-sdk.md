@@ -2,7 +2,7 @@
 
 ## 生命周期与构造
 
-`OpenLatchClient` 实现 `AutoCloseable`：一个实例 = 一条连接（+ 集群形态下的改道车道），内部含 EventLoop、看门狗与重连器，**线程安全、全局共享**，进程退出前 `close()`（或 try-with-resources）。
+`OpenLatchClient` 实现 `AutoCloseable`：一个实例 = 一条连接（+ 集群形态下的改道车道），内部含 EventLoop、看门狗与重连器，**线程安全、全局共享**，进程退出前 `close()`（或 try-with-resources）。集群形态下改道不止发生在握手：home 连接驻留期间客户端还按周期核对当值 Leader（见 [09](09-troubleshooting.md) 第 2 节），使 home 未断连（停在非权威节点）或启动窗提示滞后时的改道也能收敛；单机形态不激活。
 
 ```java
 OpenLatchClient client = OpenLatchClient.builder()

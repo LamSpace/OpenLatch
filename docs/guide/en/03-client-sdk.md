@@ -4,7 +4,11 @@
 
 `OpenLatchClient` is `AutoCloseable`: one instance = one connection (+ a reroute lane in
 cluster mode) with its own EventLoop, watchdog and reconnect logic. It is **thread-safe and
-meant to be shared process-wide**; `close()` (or try-with-resources) on shutdown.
+meant to be shared process-wide**; `close()` (or try-with-resources) on shutdown. In cluster
+mode rerouting is not limited to handshake time: while the home session stays resident the
+client also reconciles the current leader periodically (see [09](09-troubleshooting.md)
+section 2), so rerouting still converges when home stays connected (resident on a
+non-authoritative node) or when the startup hint lags; single-node mode never activates it.
 
 ```java
 OpenLatchClient client = OpenLatchClient.builder()

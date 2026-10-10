@@ -25,8 +25,10 @@ import io.github.lamspace.openlatch.client.internal.SeedDiscovery;
 import io.github.lamspace.openlatch.client.internal.RequestMultiplexer;
 import io.github.lamspace.openlatch.client.internal.SessionContext;
 import io.github.lamspace.openlatch.protocol.AcquireRequest;
+import io.github.lamspace.openlatch.protocol.ClusterView;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
+import io.github.lamspace.openlatch.protocol.NodeInfo;
 import io.github.lamspace.openlatch.protocol.BarrierActionDoneRequest;
 import io.github.lamspace.openlatch.protocol.BarrierAwaitRequest;
 import io.github.lamspace.openlatch.protocol.BarrierLeaveRequest;
@@ -73,8 +75,16 @@ import java.util.concurrent.TimeUnit;
  * 提示为 {@code -1}（选举空窗）时同会话同 {@code requestId} 原地退避重发，
  * 改连产生的新会话使用新 {@code requestId} 空间（幂等口径）。
  *
+ * <p><b>驻留期核对</b>：集群形态下改道决策不再只在握手时发生——home 会话
+ * 驻留期间另按有界周期（{@value #LEADER_RECONCILE_MS}ms）经 {@code CLUSTER_VIEW}
+ * 核对当值 Leader，覆盖"home 活着停在非权威节点"与"启动窗提示滞后"两窗，
+ * 使非获取类请求（队列/原子/屏障/闩/订阅/相位器/定时器：均经 home 或获取
+ * 车道取路由）在 home 未断连时亦能收敛。核对是纯提示刷新且静默降级
+ * （单机形态、探测失败、应答非 {@code OK}、选举空窗均不动作），不接线
+ * 在途等待与重发环。
+ *
  * <p><b>线程模型</b>：全部网络读写在客户端 EventLoop 线程；
- * 各类超时由共享 {@link HashedWheelTimer} 驱动；锁丢失回调在专用单线程
+ * 各类超时与周期核对由共享 {@link HashedWheelTimer} 驱动；锁丢失回调在专用单线程
  * 执行器上调用。异步接口返回的 future 在网络/定时器线程上完成，
  * <b>用户链接的回调不得执行阻塞操作</b>，需要阻塞处理时应切换至调用方自己的执行器。
  * 上述 EventLoop、共享定时器与回调执行器自身恒为平台线程形态；而调用方侧的
@@ -144,10 +154,31 @@ public final class OpenLatchClient implements AutoCloseable {
     /** 连续 NOT_LEADER 计数：达阈值触发种子扇出强制发现。 */
     private final java.util.concurrent.atomic.AtomicInteger notLeaderStreak =
             new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * 集群形态标志：home 握手提示非 0 即线上存在 v2 Leader 提示能力。
+     * 单机模式不填提示字段（proto3 默认 {@code 0}），home 驻留期核对据此
+     * 不激活——单机语义零触碰。
+     */
+    private volatile boolean clusterHintCapable;
+    /**
+     * 车道路由决策与换道收口的串行锁。驻留期核对（共享定时器线程）与握手
+     * 提示（各连接 EventLoop 线程）都可能改道，换道回调里的"读前驱 → 赋值 →
+     * 收口前驱"必须原子：并行换道各自读到同一前驱时会漏收口被覆盖的车道
+     * （连接与等待漏回收）。
+     */
+    private final Object laneLock = new Object();
     /** 强制发现阈值（连续 NOT_LEADER 次数，常量取向不配置化）。 */
     private static final int FORCE_DISCOVERY_THRESHOLD = 3;
     /** 选举空窗（hint=-1）原地重发的退避步长（毫秒）。 */
     private static final long GAP_RETRY_BACKOFF_MS = 300;
+    /**
+     * 集群形态下 home 驻留期的 Leader 核对周期（毫秒，常量取向不配置化）。
+     * 取值须显著小于等待总超时（默认 30s），使"home 驻留非权威节点"与
+     * "启动窗提示滞后"两根因窗内的请求在既有预算内收敛。
+     */
+    private static final long LEADER_RECONCILE_MS = 1_000L;
+    /** 核对探测的单次预算（毫秒）：独立于业务请求超时，超时/失败一律静默。 */
+    private static final long LEADER_RECONCILE_PROBE_MS = 500L;
     /** 看门狗：持锁期间的自动续租与失锁判定。 */
     private final io.github.lamspace.openlatch.client.internal.Watchdog watchdog;
     /** 客户端可选指标门面：未注入注册表即禁用形态、零观测路径。 */
@@ -234,6 +265,8 @@ public final class OpenLatchClient implements AutoCloseable {
         this.multiplexer.setOrphanSink(awaitTracker::onOrphanResponse);
         // v8：订阅重挂保活周期（共享定时器自续排；无活跃订阅时为空扫）。
         scheduleTopicKeepAlive();
+        // 集群形态 home 驻留期 Leader 核对周期（共享定时器自续排；单机形态空转）。
+        scheduleLeaderReconcile();
         // 构建即发起首次连接（异步）：连接失败自动退避重连并轮询种子。
         this.connectionManager.connectAsync();
     }
@@ -370,6 +403,11 @@ public final class OpenLatchClient implements AutoCloseable {
      * @param hello 握手响应
      */
     private void onHomeHello(HelloResponse hello) {
+        if (hello.getLeaderHint() != 0) {
+            // 提示非 0（含选举空窗的 -1）即线上具备 v2 Leader 提示能力 → 集群
+            // 形态；单机模式不填该字段（proto3 默认 0），驻留期核对不激活。
+            clusterHintCapable = true;
+        }
         followLeaderHint(hello);
     }
 
@@ -387,6 +425,18 @@ public final class OpenLatchClient implements AutoCloseable {
         if (target == null) {
             return;
         }
+        followLeaderTarget(target);
+    }
+
+    /**
+     * 依 Leader 目标地址调整获取车道（握手提示与驻留期核对共用的收敛路径）：
+     * 目标即 home 则车道退役、等待迁回 home；目标已在车道则无动作；目标为
+     * 第三节点则建/换车道。本方法只做路由决策与发起改道，不阻塞、不接线
+     * 任何在途等待或重发环——等待项仅在换道收口时按既有位次重置口径迁移。
+     *
+     * @param target 提示所指 Leader 接入地址
+     */
+    private void followLeaderTarget(ClientConfig.SeedAddress target) {
         boolean targetIsHome = target.host().equals(connectionManager.targetHost())
                 && target.port() == connectionManager.targetPort();
         AcquireLane lane = acquireLane;
@@ -403,14 +453,76 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
+     * 驻留期核对自续排（共享 {@link HashedWheelTimer}）：关停后不再续排。
+     * 未激活形态下每周期只是一次标志判断——单机与服务端无该消息能力时
+     * 不发起任何探测。
+     */
+    private void scheduleLeaderReconcile() {
+        timer.newTimeout(t -> {
+            if (!closed) {
+                try {
+                    reconcileLeader();
+                } catch (RuntimeException e) {
+                    log.debug("leader reconciliation failed: {}", e.toString());
+                } finally {
+                    scheduleLeaderReconcile();
+                }
+            }
+        }, LEADER_RECONCILE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 经 home 会话核对当值 Leader，并按既有收敛路径改道。
+     *
+     * <p><b>为何需要</b>：改道决策原本只挂在握手回调上，故 Leader 提示只在
+     * （重）连接时获得——home 活着停在非权威节点（Leader 已迁他处），或
+     * 启动窗内 seed 节点的提示尚未就绪时，无断连即无新提示，非获取类请求
+     * （队列/原子/屏障/闩/订阅/相位器/定时器）将耗尽等待预算显式失败。
+     * {@code CLUSTER_VIEW} 是既有只读、零日志、任意节点可答的查询，核对照
+     * 此周期性地把提示补齐。
+     *
+     * <p><b>静默契约</b>：核对是纯提示刷新——探测失败、应答缺失、状态非
+     * {@code OK}、选举空窗（无 {@code is_leader} 条目）一律不动作，绝不计为
+     * 业务请求失败；也不接线任何在途等待与重发环。陈旧提示至多令一次改道
+     * 落空，随后由既有 {@code NOT_LEADER} 兜底路径处理。
+     */
+    private void reconcileLeader() {
+        if (closed || !clusterHintCapable || !connectionManager.isActive()) {
+            return;
+        }
+        Envelope.Builder probe = Envelope.newBuilder().setType(MessageType.CLUSTER_VIEW);
+        multiplexer.send(probe, LEADER_RECONCILE_PROBE_MS).whenComplete((resp, err) -> {
+            if (closed || err != null || resp == null || !resp.hasClusterView()) {
+                return;
+            }
+            ClusterView view = resp.getClusterView();
+            if (view.getStatus() != StatusCode.OK) {
+                return; // 单机模式（拒绝）或视图不可用：本轮不动作
+            }
+            for (NodeInfo node : view.getNodesList()) {
+                if (node.getIsLeader() && !node.getAddress().isEmpty()) {
+                    ClientConfig.SeedAddress target = SeedDiscovery.parse(node.getAddress());
+                    if (target != null) {
+                        followLeaderTarget(target);
+                    }
+                    return;
+                }
+            }
+            // 无 is_leader 条目 = 选举空窗：本轮不动作，留待下轮核对。
+        });
+    }
+
+    /**
      * 提示所指即 home：等待项迁回 home 跟踪器，第二车道退役。
      *
      * @param lane 让位的获取车道
      */
     private void demoteToHome(AcquireLane lane) {
-        acquireLane = null;
-        migrateWaitsTo(lane.awaits, awaitTracker, connectionManager);
-        maybeRetire(lane);
+        synchronized (laneLock) {
+            acquireLane = null;
+            migrateWaitsTo(lane.awaits, awaitTracker, connectionManager);
+            maybeRetire(lane);
+        }
     }
 
     /**
@@ -455,11 +567,15 @@ public final class OpenLatchClient implements AutoCloseable {
                 next.cm.shutdown(); // 已被超时降级接管，丢弃本次结果
                 return;
             }
-            AcquireLane prev = acquireLane;
-            acquireLane = next;
-            if (prev != null) {
-                migrateWaitsTo(prev.awaits, next.awaits, next.cm);
-                maybeRetire(prev);
+            // 换道收口在 laneLock 内原子完成（见 #laneLock）：并发改道若各自
+            // 读到同一前驱，会让被覆盖的那条车道漏收口（连接与等待漏回收）。
+            synchronized (laneLock) {
+                AcquireLane prev = acquireLane;
+                acquireLane = next;
+                if (prev != null) {
+                    migrateWaitsTo(prev.awaits, next.awaits, next.cm);
+                    maybeRetire(prev);
+                }
             }
             if (req != null) {
                 replayOnLane(next, req);
