@@ -6,7 +6,12 @@ import io.github.lamspace.openlatch.protocol.ClusterView;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.AtomicOpResponse;
+import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.NodeInfo;
+import io.github.lamspace.openlatch.protocol.PhaserOpResponse;
+import io.github.lamspace.openlatch.protocol.QueueOpRequest;
+import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -62,6 +67,23 @@ class LeaderDiscoveryTest {
                 .addNodes(NodeInfo.newBuilder().setNodeId(leaderNodeId)
                         .setAddress(leaderAddr).setIsLeader(true))
                 .build()).build();
+    }
+
+    /** HELLO 应答（单机形态：不填 Leader 提示字段 → proto3 默认 0）。 */
+    private static Envelope helloPlain(Envelope req, long sessionId) {
+        return req.toBuilder().setHelloResponse(HelloResponse.newBuilder()
+                .setStatus(StatusCode.OK).setSessionId(sessionId)
+                .setServerProtocolVersion(2).setDefaultLeaseMs(30_000))
+                .build();
+    }
+
+    /** 队列应答（回挂请求的 op 回显；形态同 v7 服务端）。 */
+    private static Envelope queue(Envelope req, StatusCode status) {
+        QueueOpRequest q = req.getQueueOpRequest();
+        return req.toBuilder().setType(MessageType.QUEUE_OP)
+                .setQueueOpResponse(QueueOpResponse.newBuilder()
+                        .setStatus(status).setOp(q.getOp()))
+                .build();
     }
 
     private static AcquireSpec spec(String key) {
@@ -188,6 +210,140 @@ class LeaderDiscoveryTest {
                     .filter(e -> e.getType() == MessageType.LOCK_ACQUIRE)
                     .map(Envelope::getRequestId).distinct().count())
                     .isEqualTo(1); // 三次尝试同 requestId（同会话幂等复用）
+        }
+    }
+
+    @Test
+    void hintLagWindowConvergesViaResidentReconciliation() throws Exception {
+        // 启动窗提示滞后：种子 A 的 HELLO 报 hint=-1（其 LeaderTracker 未收
+        // 当选事件），其后向其查询 CLUSTER_VIEW 才报出真主 B；A 对队列请求
+        // 回无提示的 NOT_LEADER。非 ACQUIRE 车道（队列）无 NOT_LEADER 提示
+        // 可依、home 又不断连——修前 churn 满预算显式超时，修后经驻留期
+        // 周期核对发现 B 并在预算内收敛。
+        ScriptedServer b = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 2000, -1, "");
+            case QUEUE_OP -> queue(req, StatusCode.OK);
+            default -> null;
+        });
+        ScriptedServer a = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case QUEUE_OP -> queue(req, StatusCode.NOT_LEADER);
+            case CLUSTER_VIEW -> view(req, 2, b.address());
+            default -> null;
+        });
+        try (a; b) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(a.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OBlockingQueue q = client.newBlockingQueue("rq", 4);
+                q.put("x"); // 未收敛即在此耗尽等待预算抛超时
+            }
+            assertThat(a.countType(MessageType.CLUSTER_VIEW))
+                    .as("驻留期核对应经 home 会话发起集群视图查询")
+                    .isGreaterThanOrEqualTo(1);
+            assertThat(b.countType(MessageType.QUEUE_OP))
+                    .as("改道后队列请求应落在当值 Leader").isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    @Test
+    void reconciledLaneCarriesEveryNonAcquireLaneRequest() throws Exception {
+        // 驻留期核对把车道指向真主后，四族非获取类请求（队列/原子/闩/相位器）
+        // 都应经同一路由入口吃到该车道：真主 B 各收一例，已非权威的 home A
+        // 一例业务请求都不该再见。
+        ScriptedServer b = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 2000, -1, "");
+            case QUEUE_OP -> queue(req, StatusCode.OK);
+            case ATOMIC_OP -> req.toBuilder().setAtomicOpResponse(
+                    AtomicOpResponse.newBuilder().setStatus(StatusCode.OK)
+                            .setApplied(true).setValue(1L)).build();
+            case LATCH_AWAIT -> req.toBuilder().setLatchAwaitResponse(
+                    LatchAwaitResponse.newBuilder().setStatus(StatusCode.OK)).build();
+            case PHASER_OP -> req.toBuilder().setPhaserOpResponse(
+                    PhaserOpResponse.newBuilder().setStatus(StatusCode.OK)
+                            .setOp(req.getPhaserOpRequest().getOp())
+                            .setPhase(1).setRegistered(1).setArrived(1)).build();
+            default -> null;
+        });
+        ScriptedServer a = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case CLUSTER_VIEW -> view(req, 2, b.address());
+            default -> null; // 业务请求不该到访
+        });
+        try (a; b) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(a.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                assertThat(client.awaitAcquireLaneReady(10_000))
+                        .as("驻留期核对应把车道指向真主").isTrue();
+                client.newBlockingQueue("rq", 4).put("x");
+                client.newAtomicLong("ra", 0).incrementAndGet();
+                client.newCountDownLatch("rl", 1).await();
+                client.newPhaser("rp", 1).arrive();
+            }
+            assertThat(b.countType(MessageType.QUEUE_OP)).isGreaterThanOrEqualTo(1);
+            assertThat(b.countType(MessageType.ATOMIC_OP)).isGreaterThanOrEqualTo(1);
+            assertThat(b.countType(MessageType.LATCH_AWAIT)).isGreaterThanOrEqualTo(1);
+            assertThat(b.countType(MessageType.PHASER_OP)).isGreaterThanOrEqualTo(1);
+            assertThat(a.countType(MessageType.QUEUE_OP) + a.countType(MessageType.ATOMIC_OP)
+                    + a.countType(MessageType.LATCH_AWAIT) + a.countType(MessageType.PHASER_OP))
+                    .as("非获取类请求不应再落到已非权威的 home").isZero();
+        }
+    }
+
+    @Test
+    void singleMachineNeverProbesForLeader() throws Exception {
+        // 单机形态（HELLO 无提示字段，proto3 默认 0）：驻留期核对不激活，
+        // 跨两个核对周期仍零探测——单机语义零触碰。
+        ScriptedServer solo = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? helloPlain(req, 1000) : null);
+        try (solo) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(solo.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                Thread.sleep(2_500); // 跨两个核对周期（周期 1s）
+            }
+            assertThat(solo.countType(MessageType.CLUSTER_VIEW))
+                    .as("单机形态不得发起 Leader 核对探测").isZero();
+        }
+    }
+
+    @Test
+    void unusableClusterViewStaysSilentAndKeepsHomeRouting() throws Exception {
+        // 集群形态但视图不可用（先选举空窗：OK 空表；后干脆不应答超时）：
+        // 核对必须静默降级——不建车道、不抛错，业务请求经 home 兜底照旧。
+        AtomicInteger views = new AtomicInteger();
+        ScriptedServer a = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case CLUSTER_VIEW -> views.getAndIncrement() == 0
+                    ? req.toBuilder().setClusterView(ClusterView.newBuilder()
+                            .setStatus(StatusCode.OK)).build()
+                    : null; // 之后的探测干脆不应答（超时静默）
+            case QUEUE_OP -> queue(req, StatusCode.OK);
+            default -> null;
+        });
+        try (a) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(a.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                assertThat(client.awaitAcquireLaneReady(2_500))
+                        .as("视图无当值 Leader 时不得建道").isFalse();
+                client.newBlockingQueue("rq", 4).put("x"); // home 兜底路径不受干扰
+            }
+            assertThat(a.countType(MessageType.CLUSTER_VIEW)).isGreaterThanOrEqualTo(2);
+            assertThat(a.countType(MessageType.QUEUE_OP)).isGreaterThanOrEqualTo(1);
         }
     }
 
