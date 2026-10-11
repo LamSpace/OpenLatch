@@ -111,10 +111,21 @@ final class RemoteCountDownLatch implements OCountDownLatch {
     /**
      * 等待公共路径。
      *
+     * <p><b>{@code NOT_LEADER} 的零生效重道</b>：该应答状态证明服务端已答复
+     * 且本次<b>未受理</b>，故允许换会话重放——客户端在独立短预算（
+     * {@link OpenLatchClient#NOT_LEADER_REROUTE_BUDGET_MS}）内等待路由改道，
+     * 仅当路由会话确已变化时以新会话重发；预算耗尽或路由始终未变则以
+     * {@code NOT_LEADER} 显式失败。该路径 MUST NOT 使本方法假绿返回
+     * {@code true}，亦 MUST NOT 悬挂至等待总预算。
+     *
+     * <p><b>与不确定窗的边界</b>：传输失败/读界超时/断连等<b>结果不确定</b>
+     * 的形态维持既有严格纪律（换会话守卫），不因本条放宽。
+     *
      * @param budgetMs 等待总预算（毫秒）
      * @return 归零放行 {@code true}；预算耗尽 {@code false}
      * @throws InterruptedException 等待被中断
-     * @throws OpenLatchException   服务端显式拒绝（定型不符 / 屏障不存在 / 队列满）
+     * @throws OpenLatchException   服务端显式拒绝（定型不符 / 屏障不存在 / 队列满），
+     *                              或无当值 Leader 时重道预算耗尽的 {@code NOT_LEADER}
      */
     private boolean doAwait(long budgetMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + budgetMs;
@@ -193,6 +204,19 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                         }
                         // arrived 仅被 complete(null)，此分支不可达，防御清场。
                     }
+                    continue;
+                }
+                if (status == StatusCode.NOT_LEADER) {
+                    // 零生效（服务端已答复、本次未受理）⇒ 允许换会话重道；
+                    // 只在路由确已改道时重发，预算耗尽仍显式失败。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of latch '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
                     continue;
                 }
                 registry.remove(envSession, rid);
