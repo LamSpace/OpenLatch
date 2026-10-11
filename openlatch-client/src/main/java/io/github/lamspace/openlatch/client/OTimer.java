@@ -80,13 +80,6 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>等待谓词跨换主无损自愈</b>：已到期即刻了结、未到期续挂
  *       （沿 {@link OPhaser} 同侧证据，对照 {@link OCondition} signal 丢失
  *       窗的防混读句）。</li>
- *   <li><b>{@code NOT_LEADER} 应答状态按零生效重道</b>：该状态证明服务端已答复
- *       且本次<b>未登记等待</b>，故 SDK 在独立短预算（= 2 个 Leader 核对周期）
- *       内等待路由改道，仅当路由会话确已变化时以新会话重发；预算耗尽或路由
- *       始终未变则以 {@code NOT_LEADER} 显式抛出（MUST NOT 伪作"已响"、
- *       MUST NOT 悬挂至等待总预算）。跨会话重道必然换 {@code request_id}——
- *       与下文"重挂必须原 {@code request_id}"的护栏不冲突：那条约束的是
- *       <b>同一会话</b>内的保活重挂。</li>
  * </ul>
  *
  * <p><b>线程模型与幂等</b>：句柄线程安全；服务端以 (会话, 请求 id) 幂等——

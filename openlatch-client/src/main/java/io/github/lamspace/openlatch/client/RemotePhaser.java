@@ -322,20 +322,6 @@ final class RemotePhaser implements OPhaser {
                         throw e;
                     }
                 }
-                if (status == StatusCode.NOT_LEADER) {
-                    // 零生效（服务端已答复、本次未登记等待）⇒ 允许换会话重道；
-                    // 跨会话必然换 request_id（由上方重建块分配），与本环
-                    // "同一会话原信封原 rid 重发"的分片保活护栏不冲突。
-                    registry.remove(envSession, rid);
-                    OpenLatchClient.LatchRoute rerouted =
-                            client.awaitReroutedRoute(envSession, deadline);
-                    if (rerouted == null) {
-                        throw new OpenLatchException(status,
-                                "awaitAdvance of phaser '" + key + "' rejected: " + status);
-                    }
-                    route = rerouted;
-                    continue;
-                }
                 registry.remove(envSession, rid);
                 throw new OpenLatchException(status,
                         "awaitAdvance of phaser '" + key + "' rejected: " + status);
