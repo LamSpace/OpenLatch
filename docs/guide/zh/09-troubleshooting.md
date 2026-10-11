@@ -21,6 +21,8 @@
 | `IllegalMonitorStateException` | 客户端 | 未持有而解锁/归还/条件 signal（v9 起 signal 双源同型：本地先行，或服务端 `NOT_HELD` 映射） | 修代码路径（生命周期管理） |
 | `LockLostException`（回调） | 客户端 | 锁被剥夺 | 中止临界区提交——这是设计必答题 |
 
+> **疑似"原子操作静默错值"**（如 `addAndGet` 返回 0、`OAtomicReference` 交付默认值）：原子族对**应答缺码形**（应答载荷 oneof 缺 `atomic_op_response`）现按**可重试失败**处置——以同 `op_seq` 重发、MUST NOT 读 protobuf 默认实例（其 `status` 零值即 `OK`），故**不会再静默返回错值**；请求预算内仍不可判定则以 `OpenLatchTimeoutException` 显式收场。复核手段：`getStamped()` 读服务端权威 `(value, version)`。
+
 ## 2. 故障转移行为基线（实测数据）
 
 进程级演练在参考硬件（3 节点同机）上的量级，供告警阈值校准：

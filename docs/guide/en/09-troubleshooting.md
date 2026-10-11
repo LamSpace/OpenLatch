@@ -22,6 +22,14 @@
 
 | `LockLostException` (callback) | client | the lock was taken away | abort the in-flight commit — by-design obligation |
 
+> **Suspect "silent wrong value from an atomic op"** (e.g. `addAndGet` returning 0, or `OAtomicReference`
+> delivering a default): the atomic family now treats a **malformed reply** (the reply payload oneof
+> lacks `atomic_op_response`) as a **retryable failure** — it resends with the same `op_seq` and MUST NOT
+> read the protobuf default instance (whose `status` zero value is `OK`), so it **no longer returns a
+> silently wrong value**; if it stays undecidable within the request budget the call ends with an explicit
+> `OpenLatchTimeoutException`. Cross-check with `getStamped()`, which reads the server-authoritative
+> `(value, version)`.
+
 ## 2. Failover behavior baseline (measured)
 
 Magnitudes from process-level drills on reference hardware (3 nodes, one host) — calibrate

@@ -42,6 +42,12 @@ import java.util.function.LongBinaryOperator;
  *       超时后，服务端可能已应用（SDK 以同序号自动重发兜底去重；重发窗口内
  *       会话切换时放弃重发）。不确定窗口以 {@link #getStamped()} 复核，MUST NOT
  *       盲目重发新序号的增量。</li>
+ *   <li><b>应答缺码形不得读作成功</b>：应答载荷 oneof 缺 {@code atomic_op_response}
+ *       时（异型/空载荷码形违例），SDK 按可重试失败以同 {@code op_seq} 重发，
+ *       MUST NOT 读 protobuf 默认实例——默认实例 {@code status} 为枚举零值
+ *       {@code OK}、{@code value} 为 0，据此裁决会让本族方法<b>静默返回错值</b>
+ *       （判例 {@code OBlockingQueue API} 的缺码形条款）。预算内仍不可判定则
+ *       以 {@link OpenLatchTimeoutException} 显式收场。</li>
  *   <li><b>无中断回滚</b>：值不绑定会话与线程——创建者进程死亡、会话超时均
  *       不回滚、不清零；值的生命周期是 key 的生命周期。</li>
  *   <li><b>条目不回收</b>：key 一经写入常驻服务端（无删除语义），动态 key 名
