@@ -140,11 +140,21 @@ final class RemoteTimer implements OTimer {
      * 限时等待核心：谓词三态——即刻共见（OK）/ 代终结（DENIED→异常）/
      * 续挂（QUEUED→通知或分片重发，恒原 rid）。
      *
+     * <p><b>{@code NOT_LEADER} 的零生效重道</b>：该应答状态证明服务端已答复
+     * 且本次<b>未登记等待</b>，故在独立短预算（
+     * {@link OpenLatchClient#NOT_LEADER_REROUTE_BUDGET_MS}）内等路由改道，
+     * 仅当路由会话确已变化时以新会话重发；预算耗尽或路由始终未变则以
+     * {@code NOT_LEADER} 显式失败（MUST NOT 伪作"已响"）。跨会话重道必然换
+     * {@code request_id}——与上文"恒原 rid"的分片保活护栏不冲突：那条约束的
+     * 是<b>同一会话</b>内的保活重挂。
+     *
      * @param timeout 等待预算（{@code > 0}）
      * @param unit    时间单位
      * @return {@code true} 预算内见到当代标记
      * @throws InterruptedException 被中断（先尽力撤销挂起）
      * @throws TimeoutException     预算耗尽
+     * @throws OpenLatchException   当代被撤销（{@code DENIED}），或无当值 Leader
+     *                              时重道预算耗尽的 {@code NOT_LEADER}
      */
     private boolean awaitInterruptibly(long timeout, TimeUnit unit)
             throws InterruptedException, TimeoutException {
@@ -231,6 +241,20 @@ final class RemoteTimer implements OTimer {
                         Thread.currentThread().interrupt();
                         throw e;
                     }
+                }
+                if (status == StatusCode.NOT_LEADER) {
+                    // 零生效（服务端已答复、本次未登记等待）⇒ 允许换会话重道；
+                    // 跨会话必然换 request_id（由上方重建块分配），与本环
+                    // "同一会话恒原 rid 重发"的保活护栏不冲突。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of timer '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
+                    continue;
                 }
                 registry.remove(envSession, rid);
                 throw new OpenLatchException(status,
