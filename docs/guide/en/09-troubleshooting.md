@@ -39,10 +39,11 @@ alerts against these:
   pure hint refresh and degrades silently: single-node mode, servers without the message, a
   failed probe, or no current leader never issue or act, and are never counted as a business
   failure. It converges **routing** only; on a `NOT_LEADER` **response status** the wait
-  primitives additionally get a **bounded reroute** — latch/barrier `await` waits up to 2s for
-  a reroute and resends only once the route's session actually changed, still failing with an
-  explicit `NOT_LEADER` when that budget is exhausted (never false-green, never hanging to the
-  wait budget); phaser/timer waits keep the terminal status code.
+  primitives additionally get a **bounded reroute**, and **all four wait families — latch,
+  barrier, phaser and timer — behave the same**: they wait up to 2s for a reroute and resend
+  only once the route's session actually changed, still failing with an explicit `NOT_LEADER`
+  when that budget is exhausted (never false-green, never fabricating a reading, never hanging
+  to the wait budget).
 
 ## 3. Repeated `NOT_LEADER` / no leader found
 

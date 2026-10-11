@@ -24,7 +24,9 @@ import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.NodeInfo;
+import io.github.lamspace.openlatch.protocol.PhaserOpResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.TimerOpResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -35,11 +37,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 闩/屏障 await 的「`NOT_LEADER` 应答状态零生效重道」脚本化夹具
- * （{@link ScriptedServer} 直驱，不起真集群）。
+ * 等待类原语（闩/屏障/相位器/定时器）的「`NOT_LEADER` 应答状态零生效重道」
+ * 脚本化夹具（{@link ScriptedServer} 直驱，不起真集群）。
  *
  * <p>覆盖两侧：**陈旧路由但存在真主**时应重道放行；**无真主**时应以有界
- * 预算显式失败，且不假绿、不悬挂至等待总预算。
+ * 预算显式失败，且不假绿/不伪造读数、不悬挂至等待总预算。
  */
 @Timeout(value = 40, unit = TimeUnit.SECONDS)
 class AwaitNotLeaderRerouteScriptedTest {
@@ -145,6 +147,126 @@ class AwaitNotLeaderRerouteScriptedTest {
             }
             assertThat(leader.countType(MessageType.BARRIER_AWAIT))
                     .as("重道后的到场应落在当值 Leader").isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    /** 相位器 op 应答（op 回显 + 相位）。 */
+    private static Envelope phaserOp(Envelope req, StatusCode status, long phase) {
+        return req.toBuilder().setType(MessageType.PHASER_OP)
+                .setPhaserOpResponse(PhaserOpResponse.newBuilder()
+                        .setStatus(status).setOp(req.getPhaserOpRequest().getOp())
+                        .setPhase(phase).setRegistered(1).setArrived(1))
+                .build();
+    }
+
+    /** 定时器 op 应答。 */
+    private static Envelope timerOp(Envelope req, StatusCode status) {
+        return req.toBuilder().setType(MessageType.TIMER_OP)
+                .setTimerOpResponse(TimerOpResponse.newBuilder().setStatus(status))
+                .build();
+    }
+
+    @Test
+    void phaserAwaitAdvanceReroutesWhenHomeIsStaleButLeaderExists() throws Exception {
+        ScriptedServer leader = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 2000, -1, "");
+            case PHASER_OP -> phaserOp(req, StatusCode.OK, 7L);
+            default -> null;
+        });
+        ScriptedServer home = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case PHASER_OP -> phaserOp(req, StatusCode.NOT_LEADER, 0L);
+            case CLUSTER_VIEW -> view(req, 2, leader.address());
+            default -> null;
+        });
+        try (home; leader) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(home.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OPhaser phaser = client.newPhaser("rp");
+                assertThat(phaser.awaitAdvanceInterruptibly(0, 10, TimeUnit.SECONDS))
+                        .as("陈旧路由但存在真主：等待应在重道预算内以服务端回显相位了结")
+                        .isEqualTo(7L);
+            }
+            assertThat(leader.countType(MessageType.PHASER_OP))
+                    .as("重道后的等待应落在当值 Leader").isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    @Test
+    void timerAwaitReroutesWhenHomeIsStaleButLeaderExists() throws Exception {
+        ScriptedServer leader = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 2000, -1, "");
+            case TIMER_OP -> timerOp(req, StatusCode.OK);
+            default -> null;
+        });
+        ScriptedServer home = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case TIMER_OP -> timerOp(req, StatusCode.NOT_LEADER);
+            case CLUSTER_VIEW -> view(req, 2, leader.address());
+            default -> null;
+        });
+        try (home; leader) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(home.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(10))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OTimer timer = client.newTimer("rt");
+                assertThat(timer.await(10, TimeUnit.SECONDS))
+                        .as("陈旧路由但存在真主：等待应在重道预算内如实收束").isTrue();
+            }
+            assertThat(leader.countType(MessageType.TIMER_OP))
+                    .as("重道后的等待应落在当值 Leader").isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    @Test
+    void phaserAndTimerAwaitFailBoundedlyWithoutLeader() throws Exception {
+        // 集群形态但始终无当值 Leader：路由不会变化，两族都必须显式失败、
+        // 不伪造读数，且失败耗时受重道预算上界约束。
+        ScriptedServer home = new ScriptedServer(req -> switch (req.getType()) {
+            case HELLO -> hello(req, 1000, -1, "");
+            case PHASER_OP -> phaserOp(req, StatusCode.NOT_LEADER, 0L);
+            case TIMER_OP -> timerOp(req, StatusCode.NOT_LEADER);
+            case CLUSTER_VIEW -> viewWithoutLeader(req);
+            default -> null;
+        });
+        try (home) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(home.address())
+                    .requestTimeout(Duration.ofSeconds(2))
+                    .defaultWaitTimeout(Duration.ofSeconds(30))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+
+                long t0 = System.currentTimeMillis();
+                assertThatThrownBy(() -> client.newPhaser("rp")
+                        .awaitAdvanceInterruptibly(0, 15, TimeUnit.SECONDS))
+                        .as("无真主时相位器等待必须以 NOT_LEADER 显式失败")
+                        .isInstanceOf(OpenLatchException.class)
+                        .extracting(e -> ((OpenLatchException) e).status())
+                        .isEqualTo(StatusCode.NOT_LEADER);
+                assertThat(System.currentTimeMillis() - t0)
+                        .as("相位器：失败前应确有有界重道等待").isGreaterThanOrEqualTo(1_000L);
+                assertThat(System.currentTimeMillis() - t0)
+                        .as("相位器：不得悬挂至等待总预算").isLessThan(5_000L);
+
+                long t1 = System.currentTimeMillis();
+                assertThatThrownBy(() -> client.newTimer("rt").await(15, TimeUnit.SECONDS))
+                        .as("无真主时定时器等待必须以 NOT_LEADER 显式失败，MUST NOT 伪作已响")
+                        .isInstanceOf(OpenLatchException.class)
+                        .extracting(e -> ((OpenLatchException) e).status())
+                        .isEqualTo(StatusCode.NOT_LEADER);
+                assertThat(System.currentTimeMillis() - t1)
+                        .as("定时器：失败前应确有有界重道等待").isGreaterThanOrEqualTo(1_000L);
+                assertThat(System.currentTimeMillis() - t1)
+                        .as("定时器：不得悬挂至等待总预算").isLessThan(5_000L);
+            }
         }
     }
 
