@@ -34,7 +34,12 @@ import java.util.concurrent.TimeoutException;
  * <p><b>重发裁决（效果确定性的来源）</b>：写操作在总界限
  * （{@code requestTimeout}，含重发）内对下列失败以同一 {@code op_seq}
  * 重发——{@code NOT_LEADER}/{@code OVERLOADED} 应答码、传输失败
- * （{@link ServerUnavailableException}）、单次请求超时；服务端每 key 去重槽
+ * （{@link ServerUnavailableException}）、单次请求超时、以及<b>应答缺码形</b>
+ * （{@code Envelope.type} 回显 {@code ATOMIC_OP} 而载荷 oneof 缺
+ * {@code atomic_op_response}）。缺码形 MUST NOT 读 protobuf 默认实例——其
+ * {@code status} 为枚举零值 {@code OK}、{@code value} 为 0，据此裁决会让
+ * {@code addAndGet} 之类静默返回错值（判例 {@code OBlockingQueue API} 的
+ * 缺码形条款）。服务端每 key 去重槽
  * 保证同 {@code (会话, op_seq)} 的重发不重复生效。可重试失败途中会话发生
  * 切换（重连换了逻辑 sid）时写路径放弃重发并抛
  * {@link OpenLatchException}——新会话下旧序号不再命中去重槽，盲目重发会
@@ -134,6 +139,8 @@ abstract class RemoteAtomicBase {
     /**
      * 请求执行循环：构造一次信封（固定 request_id 由 multiplexer 分配、
      * 重发复用同一信封与 {@code op_seq}），在总界限内按重发裁决推进。
+     * 应答**缺码形**（载荷 oneof 缺 {@code atomic_op_response}）按可重试
+     * 失败处置，MUST NOT 读 protobuf 默认实例（见类级重发裁决）。
      *
      * @param op      操作
      * @param operand 操作数
@@ -189,6 +196,15 @@ abstract class RemoteAtomicBase {
                 Envelope answer = route.mux().sendWithId(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
+                if (!answer.hasAtomicOpResponse()) {
+                    // 缺码形（type 回显 ATOMIC_OP 而载荷 oneof 缺该成员）：MUST NOT
+                    // 读 protobuf 默认实例——其 status 为枚举零值 OK、value 为 0，
+                    // 据此裁决会让 addAndGet 之类静默返回错值（判例 OBlockingQueue
+                    // API 缺码形条款）。按可重试失败处置：同信封同 op_seq 重发
+                    // （去重槽保证不重复生效），预算内仍不可判定则由循环出口以
+                    // 超时显式收场。跨会话换代守卫不因本条放宽。
+                    continue;
+                }
                 resp = answer.getAtomicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
@@ -336,6 +352,10 @@ abstract class RemoteAtomicBase {
                 Envelope answer = route.mux().sendWithId(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
+                if (!answer.hasAtomicOpResponse()) {
+                    // 缺码形：同标量族处置（MUST NOT 读默认实例；同 op_seq 重发）。
+                    continue;
+                }
                 resp = answer.getAtomicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);

@@ -42,8 +42,11 @@ package io.github.lamspace.openlatch.client;
  *   <li>超时抛出构成<b>效果不确定窗口</b>：写操作抛
  *       {@link OpenLatchTimeoutException} 时值可能已变也可能未变，须以
  *       {@link #getStamped()} 复核；SDK 对可重试失败（NOT_LEADER、断连、
- *       单次超时）以同一 {@code op_seq} 自动重发，服务端去重槽保证重发
- *       不重复生效——同 key 写在本客户端经在途监视器串行；</li>
+ *       单次超时、应答缺码形）以同一 {@code op_seq} 自动重发，服务端去重槽保证
+ *       重发不重复生效——同 key 写在本客户端经在途监视器串行。缺码形指载荷
+ *       oneof 缺 {@code atomic_op_response}，SDK MUST NOT 读 protobuf 默认实例
+ *       （其 {@code status} 零值即 {@code OK}），否则本族操作会静默交付默认值
+ *       （判例同 {@code OBlockingQueue API} 缺码形条款）；</li>
  *   <li>值 CAS（{@link #compareAndSet}）的 ABA 风险与 JDK 同形；
  *       {@link #compareAndSetStamped} 以版本戳消除 ABA（版本每成功写恰 +1，
  *       任何路径不可回退）；</li>
