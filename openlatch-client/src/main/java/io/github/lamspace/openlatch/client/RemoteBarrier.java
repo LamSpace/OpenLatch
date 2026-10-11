@@ -147,11 +147,20 @@ final class RemoteBarrier implements OBarrier {
     /**
      * 等待公共路径：到场-通知-重发闭环 + 执行者两阶段。
      *
+     * <p><b>{@code NOT_LEADER} 的零生效重道</b>：该应答状态证明服务端已答复
+     * 且本次<b>未登记到场</b>，故允许换会话重发——客户端在独立短预算（
+     * {@link OpenLatchClient#NOT_LEADER_REROUTE_BUDGET_MS}）内等待路由改道，
+     * 仅当路由会话确已变化时以新会话重发；预算耗尽或路由始终未变则以
+     * {@code NOT_LEADER} 显式失败。该形态与"在途到场遇传输失败/断连/换会话
+     * MUST NOT 自动重发"的纪律<b>不冲突</b>：后者约束结果<b>不确定</b>的形态
+     * （可能已到场，跨会话重放会双计），前者无到场事实可重放。
+     *
      * @param budgetMs 等待总预算（毫秒）
      * @return 世代合拢放行 {@code true}；预算耗尽（已连带破障）{@code false}
      * @throws InterruptedException  本地中断（已尽力离场，世代破障）
      * @throws OBrokenBarrierException 所属世代已破障
-     * @throws OpenLatchException    服务端显式拒绝或在途到场遇会话切换放弃
+     * @throws OpenLatchException    服务端显式拒绝（含无当值 Leader 时重道预算
+     *                               耗尽的 {@code NOT_LEADER}）或在途到场遇会话切换放弃
      */
     private boolean doAwait(long budgetMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + budgetMs;
@@ -263,6 +272,20 @@ final class RemoteBarrier implements OBarrier {
                     } catch (ExecutionException ee) {
                         // arrived 仅被 complete(null)，此分支不可达，防御清场。
                     }
+                    continue;
+                }
+                if (status == StatusCode.NOT_LEADER) {
+                    // 零生效（服务端已答复、本次未登记到场）⇒ 允许换会话重道；
+                    // 与"到场不跨会话重放"纪律不冲突：那条约束结果不确定的
+                    // 形态（可能已到场），此处无到场事实可重放。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of barrier '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
                     continue;
                 }
                 registry.remove(envSession, rid);

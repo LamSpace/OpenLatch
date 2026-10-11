@@ -38,8 +38,11 @@ alerts against these:
   the real leader within a few seconds instead of burning the wait budget. The check is a
   pure hint refresh and degrades silently: single-node mode, servers without the message, a
   failed probe, or no current leader never issue or act, and are never counted as a business
-  failure. It converges **routing** only; latch/barrier waits still treat `NOT_LEADER` as a
-  terminal status code per contract.
+  failure. It converges **routing** only; on a `NOT_LEADER` **response status** the wait
+  primitives additionally get a **bounded reroute** — latch/barrier `await` waits up to 2s for
+  a reroute and resends only once the route's session actually changed, still failing with an
+  explicit `NOT_LEADER` when that budget is exhausted (never false-green, never hanging to the
+  wait budget); phaser/timer waits keep the terminal status code.
 
 ## 3. Repeated `NOT_LEADER` / no leader found
 

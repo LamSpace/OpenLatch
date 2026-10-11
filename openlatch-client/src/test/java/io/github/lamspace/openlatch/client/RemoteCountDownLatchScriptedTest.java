@@ -57,8 +57,11 @@ class RemoteCountDownLatchScriptedTest {
     }
 
     /**
-     * 同型 {@code LatchAwaitResponse{NOT_LEADER}}：await 显式抛
-     * {@code OpenLatchException}——既不假绿返回 true，也不悬挂至预算耗尽。
+     * 同型 {@code LatchAwaitResponse{NOT_LEADER}} 且始终无当值 Leader：await 在
+     * <b>有界重道窗</b>（{@code NOT_LEADER_REROUTE_BUDGET_MS} = 2s）耗尽后显式抛
+     * {@code OpenLatchException}——既不假绿返回 true，也不悬挂至 await 总预算。
+     * 断言上界 5s 覆盖 2s 重道窗并留余量（"存在真主时会重道放行"另见
+     * {@link AwaitNotLeaderRerouteScriptedTest}）。
      */
     @Test
     void sameShapeNotLeaderRejectOnAwaitThrowsNotFalseGreen() throws Exception {

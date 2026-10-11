@@ -36,6 +36,13 @@ import java.util.concurrent.TimeUnit;
  * await 则全程幂等：通知驱动的同 id 重发与断线重连后的自动重发在
  * 服务端按 {@code (会话, 请求)} 去重。
  *
+ * <p><b>{@code NOT_LEADER} 的零生效重道</b>：收到该<b>应答状态</b>（服务端
+ * 已答复、本次未受理）时，客户端在独立短预算（= 2 个 Leader 核对周期）
+ * 内等待路由改道，仅当路由会话确已变化才以新会话重发；预算耗尽或路由
+ * 始终未变则以 {@code NOT_LEADER} 显式失败——既不假绿返回 {@code true}，
+ * 也不悬挂至等待总预算。传输失败/读界超时等<b>结果不确定</b>的形态不适用
+ * 本条（维持既有换会话守卫）。
+ *
  * <p><b>实例化</b>：{@link OpenLatchClient#newCountDownLatch(String, long)}
  * （创建者/断言句柄）与 {@link OpenLatchClient#newCountDownLatch(String)}
  * （纯加入句柄）。句柄无状态，同一 key 可多实例并存。

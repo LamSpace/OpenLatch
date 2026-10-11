@@ -179,6 +179,16 @@ public final class OpenLatchClient implements AutoCloseable {
     private static final long LEADER_RECONCILE_MS = 1_000L;
     /** 核对探测的单次预算（毫秒）：独立于业务请求超时，超时/失败一律静默。 */
     private static final long LEADER_RECONCILE_PROBE_MS = 500L;
+    /**
+     * 等待类原语（{@link OCountDownLatch}/{@link OBarrier}）收到
+     * {@code NOT_LEADER} <b>应答状态</b>后的零生效重道预算（毫秒）。
+     * 取 {@value #LEADER_RECONCILE_MS} 的 2 倍：一次真实改道最坏要等一个
+     * 核对周期才被察觉、再一个周期内完成换道。包私有——只由等待原语消费，
+     * 不对外暴露、不配置化。
+     */
+    static final long NOT_LEADER_REROUTE_BUDGET_MS = 2 * LEADER_RECONCILE_MS;
+    /** 重道等待的轮询粒度（毫秒），与各等待原语的会话轮询同量级。 */
+    private static final long REROUTE_POLL_MS = 50L;
     /** 看门狗：持锁期间的自动续租与失锁判定。 */
     private final io.github.lamspace.openlatch.client.internal.Watchdog watchdog;
     /** 客户端可选指标门面：未注入注册表即禁用形态、零观测路径。 */
@@ -1846,6 +1856,40 @@ public final class OpenLatchClient implements AutoCloseable {
         }
         SessionContext s = connectionManager.session();
         return s == null ? null : new LatchRoute(s, multiplexer);
+    }
+
+    /**
+     * 等待类原语的 {@code NOT_LEADER} 零生效重道等待：在独立短预算内轮询
+     * 路由，仅在路由<b>会话身份确已变化</b>时返回改道后的路由。
+     *
+     * <p><b>为何只在改道后才重发</b>：重发的唯一动机是"路由陈旧"——对同一
+     * 陈旧路由重发只会拿到同一个 {@code NOT_LEADER}。把"等改道"显式化，也让
+     * "预算耗尽"成为可断言的终态。
+     *
+     * <p><b>边界</b>：等待同时受调用方的剩余预算封顶，重道 MUST NOT 让调用方
+     * 越过自己的等待总预算。返回 {@code null} 表示预算内未改道，调用方应以
+     * {@code NOT_LEADER} 显式失败（既不假绿，也不悬挂至等待总预算）。
+     *
+     * @param staleSessionId 上一尝试所在会话 id（判"是否确已改道"）
+     * @param deadlineMs     调用方等待总预算的截止时刻（毫秒）
+     * @return 改道后的路由；预算内未改道返回 {@code null}
+     * @throws InterruptedException 等待被中断
+     */
+    LatchRoute awaitReroutedRoute(long staleSessionId, long deadlineMs)
+            throws InterruptedException {
+        long rerouteDeadline = Math.min(deadlineMs,
+                System.currentTimeMillis() + NOT_LEADER_REROUTE_BUDGET_MS);
+        while (true) {
+            long left = rerouteDeadline - System.currentTimeMillis();
+            if (left <= 0) {
+                return null;
+            }
+            Thread.sleep(Math.min(REROUTE_POLL_MS, left));
+            LatchRoute candidate = latchRoute();
+            if (candidate != null && candidate.session().sessionId() != staleSessionId) {
+                return candidate;
+            }
+        }
     }
 
     /**
