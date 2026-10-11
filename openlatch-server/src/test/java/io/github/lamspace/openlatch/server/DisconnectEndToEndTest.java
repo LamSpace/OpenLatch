@@ -84,7 +84,19 @@ class DisconnectEndToEndTest {
 
             holder.disconnectAbruptly();
 
+            // 断连清理是**异步**契约：服务端须先察觉 socket 关闭（channelInactive
+            // → 会话清理 → 释放）才可能授予。故断言"预算内经通知-重发获授"，
+            // 而非"首个应答即 OK"——后者等于赌调度：本机常赢，负载重的 runner
+            // 上会假红（CI 单次 0.028s 即返回 QUEUED）。预算取 3s ≪ 30s 租约，
+            // "断连即时清理"与"租约到期释放"的判别力不变。形态同本文件
+            // waiter_disconnect_is_removed_from_queue。
             Envelope regnant = other.sendAndAwait(acquire(other.nextRequestId(), "k", -1), 3000);
+            if (regnant.getAcquireResponse().getStatus() == StatusCode.QUEUED) {
+                Envelope push = other.awaitPush(3000);
+                assertThat(push).as("断连清理后应收到唤醒通知").isNotNull();
+                regnant = other.sendAndAwait(
+                        acquire(push.getAwaitNotify().getRequestIdRef(), "k", -1), 3000);
+            }
             assertThat(regnant.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
         }
     }
