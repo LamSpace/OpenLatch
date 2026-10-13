@@ -41,6 +41,13 @@ import java.util.concurrent.TimeoutException;
  *
  * <p><b>countDown 至多一次</b>：请求超时/传输失败不自动重发（重复扣减
  * 风险大于收益），异常交由调用方裁决。
+ *
+ * <p><b>应答缺码形护栏</b>：应答信封 {@code type} 回显而载荷 oneof 缺对应成员
+ * （码形违例）时 MUST NOT 读 protobuf 默认实例——其 {@code status} 为枚举零值
+ * {@code OK}，据此裁决会让 {@code await} 假绿返回"已放行"、{@code countDown}
+ * 静默返回错误的剩余计数。{@code LATCH_AWAIT} 缺码形按可重试失败在等待车道以同
+ * {@code requestId} 重发（预算耗尽以 {@code false}/兜底超时收场）；{@code LATCH_COUNT_DOWN}
+ * 缺码形因至多一次不可安全重发，以显式超时异常收场。
  */
 final class RemoteCountDownLatch implements OCountDownLatch {
 
@@ -111,6 +118,10 @@ final class RemoteCountDownLatch implements OCountDownLatch {
     /**
      * 等待公共路径。
      *
+     * <p>缺码形应答（载荷 oneof 缺 {@code latch_await_response}）MUST NOT 被读作默认实例
+     * （{@code status=OK}）而假绿放行：并入等待-通知-重发闭环以同 {@code requestId} 重发，
+     * 预算内不可判定则以 {@code false} 收场。
+     *
      * @param budgetMs 等待总预算（毫秒）
      * @return 归零放行 {@code true}；预算耗尽 {@code false}
      * @throws InterruptedException 等待被中断
@@ -148,6 +159,15 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     waitMs = Math.min(remaining,
                             client.config().requestTimeout().toMillis() + SLACK_MS);
                     Envelope resp = response.get(waitMs, TimeUnit.MILLISECONDS);
+                    if (!resp.hasLatchAwaitResponse()) {
+                        // 缺码形（type 回显 LATCH_AWAIT 而载荷 oneof 缺该成员）：MUST NOT
+                        // 读 protobuf 默认实例——其 status 为枚举零值 OK，据此裁决会让
+                        // await 假绿返回"已放行"。按可重试失败并入等待-通知-重发闭环
+                        // （判例 RemotePhaser/RemoteTimer）：清注册、同 request_id 重发；
+                        // 预算内仍不可判定则由循环出口以 false/兜底超时显式收场。
+                        registry.remove(envSession, rid);
+                        continue;
+                    }
                     status = resp.getLatchAwaitResponse().getStatus();
                 } catch (ExecutionException e) {
                     Throwable cause = unwrap(e);
@@ -208,6 +228,10 @@ final class RemoteCountDownLatch implements OCountDownLatch {
     /**
      * countDown/init 公共发送路径（至多一次，见类契约）。
      *
+     * <p>缺码形应答（载荷 oneof 缺 {@code latch_count_down_response}）MUST NOT 被读作
+     * 默认实例（{@code status=OK}/{@code remaining=0}）静默返回剩余计数；因至多一次
+     * 不可安全重发，以 {@link OpenLatchTimeoutException} 显式收场。
+     *
      * @param n 扣减量（0 为纯初始化）
      * @return 剩余计数
      */
@@ -222,6 +246,14 @@ final class RemoteCountDownLatch implements OCountDownLatch {
             Envelope resp = route.mux().sendWithId(env, client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                             TimeUnit.MILLISECONDS);
+            if (!resp.hasLatchCountDownResponse()) {
+                // 缺码形（载荷 oneof 缺 latch_count_down_response）：MUST NOT 读 protobuf
+                // 默认实例——其 status 为枚举零值 OK、remaining 为 0，据此裁决会静默返回
+                // 错误的剩余计数。countDown/init 为至多一次请求（无 op_seq 去重槽，重发会
+                // 双扣），故与既有时限耗尽分支同口径显式收场、MUST NOT 重发。
+                throw new OpenLatchTimeoutException("countDown of latch '" + key
+                        + "' reply malformed (result unknown, not retried)");
+            }
             StatusCode status = resp.getLatchCountDownResponse().getStatus();
             if (status != StatusCode.OK) {
                 throw new OpenLatchException(status,

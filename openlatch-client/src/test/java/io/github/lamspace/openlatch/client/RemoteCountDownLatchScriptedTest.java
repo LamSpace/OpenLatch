@@ -44,6 +44,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 落既有异常口径：<b>显式 {@code OpenLatchException}、不返回 true、不返回
  * 0、不悬挂</b>——修复只消灭假绿，不引入新失败形态（design D3 兼容注记的
  * 可执行化）。
+ *
+ * <p><b>缺码形面</b>：服务端码形修复覆盖的是"携同型载荷的显式拒绝"；本类另锁
+ * <b>载荷 oneof 缺对应成员</b>的码形违例——`Envelope.type` 回显 `LATCH_AWAIT`/
+ * `LATCH_COUNT_DOWN` 而应答载荷缺席时，MUST NOT 读 protobuf 默认实例
+ * （`status` 零值 `OK`）而静默假绿。await 同 id 重发（等待-通知-重发闭环）、
+ * countDown 至多一次不重发、以显式失败收场。
  */
 @Timeout(value = 30, unit = TimeUnit.SECONDS)
 class RemoteCountDownLatchScriptedTest {
@@ -114,6 +120,58 @@ class RemoteCountDownLatchScriptedTest {
                         .as("同型 NOT_LEADER 拒绝须显式异常，MUST NOT 假绿回 remaining")
                         .isInstanceOf(OpenLatchException.class);
             }
+        }
+    }
+
+    /**
+     * 缺码形 {@code LATCH_AWAIT} 应答（载荷 oneof 缺 {@code latch_await_response}）：
+     * await MUST NOT 被读作默认实例（{@code status=OK}）而假绿返回"已放行"；
+     * 按可重试失败在等待-通知-重发闭环内以同 {@code request_id} 重发，预算内
+     * 不可判定则以 {@code false} 显式收场。
+     */
+    @Test
+    void malformedAwaitReplyIsNotReadAsRelease() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? hello(req) : req.toBuilder().setType(MessageType.LATCH_AWAIT).build())) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OCountDownLatch latch = client.newCountDownLatch("l", 2);
+                long t0 = System.currentTimeMillis();
+                assertThat(latch.await(2, TimeUnit.SECONDS))
+                        .as("缺码形应答 MUST NOT 被读作默认实例（status=OK）而假绿返回 true")
+                        .isFalse();
+                assertThat(System.currentTimeMillis() - t0)
+                        .as("失败应在等待预算内显式收口").isLessThan(5_000L);
+            }
+            assertThat(server.countType(MessageType.LATCH_AWAIT))
+                    .as("缺码形应在等待车道以同 id 重发，而非一次即弃").isGreaterThan(1);
+        }
+    }
+
+    /**
+     * 缺码形 {@code LATCH_COUNT_DOWN} 应答：countDown 为至多一次请求（无去重槽），
+     * MUST NOT 读默认实例（{@code status=OK}/{@code remaining=0}）静默返回剩余计数，
+     * MUST 以显式失败收场且 MUST NOT 重发。
+     */
+    @Test
+    void malformedCountDownReplyIsNotReadAsZeroRemaining() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? hello(req) : req.toBuilder().setType(MessageType.LATCH_COUNT_DOWN).build())) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OCountDownLatch latch = client.newCountDownLatch("l", 2);
+                assertThatThrownBy(latch::countDown)
+                        .as("缺码形 MUST NOT 被读作默认实例（status=OK/remaining=0）而静默返回剩余计数")
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+            }
+            assertThat(server.countType(MessageType.LATCH_COUNT_DOWN))
+                    .as("至多一次车道 MUST NOT 因缺码形重发（重发不安全）").isEqualTo(1);
         }
     }
 }

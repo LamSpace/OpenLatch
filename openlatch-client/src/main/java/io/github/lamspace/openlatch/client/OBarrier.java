@@ -57,6 +57,13 @@ import java.util.concurrent.TimeUnit;
  *
  * <p><b>key 治理</b>：定型条目存续不回收（同 key 恒同 parties，跨家族互拒，
  * 同 key 同类型约定适用）。
+ *
+ * <p><b>应答缺码形护栏</b>：应答载荷 oneof 缺失本请求的应答成员（码形违例）时
+ * MUST NOT 被读作"成功"——{@code await} 不假绿返回"世代已合拢"、{@code breakBarrier}
+ * 不静默空成功、离场确认（"返回即已破"次序）不虚报生效。{@code await} 同会话以
+ * 同请求 id 重发（跨会话走既有"到场不跨会话重放"裁决，不借道重放到新会话）；
+ * 执行者收尾回报按 {@code (会话, 世代)} 幂等重发；{@code breakBarrier} 抛显式异常、
+ * 离场确认以"不确定"降级收场。
  */
 public interface OBarrier {
 
@@ -99,9 +106,11 @@ public interface OBarrier {
      * 记录时无操作成功返回。
      *
      * <p>本调用只发一次破障主张（请求经复制多数派提交），瞬态失败以
-     * {@link OpenLatchException} 抛出，重试由调用方决定（幂等安全）。
+     * {@link OpenLatchException} 抛出，重试由调用方决定（幂等安全）；
+     * 应答缺码形（载荷 oneof 缺失对应成员）MUST NOT 被读作显式成功，
+     * 以 {@link OpenLatchTimeoutException} 显式收场。
      *
-     * @throws OpenLatchException 提交失败（断连、超时、会话失效）
+     * @throws OpenLatchException 提交失败（断连、超时、会话失效、应答缺码形）
      */
     void breakBarrier();
 
