@@ -30,6 +30,17 @@
 > `OpenLatchTimeoutException`. Cross-check with `getStamped()`, which reads the server-authoritative
 > `(value, version)`.
 
+> **Suspect a latch/barrier `await` "false green"** (the server never released/tripped, yet `await`
+> returned `true`), a `breakBarrier` that reports success without effect, or a `countDown` returning a
+> wrong remaining count: the wait families (count-down latch, cyclic barrier) now guard **malformed
+> replies** (the reply payload oneof lacks `latch_await_response` / `latch_count_down_response` /
+> `barrier_await_response` / `barrier_leave_response`) — they MUST NOT read the protobuf default
+> instance (whose `status` zero value is `OK`). `await` resends with the same request id within the
+> session and ends with `false`/a bounded timeout once the budget runs out; `countDown` and
+> `breakBarrier` are at-most-once and cannot retry safely, so they end with an explicit
+> `OpenLatchTimeoutException`. Cross-check against server-side readings and the session log to confirm
+> whether the wait really was released/broken.
+
 ## 2. Failover behavior baseline (measured)
 
 Magnitudes from process-level drills on reference hardware (3 nodes, one host) — calibrate
@@ -147,7 +158,14 @@ auto-convergence after healing; sampler red only if all rounds ABORTED.
   boundary; consumer idempotence is a contract obligation, not a server defect;
 - **Empty topic readouts on followers**: the registry is Leader-local — follower
   SUMMARY shows `topic_entries=0`, keys lists omit topic rows and details answer
-  an honest NOT_HELD. This is faithful presentation, not data loss.
+  an honest NOT_HELD. This is faithful presentation, not data loss;
+- **Suspected "publish reported accepted but nothing delivered / subscribe receives
+  nothing"**: check whether a **malformed reply** (the reply payload oneof lacks
+  `topic_op_response`) was misread — the family now guards it: sync `publish` / `subscribe`
+  resend with the same request id, async `publishAsync` fails explicitly (never a fake
+  `topicSeq=0` acceptance), and rebind abandons the attempt without detaching the existing
+  binding. A healthy server always fills that payload, so a hit means a server/wire fault —
+  check the server version and any middleware.
 
 ## Condition (v9) triage quick sheet
 
