@@ -79,8 +79,10 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <configuration>
-                    <!-- 进程级演练（@Tag("drill")）默认排除，-Pdrill 时纳入 -->
-                    <excludedGroups>drill</excludedGroups>
+                    <!-- 进程级演练（@Tag("drill")）默认排除，-Pdrill 时纳入；
+                         改道收敛红先夹具（@Tag("w11-repro")，无修复必红=预期）
+                         默认排除，-Pw11-repro 时纳入 -->
+                    <excludedGroups>drill,w11-repro</excludedGroups>
                 </configuration>
                 <executions>
                     <execution>
@@ -106,6 +108,25 @@
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration combine.self="override">
                             <groups>drill</groups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- 改道收敛红先夹具 profile：仅运行 @Tag("w11-repro") 用例。
+             这些用例在无修复时**必红**——红是预期（复现缺口），不是缺陷；
+             取证命令：mvn -s /home/lam/repo/settings.xml -Pw11-repro \
+             -pl openlatch-client verify -->
+        <profile>
+            <id>w11-repro</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration combine.self="override">
+                            <groups>w11-repro</groups>
                         </configuration>
                     </plugin>
                 </plugins>
