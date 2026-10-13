@@ -21,6 +21,7 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -333,6 +334,52 @@ class ClientClusterIT {
                 // 轮次照常走完全链路断言。
                 return;
             }
+        }
+    }
+
+    // ---------- 非 ACQUIRE 车道路由收敛缺口：红先夹具（@Tag("w11-repro")） ----------
+
+    /**
+     * 非 ACQUIRE 车道路由收敛缺口的**确定性红先夹具**（home 驻留非权威节点形态）。
+     *
+     * <p><b>红是预期</b>：缺口未修复时本用例**必须失败**——在册记录见
+     * {@code WATCHLIST.md} 的 W11 行。默认构建经 {@code @Tag("w11-repro")} 排除，
+     * 取证命令：
+     * <pre>{@code
+     * mvn -s /home/lam/repo/settings.xml -Pw11-repro -pl openlatch-client verify
+     * }</pre>
+     * 缺口修复后本用例应**由红转绿**，届时标签与 profile 一并退役。
+     *
+     * <p><b>窗口构造</b>：home 直连当值 Leader 并正常受理（此时无获取车道），
+     * 随后令该节点**存活让位**——连接与会话保留、但已非权威。与既有概率锚
+     * （真杀主 + Leader 漂移）刻意不同：本窗由"让位"**单向构造**，可连续复跑。
+     * 未修复时非 ACQUIRE 请求既无提示可依（车道不存在）、home 又不断连，
+     * 只能耗尽等待预算显式超时。
+     *
+     * <p><b>守卫断言</b>：取值不得是 protobuf 默认实例被读作成功——原子
+     * {@code addAndGet} 的返回值为 0 即属该形态（默认实例的 status 与 value
+     * 皆为 0）。断言只在收敛之后求值：**显式超时是合法终态**（未收敛时用例
+     * 在收敛断言处失败），只有静默错值才是缺陷。
+     */
+    @Test
+    @Tag("w11-repro")
+    void residentNonAuthoritativeHomeConvergesNonAcquireRequests() throws Exception {
+        startCluster(3);
+        NodeRef oldLeader = leader();
+        NodeRef target = nodes.stream().filter(n -> n != oldLeader).findFirst().orElseThrow();
+        try (OpenLatchClient client = clientTo(oldLeader.address())) {
+            client.connectAsync().get(10, TimeUnit.SECONDS);
+            OBlockingQueue q = client.newBlockingQueue("repro-resident-queue", 4);
+            OAtomicLong a = client.newAtomicLong("repro-resident-atomic", 0);
+            q.put("a"); // home 即当值 Leader：直连受理
+            assertThat(a.addAndGet(5)).isEqualTo(5);
+            transferLeadership(target);
+            awaitTrue(() -> target.isLeader() && !oldLeader.isLeader(),
+                    "让位完成（home 降级但仍连通）");
+            q.put("b"); // 未收敛即在此耗尽等待预算抛超时（红）
+            assertThat(q.size()).isEqualTo(2);
+            assertThat(a.addAndGet(5))
+                    .as("换主窗不得静默错值（默认实例读作 OK 的形态）").isEqualTo(10);
         }
     }
 
