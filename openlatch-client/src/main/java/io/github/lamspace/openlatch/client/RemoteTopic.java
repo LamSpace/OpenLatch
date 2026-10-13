@@ -62,6 +62,14 @@ import java.util.Objects;
  * 同信封重发；会话中途更替则放弃并抛（新会话下去重槽失效，盲目重发会
  * 二次扇出）。放弃/超时后效果不确定，应用层重试可能双投（契约声明的
  * 至多一次面）。
+ *
+ * <p><b>应答缺码形护栏</b>：应答信封 {@code type} 回显 {@code TOPIC_OP} 而载荷
+ * oneof 缺 {@code topic_op_response}（码形违例）时 MUST NOT 读 protobuf 默认实例
+ * （{@code status} 零值 {@code OK}、{@code subscription_id}/{@code topic_seq} 为 0）。
+ * 按路径分流：同步 PUBLISH 与 SUBSCRIBE 两条幂等重发车道并入可重试失败（同 id 重发）；
+ * 异步 {@code publishAsync} 无重试车道且至多一次（重发会双扇出），以显式失败收场；
+ * 重挂 {@code rebindAsync} 视作失败放弃本次（留待下一周期/事件），MUST NOT 拆旧绑定或
+ * 错绑默认 {@code subscription_id}。
  */
 final class RemoteTopic implements OTopic {
 
@@ -138,6 +146,14 @@ final class RemoteTopic implements OTopic {
             if (err != null || answer == null) {
                 future.completeExceptionally(unwrap(err == null
                         ? new ServerUnavailableException("topic publish on '" + key + "' lost") : err));
+                return;
+            }
+            if (!answer.hasTopicOpResponse()) {
+                // 缺码形（type 回显 TOPIC_OP 而载荷 oneof 缺该成员）：MUST NOT 读 protobuf
+                // 默认实例（status 零值 OK、topic_seq 为 0）而以 topicSeq=0 假受理。
+                // 异步发布无重试车道且至多一次（重发会双扇出），显式失败收场。
+                future.completeExceptionally(new OpenLatchTimeoutException("topic publish on '"
+                        + key + "' reply malformed (acceptance unknown, not retried)"));
                 return;
             }
             TopicOpResponse resp = answer.getTopicOpResponse();
@@ -232,7 +248,9 @@ final class RemoteTopic implements OTopic {
     /**
      * 同步登记循环（SUBSCRIBE 幂等，会话更替时按新会话重建信封续行）：
      * 总界限内瞬态失败同形态重发；{@code REJECT_SUBSCRIBERS}/形状/版本门
-     * 拒绝即时抛出。
+     * 拒绝即时抛出。应答缺码形（载荷 oneof 缺 {@code topic_op_response}）
+     * MUST NOT 被读作 {@code subscription_id=0} 绑定：按幂等重投以同
+     * {@code request_id} 重发。
      *
      * @return {@code {受理会话 id, subscription_id}}
      * @throws InterruptedException      中断
@@ -266,6 +284,11 @@ final class RemoteTopic implements OTopic {
                 Envelope answer = route.mux().sendWithId(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
+                if (!answer.hasTopicOpResponse()) {
+                    // 缺码形：MUST NOT 读默认实例（status 零值 OK、subscription_id 为 0）
+                    // 而把 subscription_id=0 绑为订阅。登记幂等，同 request_id 重投。
+                    continue;
+                }
                 resp = answer.getTopicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
@@ -296,6 +319,8 @@ final class RemoteTopic implements OTopic {
     /**
      * 发布写循环（在 {@link #publish} 的在途互斥临界区内调用）：信封与会话
      * 绑定；会话中途更替即放弃（去重槽随旧会话失效，续发会二次扇出）。
+     * 应答缺码形（载荷 oneof 缺 {@code topic_op_response}）MUST NOT 被读作
+     * {@code topic_seq=0} 假受理：并入瞬态车道以同 {@code op_seq} 重发。
      *
      * @param opSeq   会话内单调写序号
      * @param payload 消息体
@@ -341,6 +366,11 @@ final class RemoteTopic implements OTopic {
                 Envelope answer = route.mux().sendWithId(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
+                if (!answer.hasTopicOpResponse()) {
+                    // 缺码形：MUST NOT 读默认实例（status 零值 OK、topic_seq 为 0）而静默
+                    // 返回 0 假受理。同信封同 op_seq 重发（去重槽保证不双扇出，判例原子族）。
+                    continue;
+                }
                 resp = answer.getTopicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
@@ -371,7 +401,10 @@ final class RemoteTopic implements OTopic {
     /**
      * 重挂/保活触发的异步重登记（fire-and-forget）：幂等 SUBSCRIBE 经当前
      * 路由发出；成功换绑（旧路由表项除名、基线重置），失败留待下一周期/
-     * 事件。同会话同键的幂等覆盖使本方法可无条件周期调用。
+     * 事件。同会话同键的幂等覆盖使本方法可无条件周期调用。应答缺码形
+     * （载荷 oneof 缺 {@code topic_op_response}）视作失败放弃本次——
+     * MUST NOT 读默认实例（{@code status} 零值 {@code OK}/{@code subscription_id=0}）
+     * 而拆除既有绑定、错绑默认订阅号。
      */
     void rebindAsync() {
         Subscription s = subscription;
@@ -395,6 +428,11 @@ final class RemoteTopic implements OTopic {
             s.rebinding.set(false);
             if (err != null || answer == null || s != subscription) {
                 return; // 失败/被替换：旧绑定保留，下一周期或事件再挂
+            }
+            if (!answer.hasTopicOpResponse()) {
+                // 缺码形：MUST NOT 读默认实例（status 零值 OK、subscription_id 为 0）——
+                // 默认实例会误导本方法拆旧绑定、错绑 subscription_id=0。视作失败放弃本次重挂。
+                return;
             }
             TopicOpResponse resp = answer.getTopicOpResponse();
             if (resp.getStatus() != StatusCode.OK) {

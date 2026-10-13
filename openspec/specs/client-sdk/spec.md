@@ -284,7 +284,7 @@
 
 ### Requirement: OCountDownLatch API
 
-客户端 SHALL 提供 `OCountDownLatch`：`await()` 阻塞至屏障归零（受等待兜底超时约束）、`await(timeout)` 限时等待、`countDown()` 与 `countDown(n)` 扣减计数。`newCountDownLatch(key, count)` 创建的创建者句柄在每次请求携带 `total = count` 断言（首次触达即定型，`countDown(0)` 为纯初始化）；`newCountDownLatch(key)` 纯加入句柄不主张初值，对从未定型的屏障被拒。await 等待者 SHALL NOT 持有任何租约、MUST NOT 产生续租流量；断线重连后 SHALL 自动重发 await（幂等），屏障已归零时立即通过。
+客户端 SHALL 提供 `OCountDownLatch`：`await()` 阻塞至屏障归零（受等待兜底超时约束）、`await(timeout)` 限时等待、`countDown()` 与 `countDown(n)` 扣减计数。`newCountDownLatch(key, count)` 创建的创建者句柄在每次请求携带 `total = count` 断言（首次触达即定型，`countDown(0)` 为纯初始化）；`newCountDownLatch(key)` 纯加入句柄不主张初值，对从未定型的屏障被拒。await 等待者 SHALL NOT 持有任何租约、MUST NOT 产生续租流量；断线重连后 SHALL 自动重发 await（幂等），屏障已归零时立即通过。**应答缺码形 MUST NOT 读作成功/读作放行**：SDK 收到应答信封后 MUST 校验其携带本请求的载荷——`Envelope.type` 回显 `LATCH_AWAIT` 而载荷 oneof 缺 `latch_await_response`（异型/空载荷码形违例）时，`await` MUST NOT 读取 protobuf 默认实例（其 `status` 为枚举零值 `OK`）并据此**假绿返回"已放行"**，MUST 按可重试失败并入等待-通知-重发闭环（以同 `request_id` 重发，判例 `RemotePhaser`/`RemoteTimer`），请求预算内仍不可判定则以显式失败收场（`await(timeout)` 返回 `false`、`await()` 抛兜底超时异常）；`countDown`/`init` 为**至多一次**请求（无 `op_seq` 去重槽），其应答缺 `latch_count_down_response` 时 MUST NOT 读默认实例（`status=OK`/`remaining=0`）静默返回剩余计数，MUST 以显式失败收场且 MUST NOT 自动重发（重发不安全，判例同 `countDown` 至多一次纪律）。
 
 #### Scenario: 跨进程倒计数放行
 
@@ -295,6 +295,16 @@
 
 - **WHEN** 客户端长时间 await（超过一个看门狗周期）
 - **THEN** 该会话不因 await 发出任何 LEASE_RENEW 请求
+
+#### Scenario: 缺码形 await 应答不得假绿放行
+
+- **WHEN** `LATCH_AWAIT` 的应答 `type` 回显 `LATCH_AWAIT` 而载荷 oneof 缺 `latch_await_response`（脚本化服务面注入）
+- **THEN** SDK 不读取默认实例、MUST NOT 断言"已放行"返回 `true`；按可重试失败以同 `request_id` 重发（`countType(LATCH_AWAIT) > 1`），请求预算内仍不可判定则以显式失败收场
+
+#### Scenario: countDown 缺码形不得静默返回剩余计数
+
+- **WHEN** `LATCH_COUNT_DOWN` 的应答缺 `latch_count_down_response` 载荷
+- **THEN** SDK 不读取默认实例、MUST NOT 静默返回 `remaining=0` 伪成功；按显式失败收场且不自动重发（`countType(LATCH_COUNT_DOWN)` 不因本次失败增长）
 
 ### Requirement: 客户端可选监控指标
 
@@ -351,7 +361,7 @@
 
 ### Requirement: OBarrier API
 
-客户端 SHALL 提供循环屏障 `OBarrier` 与工厂 `OpenLatchClient.newBarrier(String key, int parties)`（创建者句柄，每次请求携带 `parties` 非零定型主张）、`newBarrier(String key, int parties, Runnable barrierAction)`（同前并声明该句柄到场合拢时携带动作）与 `newBarrier(String key)`（纯加入句柄，不主张初值，对从未定型的 barrier 被拒）。方法面：`void await() throws InterruptedException`——阻塞至所属世代的了结，受等待兜底超时约束；`boolean await(long timeout, TimeUnit unit) throws InterruptedException`——限时等待，返回是否以 TRIPPED 了结（`false` = 超时，且超时本身即破障，见下）；`void breakBarrier()`；`boolean isBroken()`；`long getParties()`。异常面遵循库内非受检纪律：破障了结抛 `OBrokenBarrierException`（新增公开异常，继承 `OpenLatchException`；替代 JDK 受检 `BrokenBarrierException`，差异 MUST 在契约 Javadoc 声明）、兜底超时抛 `OpenLatchTimeoutException`、JUC 受检 `TimeoutException` 以 `await(timeout)` 返回 `false` 的 boolean 形态承载（JDK 差异声明同上）。等待编排复用等待-通知-重发闭环：`QUEUED` 后挂起等 `AWAIT_NOTIFY`，通知到达以同 `request_id` 重发按世代了结记录幂等了结；执行者形态（应答 `executor=true`）在**本调用栈内**执行 `barrierAction`，完成（正常返回或抛异常）后以 `BARRIER_ACTION_DONE` 终结本等待——动作正常完成 ⇒ 本方 await 正常返回且同世代他方随后放行；动作抛异常 ⇒ SDK 改发 `BARRIER_LEAVE`（离场即破障），本方以该异常终结且同世代全体收 `OBrokenBarrierException`（对齐 JDK"动作异常使屏障破障"）。超时与中断语义：**离场即破障**——`await(timeout)` 超时、`await()` 兜底超时与本地中断均触发客户端 `BARRIER_LEAVE`，当前世代即时 BROKEN，全体在队他方收 `OBrokenBarrierException`（对齐 JDK 超时/中断破障）；且离场为**同步确认**：超时方 `await` 返回前 `BARRIER_LEAVE` 已经服务端生效（"返回即已破"次序——紧随其后的新到场 MUST NOT 落入被本次超时打破的世代；网络故障时降级为尽力而为，由服务端清扫与会话清理兜底）；`breakBarrier()` 以 `await_request_id=0` 的 `BARRIER_LEAVE` 表达，无在队身份亦破当前世代（条目不存在时无操作幂等）。**到场是有副作用的请求**：在途 `BARRIER_AWAIT` 遇传输失败/断连/换会话 MUST NOT 自动重发（至多一次纪律，判例 `countDown`），本方 await 以 `OpenLatchException` 裁决；同时该会话旧世代的等待项由服务端会话清理连带破障，他方以 `OBrokenBarrierException` 感知（相对 JDK"线程死亡静默挂起"的增强 MUST 显式声明）。`isBroken()` 返回句柄本地最近一次所见裁决，MUST NOT 发起网络查询（声明非实时跨进程一致）。等待者 MUST NOT 持有租约、MUST NOT 产生续租流量。
+客户端 SHALL 提供循环屏障 `OBarrier` 与工厂 `OpenLatchClient.newBarrier(String key, int parties)`（创建者句柄，每次请求携带 `parties` 非零定型主张）、`newBarrier(String key, int parties, Runnable barrierAction)`（同前并声明该句柄到场合拢时携带动作）与 `newBarrier(String key)`（纯加入句柄，不主张初值，对从未定型的 barrier 被拒）。方法面：`void await() throws InterruptedException`——阻塞至所属世代的了结，受等待兜底超时约束；`boolean await(long timeout, TimeUnit unit) throws InterruptedException`——限时等待，返回是否以 TRIPPED 了结（`false` = 超时，且超时本身即破障，见下）；`void breakBarrier()`；`boolean isBroken()`；`long getParties()`。异常面遵循库内非受检纪律：破障了结抛 `OBrokenBarrierException`（新增公开异常，继承 `OpenLatchException`；替代 JDK 受检 `BrokenBarrierException`，差异 MUST 在契约 Javadoc 声明）、兜底超时抛 `OpenLatchTimeoutException`、JUC 受检 `TimeoutException` 以 `await(timeout)` 返回 `false` 的 boolean 形态承载（JDK 差异声明同上）。等待编排复用等待-通知-重发闭环：`QUEUED` 后挂起等 `AWAIT_NOTIFY`，通知到达以同 `request_id` 重发按世代了结记录幂等了结；执行者形态（应答 `executor=true`）在**本调用栈内**执行 `barrierAction`，完成（正常返回或抛异常）后以 `BARRIER_ACTION_DONE` 终结本等待——动作正常完成 ⇒ 本方 await 正常返回且同世代他方随后放行；动作抛异常 ⇒ SDK 改发 `BARRIER_LEAVE`（离场即破障），本方以该异常终结且同世代全体收 `OBrokenBarrierException`（对齐 JDK"动作异常使屏障破障"）。超时与中断语义：**离场即破障**——`await(timeout)` 超时、`await()` 兜底超时与本地中断均触发客户端 `BARRIER_LEAVE`，当前世代即时 BROKEN，全体在队他方收 `OBrokenBarrierException`（对齐 JDK 超时/中断破障）；且离场为**同步确认**：超时方 `await` 返回前 `BARRIER_LEAVE` 已经服务端生效（"返回即已破"次序——紧随其后的新到场 MUST NOT 落入被本次超时打破的世代；网络故障时降级为尽力而为，由服务端清扫与会话清理兜底）；`breakBarrier()` 以 `await_request_id=0` 的 `BARRIER_LEAVE` 表达，无在队身份亦破当前世代（条目不存在时无操作幂等）。**到场是有副作用的请求**：在途 `BARRIER_AWAIT` 遇传输失败/断连/换会话 MUST NOT 自动重发（至多一次纪律，判例 `countDown`），本方 await 以 `OpenLatchException` 裁决；同时该会话旧世代的等待项由服务端会话清理连带破障，他方以 `OBrokenBarrierException` 感知（相对 JDK"线程死亡静默挂起"的增强 MUST 显式声明）。`isBroken()` 返回句柄本地最近一次所见裁决，MUST NOT 发起网络查询（声明非实时跨进程一致）。等待者 MUST NOT 持有租约、MUST NOT 产生续租流量。**应答缺码形 MUST NOT 读作成功/读作放行**：SDK 收到应答信封后 MUST 校验其携带本请求的载荷——`Envelope.type` 回显而载荷 oneof 缺 `barrier_await_response`/`barrier_action_done_response`/`barrier_leave_response`（异型/空载荷码形违例）时 MUST NOT 读取 protobuf 默认实例（其 `status` 为枚举零值 `OK`）并据此裁决。等待路径（`BARRIER_AWAIT`）缺码形 MUST 并入等待-通知-重发闭环：**同会话**以同 `request_id` 重发，会话已换则走既有"到场不跨会话重放"裁决（抛 `OpenLatchException`），MUST NOT 假绿断言世代已合拢；执行者收尾路径（`BARRIER_ACTION_DONE`）缺码形按 `(会话, 世代)` 幂等重发（判例同其既有重发车道）；`breakBarrier` 与离场确认（`leaveAndAwait`）缺码形 MUST NOT 被读作 `OK`/确认成立——`breakBarrier` MUST 抛显式异常，离场确认 MUST 以"不确定"（`false`）收场，MUST NOT 据此虚报破障已生效（破坏"返回即已破"次序）或使 `isBroken()`/`getParties()` 读作默认实例。
 
 #### Scenario: 三方合拢与世代复用
 
@@ -392,6 +402,21 @@
 
 - **WHEN** 在途 `BARRIER_AWAIT` 遭遇连接闪断致会话切换
 - **THEN** SDK 不以新会话自动重放该到场，本方 await 抛 `OpenLatchException`；旧会话在旧世代的在队项由服务端清理连带破障
+
+#### Scenario: 缺码形 await 应答不得假绿放行
+
+- **WHEN** `BARRIER_AWAIT` 的应答 `type` 回显而载荷 oneof 缺 `barrier_await_response`（脚本化服务面注入）
+- **THEN** SDK 不读取默认实例、MUST NOT 断言世代已合拢返回 `true`；同会话以同 `request_id` 重发，请求预算内仍不可判定则以显式失败收场（超时口径），MUST NOT 误判 `generation`/`parties` 为默认值
+
+#### Scenario: action-done 缺码形按世代幂等重发
+
+- **WHEN** `BARRIER_ACTION_DONE` 的应答缺 `barrier_action_done_response` 载荷
+- **THEN** SDK 不读取默认实例；按 `(会话, 世代)` 幂等以同 id 重发，预算内不可判定则抛 `OpenLatchTimeoutException`，MUST NOT 静默断言动作已了结
+
+#### Scenario: breakBarrier 与离场确认缺码形不得读作确认
+
+- **WHEN** `BARRIER_LEAVE`（`breakBarrier` 直发或超时/中断离场确认）的应答缺 `barrier_leave_response` 载荷
+- **THEN** SDK 不读取默认实例、MUST NOT 断言离场已生效；`breakBarrier` 抛显式异常，离场确认按"不确定"（`false`）收场，`isBroken()` 不得据此虚报
 
 ### Requirement: OAtomicReference API
 
@@ -488,7 +513,7 @@
 - **服务端权威钳制**：`maxValueBytes`/`max-subscribers-per-key`/`max-subscription-buffer` 由服务端入口裁决，超限/上限拒绝以对应状态码同型送达（`INVALID_REQUEST`/`REJECT_SUBSCRIBERS`）；订阅存在有常驻登记表与缓冲成本。
 - **版本门**：需 v8 握手（客户端三处常量升 8）；对 v7 服务端连接按既有区间外握手拒绝纪律失败——升级序先服务端后客户端（判例 v3–v7）。
 
-`newTopic` 对同 key 可多实例；同会话同键服务端唯一登记，SDK 层后到 SUBSCRIBE 覆盖在前句柄的交付路由时 MUST 在句柄 `isActive()` 与回调行为上如实呈现覆盖语义（不静默双路由）。
+`newTopic` 对同 key 可多实例；同会话同键服务端唯一登记，SDK 层后到 SUBSCRIBE 覆盖在前句柄的交付路由时 MUST 在句柄 `isActive()` 与回调行为上如实呈现覆盖语义（不静默双路由）。**应答缺码形 MUST NOT 读作成功**：SDK 收到应答信封后 MUST 校验其携带 `topic_op_response` 载荷——`Envelope.type` 回显 `TOPIC_OP` 而载荷 oneof 缺该成员（异型/空载荷码形违例）时 MUST NOT 读取 protobuf 默认实例（其 `status` 为枚举零值 `OK`、`subscription_id`/`topic_seq` 为 0）并据此裁决；处置按路径性质分流——同步 PUBLISH 与 SUBSCRIBE 两条**幂等重发车道**（`executePublish` 同 `op_seq` 去重槽、`executeSubscribe` 幂等登记）MUST 按可重试失败以同信封同 `request_id` 重发至请求预算界限，MUST NOT 静默返回 `topic_seq=0` 或绑定 `subscription_id=0`；异步 `publishAsync` **无重试车道且不可重发**（至多一次发布，重发会双扇出）MUST 以显式失败收场（`future` 异常完成），MUST NOT 以 `topicSeq=0` 假受理；重挂路径（`rebindAsync`）缺码形 MUST 视作失败放弃本次重挂（留待下一周期/事件），MUST NOT 拆除既有绑定或错绑默认 `subscription_id`。
 
 #### Scenario: 发布-订阅闭环
 
@@ -514,6 +539,26 @@
 
 - **WHEN** PUBLISH 应答在途丢失，SDK 以同 `op_seq` 自动重发（未换主）
 - **THEN** 订阅者各收到一份该消息（去重槽命中重放回执，无第二份）
+
+#### Scenario: 缺码形同步发布应答不得读作受理
+
+- **WHEN** 同步 `publish` 的 `TOPIC_OP` 应答 `type` 回显而载荷 oneof 缺 `topic_op_response`（脚本化服务面注入）
+- **THEN** SDK 不读取默认实例、MUST NOT 返回 `topic_seq=0` 假受理；按可重试失败以同 `op_seq` 重发（`countType(TOPIC_OP) > 1`），预算内仍不可判定则以显式异常收场
+
+#### Scenario: 缺码形异步发布应答不得假受理
+
+- **WHEN** `publishAsync` 的应答缺 `topic_op_response` 载荷
+- **THEN** `future` 以显式异常完成、MUST NOT 以 `topicSeq=0` 正常完成；且因至多一次发布不可重发，MUST NOT 自动重发（`countType(TOPIC_OP)` 不因本次失败增长）
+
+#### Scenario: 缺码形订阅应答不得读作登记
+
+- **WHEN** `SUBSCRIBE` 的应答缺 `topic_op_response` 载荷
+- **THEN** SDK 不读取默认实例、MUST NOT 绑定 `subscription_id=0` 为订阅；按幂等重投以同 `request_id` 重发（`countType(TOPIC_OP) > 1`），预算内仍不可判定则以显式异常收场
+
+#### Scenario: 缺码形重挂应答不得错绑
+
+- **WHEN** `rebindAsync` 触发的 `SUBSCRIBE` 应答缺 `topic_op_response` 载荷
+- **THEN** 本次重挂按失败放弃（留待下一周期/事件），MUST NOT 拆除既有绑定、MUST NOT 以默认 `subscription_id=0` 覆盖句柄绑定
 
 ### Requirement: OCondition API
 

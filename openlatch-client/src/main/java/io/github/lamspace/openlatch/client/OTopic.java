@@ -78,6 +78,13 @@ package io.github.lamspace.openlatch.client;
  * <p><b>版本门</b>：需协议 v8（服务端与客户端双端升级，升级序先服务端后
  * 客户端，判例 v3–v7）；v≤7 会话发送 topic 消息被消息级拒绝。
  *
+ * <p><b>应答缺码形护栏</b>：应答载荷 oneof 缺失本请求的应答成员
+ * （{@code topic_op_response} 缺席，码形违例）时 MUST NOT 被读作"成功"——
+ * 不静默返回 {@code topic_seq=0} 假受理、不把 {@code subscription_id=0} 绑为订阅、
+ * 不拆旧绑定错绑默认订阅号。同步 {@code publish} 与 {@code subscribe} 按可重试
+ * 失败在同车道以同 request id 重发；异步 {@code publishAsync} 因至多一次
+ * 不可安全重发（重发会双扇出），以显式失败收场。
+ *
  * @see OTopicSubscription
  * @see OpenLatchClient#newTopic(String)
  */

@@ -44,6 +44,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 抛错零重发、{@code TOPIC_MESSAGE} 推送经 (会话, 路由键) 命中句柄串行交付、
  * 同任期 seq gap 计入 {@code droppedCount()}、退订后停止交付与幂等。
  * 异型/空载荷拒绝不得读作成功（W10 码形纪律在客户端侧的对偶断言）。
+ *
+ * <p><b>缺码形面</b>：`type` 回显 `TOPIC_OP` 而载荷 oneof **缺** `topic_op_response`
+ * 的码形违例——同步发布同 `op_seq` 重发、异步发布显式失败不重发、订阅不绑
+ * `subscription_id=0` 而幂等重投、重挂不拆旧绑定（四条读点路径分流）。
  */
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class RemoteTopicScriptedTest {
@@ -225,6 +229,119 @@ class RemoteTopicScriptedTest {
                         .isEqualTo(StatusCode.REJECT_SUBSCRIBERS);
                 // 不可重试拒绝：恰一请求帧、零重发。
                 assertThat(seen).hasSize(1);
+            }
+        }
+    }
+
+    /**
+     * 缺码形同步 PUBLISH 应答（`type` 回显 `TOPIC_OP` 而载荷 oneof 缺
+     * `topic_op_response`）：MUST NOT 被读作默认实例（`status=OK`/`topic_seq=0`）
+     * 假受理；按同 `op_seq` 重发，预算内不可判定以显式异常收场。
+     */
+    @Test
+    void malformedSyncPublishReplyIsNotReadAsAccepted() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? hello(req) : req.toBuilder().setType(MessageType.TOPIC_OP).build())) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OTopic topic = client.newTopic("t");
+                assertThatThrownBy(() -> topic.publish("x".getBytes(StandardCharsets.UTF_8)))
+                        .as("缺码形 MUST NOT 被读作受理（topic_seq=0）")
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+            }
+            assertThat(server.countType(MessageType.TOPIC_OP))
+                    .as("缺码形应在同步发布车道以同 op_seq 重发").isGreaterThan(1);
+        }
+    }
+
+    /**
+     * 缺码形 {@code publishAsync} 应答：MUST NOT 以 `topicSeq=0` 正常完成；
+     * 因至多一次发布不可安全重发，`future` 以显式异常完成且零重发。
+     */
+    @Test
+    void malformedAsyncPublishReplyIsNotReadAsAccepted() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? hello(req) : req.toBuilder().setType(MessageType.TOPIC_OP).build())) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OTopic topic = client.newTopic("t");
+                assertThatThrownBy(() -> topic.publishAsync("x".getBytes(StandardCharsets.UTF_8))
+                        .get(5, TimeUnit.SECONDS))
+                        .as("缺码形 MUST NOT 以 topicSeq=0 正常完成")
+                        .hasCauseInstanceOf(OpenLatchTimeoutException.class);
+            }
+            assertThat(server.countType(MessageType.TOPIC_OP))
+                    .as("至多一次发布 MUST NOT 因缺码形重发（重发会双扇出）").isEqualTo(1);
+        }
+    }
+
+    /**
+     * 缺码形 SUBSCRIBE 应答：MUST NOT 被读作默认实例（`subscription_id=0`）
+     * 绑定为订阅；按幂等重投以同 `request_id` 重发，预算内不可判定以显式异常收场。
+     */
+    @Test
+    void malformedSubscribeReplyIsNotReadAsRegistered() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> req.getType() == MessageType.HELLO
+                ? hello(req) : req.toBuilder().setType(MessageType.TOPIC_OP).build())) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OTopic topic = client.newTopic("t");
+                assertThatThrownBy(() -> topic.subscribe(m -> { }))
+                        .as("缺码形 MUST NOT 绑定 subscription_id=0 为订阅")
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+            }
+            assertThat(server.countType(MessageType.TOPIC_OP))
+                    .as("缺码形应在订阅车道以同 request_id 重投").isGreaterThan(1);
+        }
+    }
+
+    /**
+     * 缺码形重挂（{@code rebindAsync}）应答：MUST NOT 拆旧绑定、错绑默认
+     * `subscription_id`；既有绑定保持，推送仍按原 subId 命中句柄。
+     */
+    @Test
+    void malformedRebindReplyDoesNotDetachExistingSubscription() throws Exception {
+        List<OTopicMessage> received = new CopyOnWriteArrayList<>();
+        java.util.concurrent.atomic.AtomicBoolean malformed =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        try (ScriptedServer server = new ScriptedServer(req -> {
+            if (req.getType() == MessageType.HELLO) {
+                return hello(req);
+            }
+            if (malformed.get()) {
+                return req.toBuilder().setType(MessageType.TOPIC_OP).build();
+            }
+            return topicResp(req, StatusCode.OK, 7L, 0);
+        })) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                RemoteTopic topic = (RemoteTopic) client.newTopic("t");
+                OTopicSubscription sub = topic.subscribe(received::add);
+                assertThat(sub.isActive()).isTrue();
+                int before = server.countType(MessageType.TOPIC_OP);
+                // 切换到缺码形应答，触发重挂。
+                malformed.set(true);
+                topic.rebindAsync();
+                awaitUntil(() -> server.countType(MessageType.TOPIC_OP) > before, 2_000);
+                Thread.sleep(200); // 让缺码形应答处理完毕
+                // 既有绑定未被拆除：推送到原 subId 仍命中句柄。
+                server.push(push(7L, 1, "still-routed"));
+                awaitUntil(() -> received.size() == 1, 2_000);
+                assertThat(received.get(0).payload())
+                        .isEqualTo("still-routed".getBytes(StandardCharsets.UTF_8));
+                assertThat(sub.isActive()).isTrue();
             }
         }
     }

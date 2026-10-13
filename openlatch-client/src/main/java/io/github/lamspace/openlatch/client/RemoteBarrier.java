@@ -45,6 +45,15 @@ import java.util.concurrent.TimeoutException;
  *
  * <p><b>无租约</b>：等待者不登记持锁簿记、不启动看门狗——await 全程零
  * {@code LEASE_RENEW} 流量（服务端 awaiter 断连即摘除并连带破障）。
+ *
+ * <p><b>应答缺码形护栏</b>：应答信封 {@code type} 回显而载荷 oneof 缺
+ * {@code barrier_await_response}/{@code barrier_action_done_response}/
+ * {@code barrier_leave_response}（码形违例）时 MUST NOT 读 protobuf 默认实例——其
+ * {@code status} 为枚举零值 {@code OK}，据此裁决会让 {@code await} 假绿返回"世代已合拢"、
+ * {@code breakBarrier} 静默空成功、离场确认虚报生效（破坏"返回即已破"次序）。分流：
+ * {@code BARRIER_AWAIT} 同会话以同 {@code requestId} 重发（跨会话走既有"到场不跨会话重放"
+ * 裁决）；{@code BARRIER_ACTION_DONE} 按 {@code (会话, 世代)} 幂等重发；{@code breakBarrier}
+ * 抛显式异常、离场确认以"不确定"（{@code false}）收场。
  */
 final class RemoteBarrier implements OBarrier {
 
@@ -111,6 +120,13 @@ final class RemoteBarrier implements OBarrier {
             Envelope resp = route.mux().sendWithId(env, client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                             TimeUnit.MILLISECONDS);
+            if (!resp.hasBarrierLeaveResponse()) {
+                // 缺码形（载荷 oneof 缺 barrier_leave_response）：MUST NOT 读 protobuf
+                // 默认实例（status 零值 OK）而静默空成功——离场未生效却被读作已破障。
+                // 结果不确定（离场幂等，但本路径无重发循环），显式收场。
+                throw new OpenLatchTimeoutException("breakBarrier of barrier '" + key
+                        + "' reply malformed (result unknown)");
+            }
             StatusCode status = resp.getBarrierLeaveResponse().getStatus();
             if (status != StatusCode.OK) {
                 throw new OpenLatchException(status,
@@ -146,6 +162,11 @@ final class RemoteBarrier implements OBarrier {
 
     /**
      * 等待公共路径：到场-通知-重发闭环 + 执行者两阶段。
+     *
+     * <p>缺码形应答（载荷 oneof 缺 {@code barrier_await_response}）MUST NOT 被读作默认
+     * 实例（{@code status=OK}）而假绿放行：同会话以同 {@code requestId} 重发；会话已换则
+     * 走"到场不跨会话重放"裁决（抛 {@link OpenLatchException}），MUST NOT 借道重建信封把
+     * 到场重放到新会话。
      *
      * @param budgetMs 等待总预算（毫秒）
      * @return 世代合拢放行 {@code true}；预算耗尽（已连带破障）{@code false}
@@ -191,6 +212,20 @@ final class RemoteBarrier implements OBarrier {
                     long waitMs = Math.min(remaining,
                             client.config().requestTimeout().toMillis() + SLACK_MS);
                     Envelope resp = response.get(waitMs, TimeUnit.MILLISECONDS);
+                    if (!resp.hasBarrierAwaitResponse()) {
+                        // 缺码形（type 回显 BARRIER_AWAIT 而载荷 oneof 缺该成员）：MUST NOT
+                        // 读 protobuf 默认实例（status 零值 OK）而假绿返回"世代已合拢"。
+                        // 同会话以同 request_id 重发（判例 W10）；会话已换则走既有"到场不跨
+                        // 会话重放"裁决——MUST NOT 借道重建 env 把到场静默重放到新会话。
+                        registry.remove(envSession, rid);
+                        OpenLatchClient.LatchRoute now = client.latchRoute();
+                        if (now != null && now.session().sessionId() == envSession) {
+                            route = now;
+                            continue;
+                        }
+                        throw new OpenLatchException("await of barrier '" + key
+                                + "' abandoned on session change (malformed await reply)");
+                    }
                     status = resp.getBarrierAwaitResponse().getStatus();
                     executor = resp.getBarrierAwaitResponse().getExecutor();
                     generation = resp.getBarrierAwaitResponse().getGeneration();
@@ -279,7 +314,9 @@ final class RemoteBarrier implements OBarrier {
     /**
      * 执行者路径：本调用栈内执行动作→回报 {@code BARRIER_ACTION_DONE}。
      * 动作异常时改发纯破障离场（全体以破障收场，对齐 JDK 动作异常破障），
-     * 随后以动作异常终结本等待。
+     * 随后以动作异常终结本等待。回报应答缺码形（缺
+     * {@code barrier_action_done_response}）MUST NOT 被读作 {@code OK} 静默了结：
+     * 世代了结按 {@code (会话, 世代)} 幂等，以同 id 重发至等待界限。
      *
      * @param route      当前路由
      * @param generation 被指定的世代号
@@ -325,6 +362,17 @@ final class RemoteBarrier implements OBarrier {
                         .get(Math.max(1, Math.min(remaining,
                                 client.config().requestTimeout().toMillis())) + SLACK_MS,
                                 TimeUnit.MILLISECONDS);
+                if (!resp.hasBarrierActionDoneResponse()) {
+                    // 缺码形（载荷 oneof 缺 barrier_action_done_response）：MUST NOT 读
+                    // protobuf 默认实例（status 零值 OK）静默断言动作已了结。世代了结按
+                    // (会话, 世代) 幂等，以同 id 重发；预算耗尽则以显式超时收场（服务端
+                    // 秒回异型应答时不得空转——重发路径自带预算闸，不依赖发送超时兜底）。
+                    if (deadline - System.currentTimeMillis() <= 0) {
+                        throw new OpenLatchTimeoutException("action-done of barrier '" + key
+                                + "' timed out (result unknown; malformed reply)");
+                    }
+                    continue;
+                }
                 status = resp.getBarrierActionDoneResponse().getStatus();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
@@ -370,7 +418,8 @@ final class RemoteBarrier implements OBarrier {
      * "返回即已破"的次序是 JDK 对齐契约的一部分，保证紧随其后的新到场
      * MUST NOT 滑入一个已被本方离场打破的世代。网络失败/读界超时则降级
      * 为尽力而为（返回 {@code false}）：破障结果不确定，由服务端已通知
-     * 清扫与会话清理兜底，本方收场不变。
+     * 清扫与会话清理兜底，本方收场不变。应答缺码形（缺 {@code barrier_leave_response}）
+     * 同按"不确定"收场——MUST NOT 读默认实例（{@code status=OK}）虚报确认成立。
      *
      * @param route     当前路由
      * @param awaitRid  被摘除的到场请求 id（0=纯破障主张）
@@ -384,6 +433,11 @@ final class RemoteBarrier implements OBarrier {
                             client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                             TimeUnit.MILLISECONDS);
+            if (!resp.hasBarrierLeaveResponse()) {
+                // 缺码形：MUST NOT 读 protobuf 默认实例（status 零值 OK）虚报确认成立，
+                // 否则破坏"返回即已破"次序契约。按"不确定"收场（同网络失败降级出口）。
+                return false;
+            }
             return resp.getBarrierLeaveResponse().getStatus() == StatusCode.OK;
         } catch (InterruptedException e) {
             // 中断位恢复后按"结果不确定"收场：登记可能未达，服务端兜底。

@@ -23,6 +23,8 @@
 
 > **疑似"原子操作静默错值"**（如 `addAndGet` 返回 0、`OAtomicReference` 交付默认值）：原子族对**应答缺码形**（应答载荷 oneof 缺 `atomic_op_response`）现按**可重试失败**处置——以同 `op_seq` 重发、MUST NOT 读 protobuf 默认实例（其 `status` 零值即 `OK`），故**不会再静默返回错值**；请求预算内仍不可判定则以 `OpenLatchTimeoutException` 显式收场。复核手段：`getStamped()` 读服务端权威 `(value, version)`。
 
+> **疑似"latch/barrier `await` 假绿返回"**（服务端从未归零/合拢，`await` 却返回 `true`）、"`breakBarrier` 空成功"或"`countDown` 返回错剩余计数"：等待族（倒计数屏障、循环屏障）对**应答缺码形**（应答载荷 oneof 缺 `latch_await_response`/`latch_count_down_response`/`barrier_await_response`/`barrier_leave_response`）现按**缺码形护栏**处置——MUST NOT 读 protobuf 默认实例（其 `status` 零值即 `OK`）。`await` 同会话以同请求 id 重发、预算耗尽以 `false`/兜底超时收场；`countDown`/`breakBarrier` 因至多一次不可安全重发，以 `OpenLatchTimeoutException` 显式收场。复核手段：对照服务端读数与会话日志，确认等待是否真的被放行/破障。
+
 ## 2. 故障转移行为基线（实测数据）
 
 进程级演练在参考硬件（3 节点同机）上的量级，供告警阈值校准：
@@ -123,7 +125,12 @@ mvn -pl openlatch-server verify -Pdrill        # 停摆采样（仪器类）
   任期边界；消费侧幂等是契约义务（按业务键去重），不是服务端缺陷；
 - **topic 在 Follower 上的管理读数**：订阅登记为 Leader 本地态——Follower 的
   SUMMARY `topic_entries` 恒 0、LIST_KEYS 无 topic 行、KEY_DETAIL 明确未命中，
-  属如实呈现而非数据缺失。
+  属如实呈现而非数据缺失；
+- **疑似"发布报受理却无交付 / 订阅后完全不收"**：核对是否**应答缺码形**（应答载荷
+  oneof 缺 `topic_op_response`）被误读——该族现按缺码形护栏处置：同步 `publish`/
+  `subscribe` 以同 request id 重发，异步 `publishAsync` 显式失败（不以 `topicSeq=0`
+  假受理），重挂放弃本次（不拆旧绑定）。正常服务端恒填该载荷，命中即服务端/线路异常，
+  核查服务端版本与中间件。
 
 ## 条件（v9）排查速查
 

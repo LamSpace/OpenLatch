@@ -36,6 +36,12 @@ import java.util.concurrent.TimeUnit;
  * await 则全程幂等：通知驱动的同 id 重发与断线重连后的自动重发在
  * 服务端按 {@code (会话, 请求)} 去重。
  *
+ * <p><b>应答缺码形护栏</b>：应答载荷 oneof 缺失本请求的应答成员（码形违例）时
+ * MUST NOT 被读作"成功"——{@code await} 不假绿返回"已放行"、{@code countDown}
+ * 不静默返回剩余计数。{@code await} 按可重试失败在同等待车道以同 id 重发，
+ * 预算内不可判定以 {@code false}/兜底超时收场；{@code countDown}/{@code init}
+ * 因至多一次投递不可安全重发，以 {@link OpenLatchTimeoutException} 显式收场。
+ *
  * <p><b>实例化</b>：{@link OpenLatchClient#newCountDownLatch(String, long)}
  * （创建者/断言句柄）与 {@link OpenLatchClient#newCountDownLatch(String)}
  * （纯加入句柄）。句柄无状态，同一 key 可多实例并存。
