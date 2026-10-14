@@ -471,10 +471,10 @@
 - **THEN** B 读到 A 写入后的值与推进后的版本戳，无任何回滚
 
 ### Requirement: OBlockingQueue API
-
 客户端 SHALL 提供 `OpenLatchClient.newBlockingQueue(String key, long capacity)` 与 `newDelayQueue(String key, long capacity)` 工厂（capacity ≤0 MUST 本地快速拒绝 `IllegalArgumentException`——协调面无无界队列；容量作为定型主张随每次写携带，首次 PUT 完成条目定型），返回公开接口 `OBlockingQueue`（延时工厂返回其子接口 `ODelayQueue`）。`byte[]` 为主元素形态、`String` 便利形态按 UTF-8 编解码且两形态语义逐项等价。`OBlockingQueue` 接口面：`void put(byte[] e)`/`put(String e)`（阻塞至有容量，可中断）、`boolean offer(byte[] e)`（立即式，满回 false）、`boolean offer(byte[] e, long timeout, TimeUnit unit)`（挂起式带客户端本地超时，判例 `wait_ms > 0` 客户端计时）、`byte[] take()`/`String takeAsString()`（阻塞至有可消费元素，可中断）、`byte[] poll()`（立即式，无回 null）、`byte[] poll(long timeout, TimeUnit unit)`（本地超时）、`int drainTo(Collection<? super byte[]> out)` / `int drainTo(Collection<? super byte[]> out, int maxElements)`（返回实际摘取数）、`byte[] peek()`（队首读数，空/未到期回 null）、`int size()`（驻留元素数，延时形态含未到期项）、`int remainingCapacity()`（`capacity − size`，一次 RTT）、`long capacity()`（定型回显）。`ODelayQueue` 追加 `boolean offerDelayed(byte[] e, long delay, TimeUnit unit)` / `offerDelayed(String e, …)`（延时注入——**不照抄 JDK `DelayQueue.offer(e, timeout, unit)` 签名**：该形态在 JDK 表"延迟后才可见"，与本地超时语义同形异义，显式改名以消除混读；契约 Javadoc MUST 声明该差异）。全部同步阻塞方法 SHALL 声明 `throws InterruptedException`，失败以非受检 `OpenLatchException`/`OpenLatchTimeoutException` 表达；服务端以 `INVALID_REQUEST` 拒绝（超限/形状/低版本/容量断言冲突）时 SDK MUST 抛显式异常并透传拒绝语义，MUST NOT 静默截断、本地改写参数或以同序号重发。阻塞 put/take 走等待-通知-重发闭环：`QUEUED` → 挂起 → `AWAIT_NOTIFY` → 同 `requestId` 重发 → `DENIED`（应用点竞态回弹）继续挂起 → `OK` 终态；重发超时纪律沿用既有等待车道裁决。写操作 MUST 以**同一 `op_seq`** 在可重试失败（`NOT_LEADER`、断连快速失败、超时）时自动重发至请求总超时界限（继承 `RemoteAtomicBase` 同 key 在途写互斥纪律，服务端每会话去重槽保证 PUT 不双插、TAKE 重放交付同一份字节）；界限内不可判定抛 `OpenLatchTimeoutException` 并声明效果不确定窗。队列操作 MUST NOT 依赖看门狗/租约/`LockLost` 通知。队列 MUST 以 v7 握手使用（SDK 握手版本声明升至 7）；对握版本上限 <7 的服务端，`QUEUE_OP` 收到 `INVALID_REQUEST` 时 SDK MUST 以显式异常表达协议不支持，MUST NOT 重发。元素为不透明字节：SDK 与服务端 MUST NOT 解释或反序列化。契约 Javadoc MUST 显式声明降级/增强/差异清单：每操作一次网络往返（`drainTo` 一次摘多）、超时不确定窗口（幂等由槽兜底但可重试窗内结果延迟）、元素绑定 key 不绑定会话——**投递者进程死亡不吞元素**（强于/异于 JDK 同进程堆消散语义）、`DELAY_QUEUE` 同到期时刻 FIFO（增强，JDK 不承诺）、未到期元素对 `PEEK/TAKE` 不可见但计入 `SIZE`、无 `iterator/contains/remove(Object)/spliterator` 面、元素不可为 null（与 `OAtomicReference` 的 null 语义刻意不同）、容量服务端上限权威钳制、条目常驻不回收（驻留成本与清理为消费/运维职责）、延时到点唤醒精度为服务端 tick 级。
-
 应答形态裁决（MUST）：队列车道收到应答信封后 MUST 校验其携带 `queue_op_response` 载荷——`Envelope.type` 回显 `QUEUE_OP` 但载荷 oneof 缺该成员（异型/空载荷码形违例，如未含 `QUEUE_OP` 分支的拒绝组装路径产物）MUST 按瞬态失败裁决（与 `NOT_LEADER`/断连同车道：退避、重取路由、重发），MUST NOT 读取 protobuf 默认实例并据此裁决（默认实例 `status` 为枚举零值 `OK`，会被误判为"成功空应答"致 `take` 交付零长度元素、`size` 读回 0）。`TAKE` 终态收到 `OK` 而应答缺 `element_bytes` presence 属协议违例（交付契约要求 OK-TAKE 必携元素，显式 presence 使"零长度空串元素"与"缺省"可辨），MUST 以显式 `OpenLatchException` 抛出、MUST NOT 交付 `byte[0]`；`PEEK`/`SIZE` 的 OK-缺省载荷为合法空读数形态，不受本条约束。
+
+跨会话续发的单调不确定闩（MUST）：同一逻辑写操作内，**只要曾有一次尝试的效果可能已生效**（应答丢失/超时、传输失败，或已被服务端受理/入队），后续判据 MUST NOT 因再出现的明确零生效拒绝（`NOT_LEADER`、缺码形）而放行**跨会话续发**——服务端去重槽按 `(会话, op_seq)` 记账，换会话即槽不中，续发等同新写、可重复生效。此状态下跨会话 MUST 以显式失败收场（`SESSION_EXPIRED`/超时），**同会话重发不受影响**（槽照旧兜底）。反之，若本操作**从未**有过可能已生效的尝试，首发即获明确零生效拒绝时 SDK 仍 SHOULD 透明改道、在新会话以同 `op_seq` 续发（既有承诺不变）。即该判据是**单调**的——它一经置位，只能因"本操作从未有过可能已生效的尝试"而不成立，MUST NOT 被后续的明确拒绝洗白。
 
 #### Scenario: 生产消费 FIFO 闭环
 
@@ -520,6 +520,16 @@
 
 - **WHEN** 队列车道收到 `Envelope.type = QUEUE_OP`、`request_id` 匹配、但载荷为异型（如仅 `acquire_response`）或空载荷的应答（脚本化服务面注入）
 - **THEN** 车道按瞬态失败重取路由重发（不交付元素、不上报读数），至请求时限耗尽以 `OpenLatchTimeoutException`/会话族异常失败；`TAKE` 的真 `OK` 且缺 `element_bytes` 注入形态以显式协议违例异常失败、MUST NOT 交付 `byte[0]`
+
+#### Scenario: 不确定窗后不得借新会话续发
+
+- **WHEN** 同一逻辑写首发落入 Leader 切换窗且应答丢失（读界超时，效果不确定窗），随后同会话重发收到 `NOT_LEADER`/缺码形（脚本化服务面注入），此后路由指向新会话
+- **THEN** SDK MUST 以"本操作曾进入不确定窗"优先于最近一次的明确拒绝，MUST 以显式失败收场（`SESSION_EXPIRED`/超时），MUST NOT 在新会话上重发该写（队列元素至多出现一次）
+
+#### Scenario: 首发即明确拒绝时透明改道不变
+
+- **WHEN** 同一逻辑写**首发即收** `NOT_LEADER`（本操作从未进入不确定窗），路由随后指向新当值 Leader
+- **THEN** SDK 允许在新会话以同 `op_seq` 续发，元素恰出现一次（既有"换主窗口写重发不双插不偷吃"判例逐项不变）
 
 ### Requirement: OTopic API
 
