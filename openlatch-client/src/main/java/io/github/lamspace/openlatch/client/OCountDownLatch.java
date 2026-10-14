@@ -36,6 +36,13 @@ import java.util.concurrent.TimeUnit;
  * await 则全程幂等：通知驱动的同 id 重发与断线重连后的自动重发在
  * 服务端按 {@code (会话, 请求)} 去重。
  *
+ * <p><b>{@code NOT_LEADER} 应答状态的零生效重道</b>：收到该应答状态（服务端已
+ * 答复、本次登记<b>从未被受理</b>）时，客户端摘除登记、触发一次共享路由刷新，
+ * 并在独立短预算（= 2 个路由刷新周期）内等待路由改道；仅当路由<b>会话确已变化</b>
+ * 时才以新会话重发续等。预算耗尽或路由始终未变则以 {@code NOT_LEADER} 显式失败
+ * ——既不假绿返回"已放行"，也不悬挂至调用方的等待总预算。传输失败/读界超时/
+ * 应答缺码形等<b>结果不可判定</b>的形态不适用本条（维持既有换会话纪律）。
+ *
  * <p><b>应答缺码形护栏</b>：应答载荷 oneof 缺失本请求的应答成员（码形违例）时
  * MUST NOT 被读作"成功"——{@code await} 不假绿返回"已放行"、{@code countDown}
  * 不静默返回剩余计数。{@code await} 按可重试失败在同等待车道以同 id 重发，
@@ -62,7 +69,8 @@ public interface OCountDownLatch {
      * @throws InterruptedException          等待被中断
      * @throws LockAcquisitionTimeoutException 兜底超时仍未归零
      * @throws OpenLatchException            屏障不存在（纯加入）/ 定型不符 /
-     *                                       队列满等被服务端显式拒绝
+     *                                       队列满等被服务端显式拒绝，
+     *                                       或无当值 Leader 致重道预算耗尽的 {@code NOT_LEADER}
      */
     void await() throws InterruptedException;
 
@@ -73,6 +81,8 @@ public interface OCountDownLatch {
      * @param unit    时长单位
      * @return 归零放行返回 {@code true}；到时未归零返回 {@code false}
      * @throws InterruptedException     等待被中断
+     * @throws OpenLatchException       服务端显式拒绝（含无当值 Leader 致重道预算
+     *                                 耗尽的 {@code NOT_LEADER}）
      * @throws IllegalArgumentException {@code timeout < 0}
      */
     boolean await(long timeout, TimeUnit unit) throws InterruptedException;

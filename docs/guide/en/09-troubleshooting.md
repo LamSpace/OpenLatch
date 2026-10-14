@@ -70,8 +70,15 @@ Work the list in order:
    requests. **In-flight requests do not reroute because of that refresh** — they re-take the route only
    when they themselves observe it unusable (explicit zero-effect rejection, connection loss); a write
    that entered an uncertain window therefore ends in an explicit failure (a legal terminal state —
-   verify with `size()`/`getStamped()`). If timeouts persist past this item, no leader was available
-   throughout — go back to 1–4.
+   verify with `size()`/`getStamped()`). The wait primitives (latch/barrier) add one further layer on
+   top — a **bounded reroute**: when their `await` receives a `NOT_LEADER` **response status** (the
+   reply itself proves that this registration/arrival was **never accepted**), the client drops the
+   local registration, triggers that same shared refresh, and waits up to an **independent 2s budget**
+   for the route to change — resending on a new session **only once the route's session actually
+   changed**; if the budget runs out or the route never moves, the wait still fails explicitly with
+   `NOT_LEADER` (never false-green, never hanging to the wait budget). Phaser/timer waits are out of
+   scope here and keep the terminal status code. If timeouts persist past this item, no leader was
+   available throughout — go back to 1–4.
 
 ## 4. Replication stall (frozen writes) and self-healing logs
 
