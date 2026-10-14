@@ -422,6 +422,34 @@ class RemoteBlockingQueueScriptedTest {
     }
 
     /**
+     * 单机形态**零刷新探测**（静默降级）：握手不填 Leader 提示字段（proto3 默认
+     * {@code 0}）即单机形态，路由刷新 MUST NOT 激活——即便请求一路吃到
+     * {@code NOT_LEADER}（明确零生效拒绝，集群形态下正是刷新的触发点）。
+     */
+    @Test
+    void singleMachineNeverProbesForRouteRefresh() throws Exception {
+        try (ScriptedServer server = new ScriptedServer(req -> switch (req.getType()) {
+                    // 不填 leader_hint：proto3 默认 0 = 单机形态
+                    case HELLO -> hello(req);
+                    case QUEUE_OP -> queueResp(req, StatusCode.NOT_LEADER);
+                    default -> null;
+                })) {
+            try (OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .requestTimeout(Duration.ofSeconds(1))
+                    .defaultWaitTimeout(Duration.ofSeconds(3))
+                    .build()) {
+                client.connectAsync().get(5, TimeUnit.SECONDS);
+                OBlockingQueue q = client.newBlockingQueue("solo-q", 4);
+                assertThatThrownBy(() -> q.put("x"))
+                        .isInstanceOf(OpenLatchTimeoutException.class);
+            }
+            assertThat(server.countType(MessageType.CLUSTER_VIEW))
+                    .as("单机形态不得发起路由刷新探测").isZero();
+        }
+    }
+
+    /**
      * 不确定窗的**单调性**（回归）：同一逻辑写先在 home 上经历"应答丢失"
      * （读界超时——效果不确定），随后收到明确零生效拒绝（缺码形）；后者
      * MUST NOT 洗白前者的不确定，MUST NOT 据此在新会话上续发该写。

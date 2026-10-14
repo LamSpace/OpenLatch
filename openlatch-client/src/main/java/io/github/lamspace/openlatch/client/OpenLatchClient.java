@@ -146,6 +146,21 @@ public final class OpenLatchClient implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicInteger();
     /** 强制发现阈值（连续 NOT_LEADER 次数，常量取向不配置化）。 */
     private static final int FORCE_DISCOVERY_THRESHOLD = 3;
+    /**
+     * 路由刷新器：非 ACQUIRE 请求被明确零生效拒绝时，按单飞 + 限频 + 合并的
+     * 纪律重新学习当值 Leader，并把结果发布为期望路由。稳态零流量。
+     */
+    private final RouteRefresh routeRefresh;
+    /** 两次路由刷新探测发起的最小间隔（毫秒，常量取向不配置化）。 */
+    private static final long ROUTE_REFRESH_MIN_INTERVAL_MS = 1_000L;
+    /** 单次刷新探测的预算（毫秒）：独立于业务请求超时，超时一律静默。 */
+    private static final long ROUTE_REFRESH_PROBE_MS = 500L;
+    /**
+     * 集群形态标志：home 握手提示非 0（含选举空窗的 -1）即线上存在 v2 Leader
+     * 提示能力。单机模式不填该字段（proto3 默认 {@code 0}）——路由刷新据此
+     * 不激活，单机语义零触碰。
+     */
+    private volatile boolean clusterHintCapable;
     /** 选举空窗（hint=-1）原地重发的退避步长（毫秒）。 */
     private static final long GAP_RETRY_BACKOFF_MS = 300;
     /** 看门狗：持锁期间的自动续租与失锁判定。 */
@@ -202,6 +217,8 @@ public final class OpenLatchClient implements AutoCloseable {
         });
         this.connectionManager = new ConnectionManager(config, eventLoopGroup, timer);
         this.connectionManager.setMetrics(clientMetrics);
+        this.routeRefresh = new RouteRefresh(this::probeLeader, this::followLeaderTarget,
+                timer, ROUTE_REFRESH_MIN_INTERVAL_MS);
         this.multiplexer = new RequestMultiplexer(timer, connectionManager::activeChannel,
                 connectionManager::session, clientMetrics);
         this.awaitTracker = new AwaitTracker(timer, multiplexer,
@@ -370,6 +387,11 @@ public final class OpenLatchClient implements AutoCloseable {
      * @param hello 握手响应
      */
     private void onHomeHello(HelloResponse hello) {
+        if (hello.getLeaderHint() != 0) {
+            // 提示非 0（含选举空窗的 -1）即线上具备 v2 Leader 提示能力 → 集群形态；
+            // 单机模式不填该字段（proto3 默认 0），路由刷新据此不激活。
+            clusterHintCapable = true;
+        }
         followLeaderHint(hello);
     }
 
@@ -387,6 +409,18 @@ public final class OpenLatchClient implements AutoCloseable {
         if (target == null) {
             return;
         }
+        followLeaderTarget(target);
+    }
+
+    /**
+     * 依目标地址调整获取车道——**握手提示**与**路由刷新**共用的收敛路径：
+     * 目标即 home 则车道退役、等待迁回 home；目标已在车道则无动作；目标为
+     * 第三节点则建/换车道。本方法只做路由决策与发起改道，不阻塞；换道收口时
+     * 按既有位次重置口径迁移等待项（既有改道语义，非本路径新增的干预）。
+     *
+     * @param target 期望 Leader 的接入地址
+     */
+    private void followLeaderTarget(ClientConfig.SeedAddress target) {
         boolean targetIsHome = target.host().equals(connectionManager.targetHost())
                 && target.port() == connectionManager.targetPort();
         AcquireLane lane = acquireLane;
@@ -400,6 +434,50 @@ public final class OpenLatchClient implements AutoCloseable {
             return; // 已指向该 Leader
         }
         retargetAcquireLane(target, null);
+    }
+
+    /**
+     * 请求一次路由刷新（非 ACQUIRE 请求在"明确零生效拒绝"处的触发入口）。
+     *
+     * <p>立即返回、不阻塞、不回传结果、不抛出——触发方不得据此改变自身判定
+     * （刷新是**纯提示新鲜化**，不是业务结果的一部分）。稳态无触发即零流量；
+     * 单机形态与无提示能力形态由探测实现方判定为无结果，静默降级。
+     */
+    void requestRouteRefresh() {
+        routeRefresh.request();
+    }
+
+    /**
+     * 刷新探测：经 **home 会话**查询既有只读、任意节点可答的 {@code CLUSTER_VIEW}，
+     * 取其中的当值 Leader 接入地址。
+     *
+     * <p>静默契约：单机形态（无 v2 提示能力）、home 会话非活跃、探测超时/失败、
+     * 应答非 {@code OK}、视图无 {@code is_leader} 条目（选举空窗）——一律返回
+     * {@code null}，不抛出、不计为业务失败、不使用新建连接。
+     *
+     * @return 完成于当值 Leader 地址（无结果时为 {@code null}）的 future
+     */
+    private java.util.concurrent.CompletableFuture<ClientConfig.SeedAddress> probeLeader() {
+        if (closed || !clusterHintCapable || !connectionManager.isActive()) {
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+        Envelope.Builder probe = Envelope.newBuilder().setType(MessageType.CLUSTER_VIEW);
+        return multiplexer.send(probe, ROUTE_REFRESH_PROBE_MS)
+                .handle((resp, err) -> {
+                    if (err != null || resp == null || !resp.hasClusterView()) {
+                        return null;
+                    }
+                    io.github.lamspace.openlatch.protocol.ClusterView view = resp.getClusterView();
+                    if (view.getStatus() != StatusCode.OK) {
+                        return null;
+                    }
+                    for (io.github.lamspace.openlatch.protocol.NodeInfo node : view.getNodesList()) {
+                        if (node.getIsLeader() && !node.getAddress().isEmpty()) {
+                            return SeedDiscovery.parse(node.getAddress());
+                        }
+                    }
+                    return null; // 无 is_leader 条目 = 选举空窗：本轮无结果
+                });
     }
 
     /**
@@ -1018,6 +1096,7 @@ public final class OpenLatchClient implements AutoCloseable {
         }
         releaseAllHeldBestEffort();
         closed = true;
+        routeRefresh.close();
         AcquireLane lane = acquireLane;
         acquireLane = null;
         if (lane != null) {
@@ -1717,6 +1796,14 @@ public final class OpenLatchClient implements AutoCloseable {
      * 屏障通道路由快照：获取车道优先、回落 home（与
      * {@code acquireAsync} 同车道选择规则；屏障等待是 Leader 本地态，集群
      * 下 MUST 经车道承载）。
+     *
+     * <p><b>取用纪律（非 ACQUIRE 车道共用）</b>：本方法是<b>拉取点</b>，调用方
+     * MUST 遵循两条：①每个逻辑操作**起手钉住**一次路由并在自己的重发环里复用，
+     * 不每轮重取；②只在**自身观察到路由不可用**时重取（{@code NOT_LEADER}/
+     * 缺码形等明确零生效拒绝、连接断开、会话换代）——**不得**因全局路由被外部
+     * 刷新（{@link RouteRefresh}）改变而重取。理由是路由的全局变更若被在途请求
+     * 立刻吸收，会把写操作推入跨会话换代守卫（判例：2026-10-11 对该形态的本质
+     * 回退）。改道是否被采用，判定权在请求自身。
      *
      * @return 可用路由；当前无活动会话返回 {@code null}
      */

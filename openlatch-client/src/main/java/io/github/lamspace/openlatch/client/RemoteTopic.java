@@ -262,16 +262,21 @@ final class RemoteTopic implements OTopic {
         long deadline = System.currentTimeMillis() + budgetMs;
         Envelope env = null;
         long envSid = -1L;
+        // 路由起手钉住：只在自身判定"路由不可用"时重取全局路由（见各分支），
+        // 不因外部刷新改了全局路由而重取。
+        OpenLatchClient.LatchRoute route = null;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
                 throw new OpenLatchTimeoutException("topic subscribe on '" + key
                         + "' not confirmed within request timeout; registration is idempotent — retry is safe");
             }
-            OpenLatchClient.LatchRoute route = client.latchRoute();
             if (route == null) {
-                Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
-                continue;
+                route = client.latchRoute();
+                if (route == null) {
+                    Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                    continue;
+                }
             }
             if (env == null || envSid != route.session().sessionId()) {
                 long rid = route.session().nextRequestId();
@@ -286,13 +291,17 @@ final class RemoteTopic implements OTopic {
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasTopicOpResponse()) {
                     // 缺码形：MUST NOT 读默认实例（status 零值 OK、subscription_id 为 0）
-                    // 而把 subscription_id=0 绑为订阅。登记幂等，同 request_id 重投。
+                    // 而把 subscription_id=0 绑为订阅。登记幂等，同 request_id 重投，
+                    // 并重取路由 + 触发共享刷新（明确零生效拒绝）。
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 resp = answer.getTopicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
                 if (isTransientRetryable(cause)) {
+                    route = client.latchRoute(); // 传输瞬态：该路由可能已不可用，重取
                     continue;
                 }
                 if (cause instanceof InterruptedException ie) {
@@ -310,6 +319,9 @@ final class RemoteTopic implements OTopic {
                 return new long[]{envSid, resp.getSubscriptionId()};
             }
             if (st == StatusCode.NOT_LEADER || st == StatusCode.OVERLOADED) {
+                // 明确零生效拒绝：重取路由并触发共享刷新。
+                client.requestRouteRefresh();
+                route = client.latchRoute();
                 continue;
             }
             throw new OpenLatchException(st, "topic subscribe on '" + key + "' rejected: " + st);
@@ -333,6 +345,8 @@ final class RemoteTopic implements OTopic {
         Long startSession = null;
         Envelope env = null;
         long envSid = -1L;
+        // 路由起手钉住（同订阅环）：只在自身判定不可用时重取。
+        OpenLatchClient.LatchRoute route = null;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -340,10 +354,12 @@ final class RemoteTopic implements OTopic {
                         + "' exceeded request timeout; the message may have been accepted and"
                         + " fanned out — a retry may double-deliver");
             }
-            OpenLatchClient.LatchRoute route = client.latchRoute();
             if (route == null) {
-                Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
-                continue;
+                route = client.latchRoute();
+                if (route == null) {
+                    Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                    continue;
+                }
             }
             if (startSession == null) {
                 startSession = route.session().sessionId();
@@ -368,13 +384,17 @@ final class RemoteTopic implements OTopic {
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasTopicOpResponse()) {
                     // 缺码形：MUST NOT 读默认实例（status 零值 OK、topic_seq 为 0）而静默
-                    // 返回 0 假受理。同信封同 op_seq 重发（去重槽保证不双扇出，判例原子族）。
+                    // 返回 0 假受理。同信封同 op_seq 重发（去重槽保证不双扇出，判例原子族），
+                    // 并重取路由 + 触发共享刷新（明确零生效拒绝）。
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 resp = answer.getTopicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
                 if (isTransientRetryable(cause)) {
+                    route = client.latchRoute(); // 传输瞬态：该路由可能已不可用，重取
                     continue; // 同信封（同 op_seq）重发，服务端去重槽裁决
                 }
                 if (cause instanceof InterruptedException ie) {
@@ -392,6 +412,9 @@ final class RemoteTopic implements OTopic {
                 return resp.getTopicSeq();
             }
             if (st == StatusCode.NOT_LEADER || st == StatusCode.OVERLOADED) {
+                // 明确零生效拒绝：重取路由并触发共享刷新。
+                client.requestRouteRefresh();
+                route = client.latchRoute();
                 continue;
             }
             throw new OpenLatchException(st, "topic publish on '" + key + "' rejected: " + st);

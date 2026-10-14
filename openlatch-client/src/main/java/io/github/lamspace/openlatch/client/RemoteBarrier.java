@@ -217,6 +217,7 @@ final class RemoteBarrier implements OBarrier {
                         // 读 protobuf 默认实例（status 零值 OK）而假绿返回"世代已合拢"。
                         // 同会话以同 request_id 重发（判例 W10）；会话已换则走既有"到场不跨
                         // 会话重放"裁决——MUST NOT 借道重建 env 把到场静默重放到新会话。
+                        client.requestRouteRefresh();
                         registry.remove(envSession, rid);
                         OpenLatchClient.LatchRoute now = client.latchRoute();
                         if (now != null && now.session().sessionId() == envSession) {
@@ -371,6 +372,7 @@ final class RemoteBarrier implements OBarrier {
                         throw new OpenLatchTimeoutException("action-done of barrier '" + key
                                 + "' timed out (result unknown; malformed reply)");
                     }
+                    client.requestRouteRefresh();
                     continue;
                 }
                 status = resp.getBarrierActionDoneResponse().getStatus();
@@ -436,6 +438,7 @@ final class RemoteBarrier implements OBarrier {
             if (!resp.hasBarrierLeaveResponse()) {
                 // 缺码形：MUST NOT 读 protobuf 默认实例（status 零值 OK）虚报确认成立，
                 // 否则破坏"返回即已破"次序契约。按"不确定"收场（同网络失败降级出口）。
+                client.requestRouteRefresh();
                 return false;
             }
             return resp.getBarrierLeaveResponse().getStatus() == StatusCode.OK;

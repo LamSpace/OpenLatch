@@ -197,7 +197,8 @@ final class RemoteTimer implements OTimer {
                     continue; // 读界兜底：保持挂起等下一次唤醒/分片重发
                 }
                 if (!resp.hasTimerOpResponse()) {
-                    continue; // 异型码形：同 id 重发（W10 判例）
+                    client.requestRouteRefresh();
+                continue; // 异型码形：同 id 重发（W10 判例）
                 }
                 StatusCode status = resp.getTimerOpResponse().getStatus();
                 if (status == StatusCode.OK) {
@@ -293,6 +294,7 @@ final class RemoteTimer implements OTimer {
                                 TimeUnit.MILLISECONDS);
                 if (!resp.hasTimerOpResponse()) {
                     // 异型/空码形：MUST NOT 读 protobuf 默认实例伪成功（W10 判例）。
+                    client.requestRouteRefresh();
                     continue;
                 }
                 StatusCode status = resp.getTimerOpResponse().getStatus();

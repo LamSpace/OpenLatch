@@ -394,6 +394,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     // OK）伪成功，按瞬态车道退避改道同信封重发。明确零生效：
                     // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
                     continuation.onZeroEffectReject();
+                    client.requestRouteRefresh();
                     registry.remove(envSession, rid);
                     route = client.latchRoute();
                     continue;
@@ -436,8 +437,11 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 }
                 if (status == StatusCode.NOT_LEADER) {
                     // 非权威拒绝=明确零生效：本操作从未有过可能已生效的尝试时，
-                    // 允许随后的会话切换重建续发（判据见 SessionContinuation）。
+                    // 允许随后的会话切换重建续发（判据见 SessionContinuation）；
+                    // 同环的瞬态/缺码形分支均重取路由，本分支一致补齐。
                     continuation.onZeroEffectReject();
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 throw new OpenLatchException(status, "queue op on '" + key
@@ -581,6 +585,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     // OK）伪成功，按瞬态车道退避改道同信封重发。明确零生效：
                     // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
                     continuation.onZeroEffectReject();
+                    client.requestRouteRefresh();
                     continue;
                 }
                 QueueOpResponse resp = answer.getQueueOpResponse();
@@ -601,6 +606,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     // 二者均在提交/入队前拒入（非权威 / 等待深度满）：零生效，
                     // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
                     continuation.onZeroEffectReject();
+                    client.requestRouteRefresh();
                     continue;
                 }
                 throw new OpenLatchException(status, "queue op on '" + key
