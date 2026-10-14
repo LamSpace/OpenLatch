@@ -205,8 +205,10 @@ Semantic boundaries (details in [01 §9](01-concepts.md)):
    abandoned waiter never blocks others' progress semantics, only their ranks);
 3. **Per-session dedup slots make resends safe**: `put` never double-inserts,
    `take`/`drainTo` replays deliver **the same bytes**; a mid-flight session
-   switch aborts (exception) — re-check with `size()`/`peek()`, never blindly
-   revalue;
+   switch continues **only while this operation has never had an attempt that
+   may have taken effect** (rejected outright on its first try) — any later
+   rejection never unlocks it; otherwise it aborts (exception) — re-check with
+   `size()`/`peek()`, never blindly revalue;
 4. **Elements are never null** (JDK `BlockingQueue` rejectNull precedent — the
    deliberate opposite of `OAtomicReference`; a zero-length array is a legal
    element); no `iterator`/`contains`/`remove(Object)` surface;

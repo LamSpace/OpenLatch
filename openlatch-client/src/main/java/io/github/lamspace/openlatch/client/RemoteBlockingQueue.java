@@ -39,10 +39,13 @@ import java.util.concurrent.TimeoutException;
  * <p><b>车道</b>：写侧沿用 {@link RemoteAtomicBase} 的同 key 在途写互斥 +
  * 同 {@code op_seq} 重发纪律（共用客户端监视器与序号分配——服务端每会话
  * 单槽的充分性前提），应答丢失/瞬态失败以同一信封重发，由服务端去重槽
- * 裁决（PUT 不双插、TAKE/DRAIN 重放交付同一份字节）；会话中途切换——
- * 上一尝试被<b>明确拒入</b>（非权威拒绝/缺码形/等待深度满，条目未入任何
- * 日志、零生效）时在新会话重建信封续发（HELLO 提示建道后的换窗即此形态），
- * 其余（应答不确定窗）仍放弃（槽随旧会话失效，判例原子写）。阻塞挂起（put/take/带超时 offer/poll）
+ * 裁决（PUT 不双插、TAKE/DRAIN 重放交付同一份字节）；会话中途切换沿
+ * <b>单调</b>续发纪律（{@link SessionContinuation}）：仅当"最近一次尝试被
+ * <b>明确拒入</b>（非权威拒绝/缺码形/等待深度满——条目未入任何日志、零生效）
+ * <b>且本次操作从未有过可能已生效的尝试</b>"时，才在新会话重建信封续发
+ * （HELLO 提示建道后的换窗即此形态）；曾有过可能已生效的尝试（应答丢失、
+ * 传输失败、已被受理/入队）者，后续拒绝一律不足以放行换会话——因为去重槽
+ * 按 {@code (会话, op_seq)} 记账，换会话即槽不中（判例原子写）。阻塞挂起（put/take/带超时 offer/poll）
  * 走"等待-通知-重发"闭环（判例 {@link RemoteCountDownLatch#await()}）：
  * {@code QUEUED} 后保持 {@link LatchNotifyRegistry} 登记，推送到达以同
  * {@code requestId} 同信封重发；服务端应用点竞态回弹（改写 QUEUED）对本类
@@ -321,10 +324,10 @@ final class RemoteBlockingQueue implements ODelayQueue {
         long envSession = -1;
         long rid = -1;
         Long startSession = null;
-        // 上一尝试被明确拒入（非权威拒绝/缺码形——条目未入任何日志、零生效）
-        // 的标志：此后的会话切换可在新会话重建信封续发（HELLO 提示建道后的
-        // 换窗即此形态）；不确定窗（超时/传输失败）后仍严格放弃。
-        boolean noEffectReject = false;
+        // 跨会话续发判定（单调）：最近一次尝试明确零生效**且**本操作从未有过
+        // 可能已生效的尝试时，才允许换会话重建信封续发（HELLO 提示建道后的
+        // 换窗即此形态）；否则严格放弃。判据见 {@link SessionContinuation}。
+        SessionContinuation continuation = new SessionContinuation();
         try {
             while (true) {
                 long remaining = deadline - System.currentTimeMillis();
@@ -343,9 +346,9 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     if (startSession == null) {
                         startSession = envSession;
                     } else if (startSession != envSession) {
-                        if (noEffectReject) {
+                        if (continuation.mayContinueOnNewSession()) {
                             startSession = envSession;
-                            noEffectReject = false;
+                            continuation.consumeContinuation();
                         } else {
                             throw new OpenLatchException(StatusCode.SESSION_EXPIRED,
                                     "session switched mid-flight for queue op on '" + key
@@ -365,7 +368,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     Throwable cause = unwrap(e);
                     if (isTransient(cause)) {
                         // 不确定窗（可能已受理）：恢复严格换代守卫。
-                        noEffectReject = false;
+                        continuation.onPossiblyApplied();
                         registry.remove(envSession, rid);
                         if (cause instanceof OpenLatchException ole
                                 && ole.status() == StatusCode.SESSION_EXPIRED) {
@@ -381,7 +384,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     throw new OpenLatchException("queue op on '" + key + "' failed", cause);
                 } catch (TimeoutException e) {
                     // 应答丢失属不确定窗：恢复严格换代守卫。
-                    noEffectReject = false;
+                    continuation.onPossiblyApplied();
                     registry.remove(envSession, rid);
                     continue; // 应答读界兜底：同信封同序号重发，服务端裁决
                 }
@@ -389,8 +392,8 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     // 缺码形应答（type 回显 QUEUE_OP 而载荷异型/空缺）：拒绝未
                     // 受理或组装违例——MUST NOT 读 protobuf 默认实例（status 零值
                     // OK）伪成功，按瞬态车道退避改道同信封重发。明确零生效：
-                    // 允许随后的会话切换重建续发。
-                    noEffectReject = true;
+                    // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
+                    continuation.onZeroEffectReject();
                     registry.remove(envSession, rid);
                     route = client.latchRoute();
                     continue;
@@ -414,8 +417,8 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 if (status == StatusCode.QUEUED || status == StatusCode.DENIED) {
                     // QUEUED：正常挂起等推送；DENIED：回弹改写缺位的防御兜底——
                     // 同信封继续重发等价于再排队（去重槽/幂等位保证不重复生效）。
-                    // 二者均已受理/入队，非零生效窗：恢复严格换代守卫。
-                    noEffectReject = false;
+                    // 二者均已受理/入队：请求已进账簿，此后不得再换会话续发。
+                    continuation.onAcceptedAttempt();
                     long left = deadline - System.currentTimeMillis();
                     if (left <= 0) {
                         return new ParkOutcome(false, null);
@@ -432,8 +435,9 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     continue;
                 }
                 if (status == StatusCode.NOT_LEADER) {
-                    // 非权威拒绝=明确零生效：允许随后的会话切换重建续发。
-                    noEffectReject = true;
+                    // 非权威拒绝=明确零生效：本操作从未有过可能已生效的尝试时，
+                    // 允许随后的会话切换重建续发（判据见 SessionContinuation）。
+                    continuation.onZeroEffectReject();
                     continue;
                 }
                 throw new OpenLatchException(status, "queue op on '" + key
@@ -498,10 +502,10 @@ final class RemoteBlockingQueue implements ODelayQueue {
         Envelope env = null;
         long envSession = -1;
         Long startSession = null;
-        // 上一尝试被明确拒入（非权威拒绝/缺码形/等待深度满——条目未入任何
-        // 日志、零生效）的标志：此后的会话切换可在新会话重建信封续发（HELLO
-        // 提示建道后的换窗即此形态）；不确定窗（超时/传输失败）后仍严格放弃。
-        boolean noEffectReject = false;
+        // 跨会话续发判定（单调）：最近一次尝试明确零生效**且**本操作从未有过
+        // 可能已生效的尝试时，才允许换会话重建信封续发（HELLO 提示建道后的
+        // 换窗即此形态）；否则严格放弃。判据见 {@link SessionContinuation}。
+        SessionContinuation continuation = new SessionContinuation();
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -528,9 +532,9 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     if (startSession == null) {
                         startSession = envSession;
                     } else if (writeOp && startSession != envSession) {
-                        if (noEffectReject) {
+                        if (continuation.mayContinueOnNewSession()) {
                             startSession = envSession;
-                            noEffectReject = false;
+                            continuation.consumeContinuation();
                         } else {
                             throw new OpenLatchException(StatusCode.SESSION_EXPIRED,
                                     "session switched mid-flight for queue write on '" + key + "'");
@@ -549,7 +553,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     Throwable cause = unwrap(e);
                     if (isTransient(cause)) {
                         // 不确定窗（可能已受理）：恢复严格换代守卫。
-                        noEffectReject = false;
+                        continuation.onPossiblyApplied();
                         if (cause instanceof OpenLatchException ole
                                 && ole.status() == StatusCode.SESSION_EXPIRED) {
                             env = null;
@@ -563,7 +567,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     throw new OpenLatchException("queue op on '" + key + "' failed", cause);
                 } catch (TimeoutException e) {
                     // 应答丢失属不确定窗：恢复严格换代守卫。
-                    noEffectReject = false;
+                    continuation.onPossiblyApplied();
                     continue; // 同序号重发，服务端去重槽裁决
                 } catch (InterruptedException ie) {
                     // 立即式不声明受检中断：还原中断位并包装显式抛出。
@@ -575,8 +579,8 @@ final class RemoteBlockingQueue implements ODelayQueue {
                     // 缺码形应答（type 回显 QUEUE_OP 而载荷异型/空缺）：拒绝未
                     // 受理或组装违例——MUST NOT 读 protobuf 默认实例（status 零值
                     // OK）伪成功，按瞬态车道退避改道同信封重发。明确零生效：
-                    // 允许随后的会话切换重建续发。
-                    noEffectReject = true;
+                    // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
+                    continuation.onZeroEffectReject();
                     continue;
                 }
                 QueueOpResponse resp = answer.getQueueOpResponse();
@@ -595,8 +599,8 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 }
                 if (status == StatusCode.NOT_LEADER || status == StatusCode.OVERLOADED) {
                     // 二者均在提交/入队前拒入（非权威 / 等待深度满）：零生效，
-                    // 允许随后的会话切换重建续发。
-                    noEffectReject = true;
+                    // 本操作从未有过可能已生效的尝试时允许随后的会话切换重建续发。
+                    continuation.onZeroEffectReject();
                     continue;
                 }
                 throw new OpenLatchException(status, "queue op on '" + key
