@@ -34,6 +34,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -52,10 +54,37 @@ class RemoteBlockingQueueScriptedTest {
 
     /** HELLO 应答（v7 服务端形态）。 */
     private static Envelope hello(Envelope req) {
+        return hello(req, 9001L);
+    }
+
+    /** HELLO 应答（指定会话 id——用于构造"两个节点=两个会话"的换会话形态）。 */
+    private static Envelope hello(Envelope req, long sessionId) {
         return req.toBuilder().setHelloResponse(HelloResponse.newBuilder()
-                .setStatus(StatusCode.OK).setSessionId(9001L)
+                .setStatus(StatusCode.OK).setSessionId(sessionId)
                 .setServerProtocolVersion(7).setDefaultLeaseMs(30_000))
                 .build();
+    }
+
+    /** 获取应答：`NOT_LEADER` 且随附 Leader 地址（客户端据此建/换获取车道）。 */
+    private static Envelope notLeaderRedirect(Envelope req, String leaderAddress) {
+        return req.toBuilder().setAcquireResponse(AcquireResponse.newBuilder()
+                .setStatus(StatusCode.NOT_LEADER).setLeaderNodeId(2)
+                .setLeaderAddress(leaderAddress))
+                .build();
+    }
+
+    /** 获取应答：授予（车道重放用）。 */
+    private static Envelope acquireOk(Envelope req) {
+        return req.toBuilder().setAcquireResponse(AcquireResponse.newBuilder()
+                .setStatus(StatusCode.OK).setLeaseToken(7L).setGrantedLeaseMs(30_000)
+                .setLeaseExpiresAtMs(System.currentTimeMillis() + 30_000))
+                .build();
+    }
+
+    /** 获取规格（车道建立用；键名与队列键无关）。 */
+    private static AcquireSpec spec(String key) {
+        return new AcquireSpec(key, io.github.lamspace.openlatch.client.LockType.REENTRANT,
+                Thread.currentThread().threadId(), 30_000L, -1);
     }
 
     /** 构造队列应答信封（回挂请求的 op 回显）。 */
@@ -390,5 +419,75 @@ class RemoteBlockingQueueScriptedTest {
             }
         }
         assertThat(seen).hasSize(2);
+    }
+
+    /**
+     * 不确定窗的**单调性**（回归）：同一逻辑写先在 home 上经历"应答丢失"
+     * （读界超时——效果不确定），随后收到明确零生效拒绝（缺码形）；后者
+     * MUST NOT 洗白前者的不确定，MUST NOT 据此在新会话上续发该写。
+     *
+     * <p>修复前的失效链：首答丢失（超时，标志被清）→ 次答缺码形（明确零生效，
+     * 标志被置**且该分支重取路由**）→ 此时经获取路径已建成的车道指向新会话 →
+     * 放行续发 → 该写在真主上**重新执行**（服务端去重槽按 `(会话, op_seq)`
+     * 记账，新会话槽不中）⇒ 重复生效。
+     */
+    @Test
+    void uncertainWindowIsNotClearedByLaterZeroEffectReject() throws Exception {
+        AtomicInteger putAttempts = new AtomicInteger();
+        try (ScriptedServer trueLeader = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> hello(req, 2000L);
+                    case LOCK_ACQUIRE -> acquireOk(req);
+                    case QUEUE_OP -> queueResp(req, StatusCode.OK);
+                    default -> null;
+                })) {
+            try (ScriptedServer home = new ScriptedServer(req -> switch (req.getType()) {
+                        case HELLO -> hello(req, 1000L);
+                        // 获取一律"拒绝 + 指向真主"：用于在写进行中确定性地建/换车道。
+                        case LOCK_ACQUIRE -> notLeaderRedirect(req, trueLeader.address());
+                        // 首发不应答（读界超时=不确定窗）；其后应答缺码形（明确零生效）。
+                        case QUEUE_OP -> putAttempts.incrementAndGet() == 1
+                                ? null : req.toBuilder().build();
+                        default -> null;
+                    })) {
+                try (OpenLatchClient client = OpenLatchClient.builder()
+                        .address(home.address())
+                        .requestTimeout(Duration.ofSeconds(1))
+                        .defaultWaitTimeout(Duration.ofSeconds(30))
+                        .build()) {
+                    client.connectAsync().get(5, TimeUnit.SECONDS);
+                    OBlockingQueue q = client.newBlockingQueue("uncertain-q", 4);
+                    AtomicReference<Throwable> putOutcome = new AtomicReference<>();
+                    Thread putter = new Thread(() -> {
+                        try {
+                            q.put("x");
+                        } catch (Throwable t) {
+                            putOutcome.set(t); // 修复后：显式失败是合法终态
+                        }
+                    });
+                    putter.start();
+                    // 关键时序：**先**让首发丢失（不确定窗）**并**吃到拒绝（标志被置），
+                    // **再**建车道——只有"拒收在前、翻路由在后"，今天才会放行续发。
+                    long deadline = System.currentTimeMillis() + 10_000;
+                    while (home.countType(MessageType.QUEUE_OP) < 2
+                            && System.currentTimeMillis() < deadline) {
+                        Thread.sleep(10);
+                    }
+                    assertThat(home.countType(MessageType.QUEUE_OP)).isGreaterThanOrEqualTo(2);
+                    try {
+                        client.acquireAsync(spec("lane-build")).get(10, TimeUnit.SECONDS);
+                    } catch (Exception ignored) {
+                        // 获取结果不参与本夹具断言：建道目的已达即可。
+                    }
+                    putter.join(30_000);
+                    assertThat(putter.isAlive()).isFalse();
+                    assertThat(trueLeader.countType(MessageType.QUEUE_OP))
+                            .as("曾进入不确定窗后 MUST NOT 借新会话续发该写（新会话零 QUEUE_OP）")
+                            .isZero();
+                    assertThat(putOutcome.get())
+                            .as("该写应以显式失败收场（显式失败是合法终态）")
+                            .isInstanceOf(OpenLatchException.class);
+                }
+            }
+        }
     }
 }

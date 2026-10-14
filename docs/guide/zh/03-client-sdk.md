@@ -184,8 +184,9 @@ String due = alarm.takeAsString();                                   // 最早�
    到期期限，客户端超时/中断即本地终态（服务端挂起项由事件与超时清扫收敛，期间其队列
    位次仍占位——被放弃的挂起者不影响他人语义，只影响他人位次）；
 3. **幂等由每会话去重槽承载**：超时/改道窗口内同序号自动重发——`put` 不双插、
-   `take`/`drainTo` 重放交付**同一份字节**；会话中途切换则放弃（抛异常），用
-   `size()`/`peek()` 复核，不盲目换值重试；
+   `take`/`drainTo` 重放交付**同一份字节**；会话中途切换**仅在本次操作从未有过
+   可能已生效的尝试**（首发即被明确拒绝）时续发，此后任一拒绝都不放行换会话——
+   放弃并抛显式异常，用 `size()`/`peek()` 复核，不盲目换值重试；
 4. **元素不可为 null**（判例 JDK `BlockingQueue` rejectNull；与 `OAtomicReference` 的
    null 语义相反，零长度空字节串是合法元素）；无 `iterator`/`contains`/`remove(Object)` 面；
 5. **延时形态**：`offerDelayed(e, delay, unit)` 显式命名（JDK `DelayQueue.offer(e,timeout,unit)`
