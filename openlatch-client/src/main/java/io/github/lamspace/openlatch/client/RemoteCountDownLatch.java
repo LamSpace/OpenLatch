@@ -165,6 +165,7 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                         // await 假绿返回"已放行"。按可重试失败并入等待-通知-重发闭环
                         // （判例 RemotePhaser/RemoteTimer）：清注册、同 request_id 重发；
                         // 预算内仍不可判定则由循环出口以 false/兜底超时显式收场。
+                        client.requestRouteRefresh();
                         registry.remove(envSession, rid);
                         continue;
                     }

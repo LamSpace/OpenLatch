@@ -182,6 +182,7 @@ final class RemotePhaser implements OPhaser {
                     continue;
                 }
                 if (!resp.hasPhaserOpResponse()) {
+                    client.requestRouteRefresh();
                     continue; // 异型码形：同 id 重发（W10 判例）
                 }
                 StatusCode status = resp.getPhaserOpResponse().getStatus();
@@ -294,6 +295,7 @@ final class RemotePhaser implements OPhaser {
                     continue;
                 }
                 if (!resp.hasPhaserOpResponse()) {
+                    client.requestRouteRefresh();
                     continue; // 异型码形：同 id 重发（W10 判例）
                 }
                 StatusCode status = resp.getPhaserOpResponse().getStatus();
@@ -411,6 +413,7 @@ final class RemotePhaser implements OPhaser {
                 if (!resp.hasPhaserOpResponse()) {
                     // 异型/空码形：MUST NOT 读 protobuf 默认实例伪成功（W10 判例），
                     // 视作瞬态按同 id 重发。
+                    client.requestRouteRefresh();
                     continue;
                 }
                 StatusCode status = resp.getPhaserOpResponse().getStatus();

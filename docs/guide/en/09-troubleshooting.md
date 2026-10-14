@@ -61,7 +61,17 @@ Work the list in order:
    seed-fallback round, not correctness);
 3. quorum actually alive: `curl :9412/metrics | grep is_leader` — all zero means leaderless;
 4. leaderless + frequent elections → clock drift or partition (NTP drift must be ≤1s);
-5. a leader exists but writes keep failing and the log shows `replication stall detected` → section 4.
+5. a leader exists but writes keep failing and the log shows `replication stall detected` → section 4;
+6. **single-connection resident window**: when the home connection stays **alive** but now sits on a
+   non-authoritative node (or the startup hint is not ready yet), non-ACQUIRE requests (queue/atomic/
+   publish, …) trigger, after an explicit rejection (`NOT_LEADER` / missing-payload shape), one
+   **shared, rate-limited** leader refresh (single-flight + 1s minimum interval; **zero steady-state
+   traffic**, inactive in single-machine form) that publishes the new desired route to subsequent
+   requests. **In-flight requests do not reroute because of that refresh** — they re-take the route only
+   when they themselves observe it unusable (explicit zero-effect rejection, connection loss); a write
+   that entered an uncertain window therefore ends in an explicit failure (a legal terminal state —
+   verify with `size()`/`getStamped()`). If timeouts persist past this item, no leader was available
+   throughout — go back to 1–4.
 
 ## 4. Replication stall (frozen writes) and self-healing logs
 

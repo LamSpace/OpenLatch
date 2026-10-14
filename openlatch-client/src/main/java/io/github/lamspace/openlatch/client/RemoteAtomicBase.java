@@ -158,6 +158,10 @@ abstract class RemoteAtomicBase {
         Long startSession = null;
         Envelope env = null;
         long envSid = -1L;
+        // 路由**起手钉住**：本逻辑操作只在自身判定"路由不可用"时才重取全局路由
+        // （见以下各重取点），不因外部刷新改了全局路由而重取——那条路会把在途写
+        // 推入换代守卫（判例：2026-10-11 回退轮）。
+        OpenLatchClient.LatchRoute route = null;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -165,10 +169,12 @@ abstract class RemoteAtomicBase {
                         + " on '" + key + "' exceeded request timeout; the write may have been"
                         + " applied — verify with getStamped()");
             }
-            OpenLatchClient.LatchRoute route = client.latchRoute();
             if (route == null) {
-                Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
-                continue;
+                route = client.latchRoute();
+                if (route == null) {
+                    Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                    continue;
+                }
             }
             if (startSession == null) {
                 startSession = route.session().sessionId();
@@ -203,12 +209,15 @@ abstract class RemoteAtomicBase {
                     // API 缺码形条款）。按可重试失败处置：同信封同 op_seq 重发
                     // （去重槽保证不重复生效），预算内仍不可判定则由循环出口以
                     // 超时显式收场。跨会话换代守卫不因本条放宽。
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 resp = answer.getAtomicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
                 if (isTransientRetryable(cause)) {
+                    route = client.latchRoute(); // 传输瞬态：该路由可能已不可用，重取
                     continue; // 同信封（同 op_seq）重发
                 }
                 if (cause instanceof InterruptedException ie) {
@@ -219,7 +228,8 @@ abstract class RemoteAtomicBase {
                 }
                 throw new OpenLatchException("atomic op on '" + key + "' failed", cause);
             } catch (TimeoutException e) {
-                continue; // 读界兜底：同序号重发，服务端去重槽裁决
+                route = client.latchRoute(); // 读界兜底：该路由可能已不可用，重取
+                continue; // 同序号重发，服务端去重槽裁决
             }
             StatusCode st = resp.getStatus();
             if (st == StatusCode.OK) {
@@ -227,6 +237,10 @@ abstract class RemoteAtomicBase {
                         resp.getVersion());
             }
             if (st == StatusCode.NOT_LEADER || st == StatusCode.OVERLOADED) {
+                // 明确零生效拒绝：该路由已非权威，重取（并触发共享刷新）；
+                // 换代守卫照旧——重取若落到新会话，写路径以显式失败收场。
+                client.requestRouteRefresh();
+                route = client.latchRoute();
                 continue;
             }
             throw new OpenLatchException(st, "atomic op on '" + key + "' rejected: " + st
@@ -304,6 +318,8 @@ abstract class RemoteAtomicBase {
         Long startSession = null;
         Envelope env = null;
         long envSid = -1L;
+        // 路由起手钉住（同标量族）：只在自身判定不可用时重取，不因外部刷新而重取。
+        OpenLatchClient.LatchRoute route = null;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -312,10 +328,12 @@ abstract class RemoteAtomicBase {
                         + "' exceeded request timeout; the write may have been"
                         + " applied — verify with getStamped()");
             }
-            OpenLatchClient.LatchRoute route = client.latchRoute();
             if (route == null) {
-                Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
-                continue;
+                route = client.latchRoute();
+                if (route == null) {
+                    Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                    continue;
+                }
             }
             if (startSession == null) {
                 startSession = route.session().sessionId();
@@ -353,13 +371,17 @@ abstract class RemoteAtomicBase {
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasAtomicOpResponse()) {
-                    // 缺码形：同标量族处置（MUST NOT 读默认实例；同 op_seq 重发）。
+                    // 缺码形：同标量族处置（MUST NOT 读默认实例；同 op_seq 重发），
+                    // 并重取路由（同环与其它零生效分支一致）。
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 resp = answer.getAtomicOpResponse();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
                 if (isTransientRetryable(cause)) {
+                    route = client.latchRoute(); // 传输瞬态：该路由可能已不可用，重取
                     continue; // 同信封（同 op_seq）重发
                 }
                 if (cause instanceof InterruptedException ie) {
@@ -370,7 +392,8 @@ abstract class RemoteAtomicBase {
                 }
                 throw new OpenLatchException("atomic reference op on '" + key + "' failed", cause);
             } catch (TimeoutException e) {
-                continue; // 读界兜底：同序号重发，服务端去重槽裁决
+                route = client.latchRoute(); // 读界兜底：该路由可能已不可用，重取
+                continue; // 同序号重发，服务端去重槽裁决
             }
             StatusCode st = resp.getStatus();
             if (st == StatusCode.OK) {
@@ -380,6 +403,10 @@ abstract class RemoteAtomicBase {
                         resp.getVersion());
             }
             if (st == StatusCode.NOT_LEADER || st == StatusCode.OVERLOADED) {
+                // 明确零生效拒绝：该路由已非权威，重取（并触发共享刷新）；
+                // 换代守卫照旧（同标量族）。
+                client.requestRouteRefresh();
+                route = client.latchRoute();
                 continue;
             }
             throw new OpenLatchException(st, "atomic reference op on '" + key

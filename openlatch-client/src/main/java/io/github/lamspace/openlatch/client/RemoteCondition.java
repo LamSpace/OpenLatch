@@ -243,6 +243,9 @@ final class RemoteCondition implements OCondition {
         long deadline = System.currentTimeMillis() + budgetMs;
         Envelope env = null;
         long envSid = -1L;
+        // 路由起手钉住：只在自身判定"路由不可用"时重取全局路由（见各分支），
+        // 不因外部刷新改了全局路由而重取。
+        OpenLatchClient.LatchRoute route = null;
         while (true) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
@@ -250,16 +253,18 @@ final class RemoteCondition implements OCondition {
                         + "' not confirmed within request timeout; the event may or may not"
                         + " have been moved (signal is an event — no blind retry)");
             }
-            OpenLatchClient.LatchRoute route = client.latchRoute();
             if (route == null) {
-                try {
-                    Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new OpenLatchException("condition " + op + " on '" + key
-                            + "' interrupted while awaiting session", ie);
+                route = client.latchRoute();
+                if (route == null) {
+                    try {
+                        Thread.sleep(Math.min(remaining, SESSION_POLL_MS));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new OpenLatchException("condition " + op + " on '" + key
+                                + "' interrupted while awaiting session", ie);
+                    }
+                    continue;
                 }
-                continue;
             }
             if (env == null || envSid != route.session().sessionId()) {
                 long rid = route.session().nextRequestId();
@@ -273,14 +278,18 @@ final class RemoteCondition implements OCondition {
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasConditionOpResponse()) {
                     // 缺码形应答（W10 纪律）：MUST NOT 读 protobuf 默认实例
-                    // （status 零值 OK）伪成功；按未受理零生效同信封退避重发。
+                    // （status 零值 OK）伪成功；按未受理零生效同信封退避重发，
+                    // 并重取路由 + 触发共享刷新（零生效拒绝）。
+                    client.requestRouteRefresh();
+                    route = client.latchRoute();
                     continue;
                 }
                 status = answer.getConditionOpResponse().getStatus();
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e);
                 if (cause instanceof ServerUnavailableException) {
-                    continue; // 会话未就绪 = 发送前失败零生效，预算内退避续行
+                    route = client.latchRoute(); // 会话未就绪：该路由不可用，重取
+                    continue; // 发送前失败零生效，预算内退避续行
                 }
                 if (cause instanceof OpenLatchTimeoutException ot) {
                     throw ot; // 不确定窗：不盲目重发（signal 是事件、无去重槽）
@@ -309,7 +318,11 @@ final class RemoteCondition implements OCondition {
                         + " rejected NOT_HELD)");
             }
             if (status == StatusCode.NOT_LEADER || status == StatusCode.OVERLOADED) {
-                continue; // 既有退避改道（无 leader 提示字段，判例 QUEUE/TOPIC 直发车道）
+                // 既有退避改道（无 leader 提示字段，判例 QUEUE/TOPIC 直发车道）：
+                // 明确零生效拒绝，重取路由并触发共享刷新。
+                client.requestRouteRefresh();
+                route = client.latchRoute();
+                continue;
             }
             throw new OpenLatchException(status, "condition " + op + " on '" + key
                     + "' rejected: " + status);
