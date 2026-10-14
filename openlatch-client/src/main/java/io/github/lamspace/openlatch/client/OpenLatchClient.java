@@ -156,6 +156,17 @@ public final class OpenLatchClient implements AutoCloseable {
     /** 单次刷新探测的预算（毫秒）：独立于业务请求超时，超时一律静默。 */
     private static final long ROUTE_REFRESH_PROBE_MS = 500L;
     /**
+     * 等待类原语（{@link OCountDownLatch}/{@link OBarrier}）收到
+     * {@code NOT_LEADER} <b>应答状态</b>后的零生效重道预算（毫秒）。
+     * 取 {@value #ROUTE_REFRESH_MIN_INTERVAL_MS} 的 2 倍：一次真实改道最坏要等一个
+     * 限频窗才被探测发现，再一个窗内完成建道与握手。**单一事实源**——闩/屏障两个
+     * 等待环一律经 {@link #awaitReroutedRoute} 消费，不各自另造数、不对外暴露、
+     * 不配置化。
+     */
+    static final long NOT_LEADER_REROUTE_BUDGET_MS = 2 * ROUTE_REFRESH_MIN_INTERVAL_MS;
+    /** 零生效重道等待的轮询粒度（毫秒），与各等待原语的会话轮询同量级。 */
+    private static final long REROUTE_POLL_MS = 50L;
+    /**
      * 集群形态标志：home 握手提示非 0（含选举空窗的 -1）即线上存在 v2 Leader
      * 提示能力。单机模式不填该字段（proto3 默认 {@code 0}）——路由刷新据此
      * 不激活，单机语义零触碰。
@@ -1817,6 +1828,48 @@ public final class OpenLatchClient implements AutoCloseable {
         }
         SessionContext s = connectionManager.session();
         return s == null ? null : new LatchRoute(s, multiplexer);
+    }
+
+    /**
+     * 等待类原语的 {@code NOT_LEADER} 零生效重道等待：**主动触发一次共享路由刷新**
+     * （{@link #requestRouteRefresh()}），再在独立短预算
+     * （{@link #NOT_LEADER_REROUTE_BUDGET_MS}）内轮询路由，仅在路由<b>会话身份确已
+     * 变化</b>时返回改道后的路由。
+     *
+     * <p><b>为何主动触发</b>：非获取类应答不携带 Leader 地址，"本方路由陈旧"这一
+     * 事实本身就是刷新的合法触发点（该拒绝明确零生效）；只被动等待改道会把收敛延迟
+     * 不可控地压在刷新周期上。触发是提示性的——{@link RouteRefresh} 自持单飞 + 限频
+     * + 合并，探测失败静默降级，本方法不因触发结果改变判定。
+     *
+     * <p><b>为何只在改道后才重发</b>：重发的唯一动机是"路由陈旧"——对同一陈旧路由
+     * 重发只会拿到同一个 {@code NOT_LEADER}。把"等改道"显式化，也让"预算耗尽"成为
+     * 可断言的终态。
+     *
+     * <p><b>边界</b>：等待同时受调用方的剩余预算封顶，重道 MUST NOT 让调用方越过
+     * 自己的等待总预算。返回 {@code null} 表示预算内未改道，调用方应以
+     * {@code NOT_LEADER} 显式失败（既不假绿，也不悬挂至等待总预算）。
+     *
+     * @param staleSessionId 上一尝试所在会话 id（判"是否确已改道"）
+     * @param deadlineMs     调用方等待总预算的截止时刻（毫秒）
+     * @return 改道后的路由；预算内未改道返回 {@code null}
+     * @throws InterruptedException 等待被中断
+     */
+    LatchRoute awaitReroutedRoute(long staleSessionId, long deadlineMs)
+            throws InterruptedException {
+        requestRouteRefresh();
+        long rerouteDeadline = Math.min(deadlineMs,
+                System.currentTimeMillis() + NOT_LEADER_REROUTE_BUDGET_MS);
+        while (true) {
+            long left = rerouteDeadline - System.currentTimeMillis();
+            if (left <= 0) {
+                return null;
+            }
+            Thread.sleep(Math.min(REROUTE_POLL_MS, left));
+            LatchRoute candidate = latchRoute();
+            if (candidate != null && candidate.session().sessionId() != staleSessionId) {
+                return candidate;
+            }
+        }
     }
 
     /**

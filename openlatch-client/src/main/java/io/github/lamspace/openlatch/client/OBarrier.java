@@ -39,6 +39,12 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>在途到场不跨会话重放</b>：连接闪断致会话切换时本方 await 以
  *   {@link OpenLatchException} 终结（到场是有副作用的请求），旧世代因本会话
  *   消亡已被打破，其余到场方以破障裁决感知；</li>
+ *   <li><b>{@code NOT_LEADER} 应答状态例外可重道</b>：该状态证明服务端已答复且
+ *   本次<b>未登记到场</b>（零生效），故客户端摘除本机登记、触发一次共享路由刷新，
+ *   并在独立短预算（= 2 个路由刷新周期）内等待路由改道；仅当路由<b>会话确已变化</b>
+ *   才以新会话重发。与上一条不冲突——那条约束结果<b>不确定</b>的形态（可能已到场，
+ *   跨会话重放会双计），此处无到场事实可重放；预算耗尽或路由未变则以
+ *   {@code NOT_LEADER} 显式失败（不假绿、不悬挂至等待总预算）；</li>
  *   <li><b>{@code barrierAction} 由最后到场方在<em>其进程内</em>执行</b>：
  *   动作完成回报前其余到场方均不放行（忠实 JDK"动作完成前屏障关闭"）；
  *   动作抛异常则本方以该异常终结且同世代全体收破障（等价 JDK 动作异常
@@ -79,7 +85,8 @@ public interface OBarrier {
      *                               表达，其余方收本异常）
      * @throws OpenLatchTimeoutException 等待兜底超时（超时即破障，同世代全体收场）
      * @throws OpenLatchException     服务端显式拒绝（parties 断言不符、无主张加入
-     *                               未定型屏障、队列满）或在途到场遇会话切换放弃
+     *                               未定型屏障、队列满）、无当值 Leader 致重道预算
+     *                               耗尽的 {@code NOT_LEADER}，或在途到场遇会话切换放弃
      */
     void await() throws InterruptedException;
 
@@ -95,7 +102,8 @@ public interface OBarrier {
      * @return {@code true} 世代合拢放行；{@code false} 本方超时（世代已破）
      * @throws InterruptedException     等待被中断（中断即离场，连带破障）
      * @throws OBrokenBarrierException  所属世代已破障
-     * @throws OpenLatchException       服务端显式拒绝或会话切换放弃
+     * @throws OpenLatchException       服务端显式拒绝（含无当值 Leader 致重道预算
+     *                                 耗尽的 {@code NOT_LEADER}）或会话切换放弃
      * @throws IllegalArgumentException {@code timeout < 0}
      */
     boolean await(long timeout, TimeUnit unit) throws InterruptedException;

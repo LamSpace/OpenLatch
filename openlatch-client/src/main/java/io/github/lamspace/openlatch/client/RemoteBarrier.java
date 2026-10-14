@@ -39,6 +39,14 @@ import java.util.concurrent.TimeoutException;
  * 有副作用请求，<b>会话切换 MUST NOT 以新请求重放</b>（旧世代随本会话
  * 消亡已破，重放将污染新世代）——在途传输失败即裁决放弃。
  *
+ * <p><b>{@code NOT_LEADER} 应答状态的零生效重道</b>：该应答状态证明服务端已答复
+ * 且本次<b>未登记到场</b>（角色门在触达状态机前拒绝），故本类摘除本机登记、触发一次
+ * 共享路由刷新，并在独立短预算（= 2 个路由刷新周期）内等待路由改道；仅当路由
+ * <b>会话确已变化</b>时才以新会话重发续等，预算耗尽或路由始终未变则以
+ * {@code NOT_LEADER} 显式失败。与上一条"到场不跨会话重放"<b>不冲突</b>：那条约束
+ * 结果<b>不确定</b>的形态（可能已到场，跨会话重放会双计），此处无到场事实可重放；
+ * 曾进入不确定窗的等待照旧严格放弃。
+ *
  * <p><b>离场即破障</b>：{@code await(timeout)} 超时、本地中断与动作异常
  * 都经 {@code BARRIER_LEAVE} 通道离场/破障；leave 为尽力投递（写失败不
  * 阻塞本方收场——网络不可达时服务端会话清理兜底破障）。
@@ -168,11 +176,16 @@ final class RemoteBarrier implements OBarrier {
      * 走"到场不跨会话重放"裁决（抛 {@link OpenLatchException}），MUST NOT 借道重建信封把
      * 到场重放到新会话。
      *
+     * <p>{@code NOT_LEADER} 应答状态的零生效重道见类契约：该答复证明本次到场从未被
+     * 计入，故仅在本次等待**从未进入不确定窗**时换会话重发；预算耗尽或路由始终未变
+     * 仍显式抛 {@code NOT_LEADER}。
+     *
      * @param budgetMs 等待总预算（毫秒）
      * @return 世代合拢放行 {@code true}；预算耗尽（已连带破障）{@code false}
      * @throws InterruptedException  本地中断（已尽力离场，世代破障）
      * @throws OBrokenBarrierException 所属世代已破障
-     * @throws OpenLatchException    服务端显式拒绝或在途到场遇会话切换放弃
+     * @throws OpenLatchException    服务端显式拒绝（含无当值 Leader 时重道预算耗尽的
+     *                               {@code NOT_LEADER}）或在途到场遇会话切换放弃
      */
     private boolean doAwait(long budgetMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + budgetMs;
@@ -181,6 +194,9 @@ final class RemoteBarrier implements OBarrier {
         Envelope env = null;
         long envSession = -1;
         long rid = -1;
+        // 不确定窗标志：本等待是否出现过"结果不可判定"的失败（传输失败/读界超时/
+        // 应答缺码形）。一旦置位，`NOT_LEADER` 的换会话重道即不再适用——见方法契约。
+        boolean uncertain = false;
         try {
             while (true) {
                 long remaining = deadline - System.currentTimeMillis();
@@ -217,6 +233,7 @@ final class RemoteBarrier implements OBarrier {
                         // 读 protobuf 默认实例（status 零值 OK）而假绿返回"世代已合拢"。
                         // 同会话以同 request_id 重发（判例 W10）；会话已换则走既有"到场不跨
                         // 会话重放"裁决——MUST NOT 借道重建 env 把到场静默重放到新会话。
+                        uncertain = true;
                         client.requestRouteRefresh();
                         registry.remove(envSession, rid);
                         OpenLatchClient.LatchRoute now = client.latchRoute();
@@ -233,6 +250,8 @@ final class RemoteBarrier implements OBarrier {
                     partiesObserved = resp.getBarrierAwaitResponse().getParties();
                 } catch (ExecutionException e) {
                     Throwable cause = unwrap(e);
+                    // 非应答类失败：本次到场结果不可判定（可能已计入），置不确定位。
+                    uncertain = true;
                     registry.remove(envSession, rid);
                     OpenLatchClient.LatchRoute now = client.latchRoute();
                     boolean sameSession = now != null && now.session().sessionId() == envSession;
@@ -248,7 +267,9 @@ final class RemoteBarrier implements OBarrier {
                     throw new OpenLatchException("await of barrier '" + key
                             + "' abandoned on session change", cause);
                 } catch (TimeoutException e) {
-                    // 应答读界兜底（响应 future 自带请求超时，理论先到）。
+                    // 应答读界兜底（响应 future 自带请求超时，理论先到）：无应答可判，
+                    // 同属非应答类失败。
+                    uncertain = true;
                     registry.remove(envSession, rid);
                     continue;
                 } catch (InterruptedException e) {
@@ -299,6 +320,21 @@ final class RemoteBarrier implements OBarrier {
                     } catch (ExecutionException ee) {
                         // arrived 仅被 complete(null)，此分支不可达，防御清场。
                     }
+                    continue;
+                }
+                if (status == StatusCode.NOT_LEADER && !uncertain) {
+                    // 零生效（服务端已答复、本次未登记到场）⇒ 允许换会话重道：摘本机登记
+                    // → 触发共享刷新并短预算内等改道；仅在路由确已换会话后重发。
+                    // 与"到场不跨会话重放"不冲突：那条约束结果**不确定**的形态（可能
+                    // 已到场，跨会话重放会双计），此处无到场事实可重放。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of barrier '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
                     continue;
                 }
                 registry.remove(envSession, rid);

@@ -65,6 +65,12 @@ class RemoteCountDownLatchScriptedTest {
     /**
      * 同型 {@code LatchAwaitResponse{NOT_LEADER}}：await 显式抛
      * {@code OpenLatchException}——既不假绿返回 true，也不悬挂至预算耗尽。
+     *
+     * <p><b>口径同步</b>：该拒绝先经<b>零生效重道</b>（摘登记 → 触发共享路由刷新 →
+     * 短预算内等改道），仅当路由会话确已变化才换会话重发。本例服务面为<b>单机形态</b>
+     * （HELLO 不带提示字段 ⇒ 刷新探测判为无结果、静默降级），路由无从改道，故仍在
+     * 短预算内以 {@code NOT_LEADER} 显式抛出——断言的异常类型与耗时上界（&lt; 5s）
+     * 均不变。
      */
     @Test
     void sameShapeNotLeaderRejectOnAwaitThrowsNotFalseGreen() throws Exception {

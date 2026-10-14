@@ -36,6 +36,14 @@ import java.util.concurrent.TimeoutException;
  * （改连换 id 的幂等口径与 {@code OLock} 等待一致）。通知
  * 等待设请求超时上限作推送丢失的兜底：到点自发重发一次（幂等无害）。
  *
+ * <p><b>{@code NOT_LEADER} 应答状态的零生效重道</b>：该应答状态本身就是"本次
+ * <b>从未被受理</b>"的证明（服务端角色门在触达状态机前拒绝），故本类摘除本机登记、
+ * 触发一次共享路由刷新，并在独立短预算（= 2 个路由刷新周期）内等待路由改道；仅当
+ * 路由<b>会话确已变化</b>时才以新会话重发续等，预算耗尽或路由始终未变则以
+ * {@code NOT_LEADER} 显式失败。该路径 MUST NOT 假绿返回"已放行"，亦 MUST NOT
+ * 悬挂至等待总预算；传输失败/读界超时/应答缺码形等<b>结果不可判定</b>的形态
+ * 不适用本条（维持既有换会话纪律）。
+ *
  * <p><b>无租约</b>：等待者不登记持锁簿记、不启动看门狗——await 全程零
  * {@code LEASE_RENEW} 流量（服务端 awaiter 断连即摘除）。
  *
@@ -122,10 +130,14 @@ final class RemoteCountDownLatch implements OCountDownLatch {
      * （{@code status=OK}）而假绿放行：并入等待-通知-重发闭环以同 {@code requestId} 重发，
      * 预算内不可判定则以 {@code false} 收场。
      *
+     * <p>{@code NOT_LEADER} 应答状态的零生效重道见类契约：仅在本次等待**从未进入
+     * 不确定窗**时换会话续等；预算耗尽或路由始终未变仍显式抛 {@code NOT_LEADER}。
+     *
      * @param budgetMs 等待总预算（毫秒）
      * @return 归零放行 {@code true}；预算耗尽 {@code false}
      * @throws InterruptedException 等待被中断
-     * @throws OpenLatchException   服务端显式拒绝（定型不符 / 屏障不存在 / 队列满）
+     * @throws OpenLatchException   服务端显式拒绝（定型不符 / 屏障不存在 / 队列满），
+     *                              或无当值 Leader 致重道预算耗尽的 {@code NOT_LEADER}
      */
     private boolean doAwait(long budgetMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + budgetMs;
@@ -134,6 +146,9 @@ final class RemoteCountDownLatch implements OCountDownLatch {
         Envelope env = null;
         long envSession = -1;
         long rid = -1;
+        // 不确定窗标志：本等待是否出现过"结果不可判定"的失败（传输失败/读界超时/
+        // 应答缺码形）。一旦置位，`NOT_LEADER` 的换会话重道即不再适用——见方法契约。
+        boolean uncertain = false;
         try {
             while (true) {
                 long remaining = deadline - System.currentTimeMillis();
@@ -167,6 +182,7 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                         // 预算内仍不可判定则由循环出口以 false/兜底超时显式收场。
                         client.requestRouteRefresh();
                         registry.remove(envSession, rid);
+                        uncertain = true;
                         continue;
                     }
                     status = resp.getLatchAwaitResponse().getStatus();
@@ -174,6 +190,8 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     Throwable cause = unwrap(e);
                     if (isTransient(cause)) {
                         // 传输失败/请求超时/会话已换：清注册，按新会话或同会话重发。
+                        // 这三次都属"非应答类失败"——本次结果不可判定，故置不确定位。
+                        uncertain = true;
                         registry.remove(envSession, rid);
                         if (cause instanceof OpenLatchException ole
                                 && ole.status() == StatusCode.SESSION_EXPIRED) {
@@ -187,7 +205,9 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     }
                     throw new OpenLatchException("await of latch '" + key + "' failed", cause);
                 } catch (TimeoutException e) {
-                    // 应答读界兜底（响应 future 自带请求超时，理论先到）。
+                    // 应答读界兜底（响应 future 自带请求超时，理论先到）：无应答可判，
+                    // 同属非应答类失败。
+                    uncertain = true;
                     registry.remove(envSession, rid);
                     continue;
                 }
@@ -214,6 +234,20 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                         }
                         // arrived 仅被 complete(null)，此分支不可达，防御清场。
                     }
+                    continue;
+                }
+                if (status == StatusCode.NOT_LEADER && !uncertain) {
+                    // 零生效（服务端已答复、本次未受理）⇒ 允许换会话重道：摘本机登记 →
+                    // 触发共享刷新并短预算内等改道；仅在路由确已换会话后重发，
+                    // 预算耗尽仍显式失败（既不假绿，也不悬挂至等待总预算）。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of latch '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
                     continue;
                 }
                 registry.remove(envSession, rid);
