@@ -24,9 +24,13 @@ import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.LatchAwaitResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.NodeInfo;
+import io.github.lamspace.openlatch.protocol.PhaserOp;
+import io.github.lamspace.openlatch.protocol.PhaserOpResponse;
 import io.github.lamspace.openlatch.protocol.QueueOpRequest;
 import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.TimerOp;
+import io.github.lamspace.openlatch.protocol.TimerOpResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -302,6 +306,161 @@ class RerouteConvergenceReproIT {
                 .addNodes(NodeInfo.newBuilder().setNodeId(1)
                         .setAddress("127.0.0.1:1").setIsLeader(false))
                 .build()).build();
+    }
+
+    /**
+     * 等待面（相位器纯等待）：路由陈旧而真主可达时，`awaitAdvance` 收到 `NOT_LEADER`
+     * 应答状态应经零生效重道在短预算内于**当值 Leader** 了结等待。
+     *
+     * <p>未修复时 red：`NOT_LEADER` 是终态抛出（该答复恰恰证明本次等待从未被受理）。
+     */
+    @Test
+    void staleRouteWithRealLeaderReroutesPhaserAwaitAdvance() throws Exception {
+        try (ScriptedServer leader = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 3000);
+                    case PHASER_OP -> phaserAdvanced(req);
+                    default -> null;
+                });
+             ScriptedServer staleHome = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 1000);
+                    case CLUSTER_VIEW -> clusterView(req, leader.address());
+                    case PHASER_OP -> phaserNotLeader(req);
+                    default -> null;
+                });
+             OpenLatchClient client = connect(staleHome.address())) {
+            OPhaser phaser = client.newPhaser("repro-wait-phaser");
+            assertThat(phaser.awaitAdvanceInterruptibly(0, 5, TimeUnit.SECONDS))
+                    .as("零生效重道须在短预算内于当值 Leader 了结等待")
+                    .isEqualTo(1L);
+            assertThat(staleHome.countType(MessageType.PHASER_OP))
+                    .as("构造有效性：首次等待必须真的落在陈旧 home 上，否则本夹具空转")
+                    .isGreaterThanOrEqualTo(1);
+            assertThat(leader.countType(MessageType.PHASER_OP))
+                    .as("了结必须来自当值 Leader")
+                    .isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    /**
+     * 等待面（定时器纯等待）：同口径——`await(timeout)` 收到 `NOT_LEADER` 应答状态
+     * 应经零生效重道在短预算内于当值 Leader 见到当代标记。
+     *
+     * <p>未修复时 red：终态抛出。
+     */
+    @Test
+    void staleRouteWithRealLeaderReroutesTimerAwait() throws Exception {
+        try (ScriptedServer leader = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 3200);
+                    case TIMER_OP -> timerFired(req);
+                    default -> null;
+                });
+             ScriptedServer staleHome = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 1000);
+                    case CLUSTER_VIEW -> clusterView(req, leader.address());
+                    case TIMER_OP -> timerNotLeader(req);
+                    default -> null;
+                });
+             OpenLatchClient client = connect(staleHome.address())) {
+            OTimer timer = client.newTimer("repro-wait-timer");
+            assertThat(timer.await(5, TimeUnit.SECONDS))
+                    .as("零生效重道须在短预算内于当值 Leader 见到当代标记")
+                    .isTrue();
+            assertThat(staleHome.countType(MessageType.TIMER_OP))
+                    .as("构造有效性：首次等待必须真的落在陈旧 home 上")
+                    .isGreaterThanOrEqualTo(1);
+            assertThat(leader.countType(MessageType.TIMER_OP))
+                    .as("了结必须来自当值 Leader")
+                    .isGreaterThanOrEqualTo(1);
+        }
+    }
+
+    /**
+     * 两侧锁定（相位器纯等待）：**永久** `NOT_LEADER`（选举空窗 ⇒ 刷新无可发布的路由）
+     * 下失败须有界且携 `NOT_LEADER`。修复前后皆绿，锁"过修复"。
+     */
+    @Test
+    void permanentNotLeaderPhaserAwaitFailsBounded() throws Exception {
+        try (ScriptedServer staleHome = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 1400);
+                    case CLUSTER_VIEW -> clusterViewWithoutLeader(req);
+                    case PHASER_OP -> phaserNotLeader(req);
+                    default -> null;
+                });
+             OpenLatchClient client = connect(staleHome.address())) {
+            OPhaser phaser = client.newPhaser("repro-wait-phaser-pinned");
+            long t0 = System.currentTimeMillis();
+            assertThatThrownBy(() -> phaser.awaitAdvanceInterruptibly(0, 10, TimeUnit.SECONDS))
+                    .as("永久 NOT_LEADER 须显式抛出，MUST NOT 假绿宣称相位已推进")
+                    .isInstanceOf(OpenLatchException.class)
+                    .extracting(e -> ((OpenLatchException) e).status())
+                    .isEqualTo(StatusCode.NOT_LEADER);
+            assertThat(System.currentTimeMillis() - t0)
+                    .as("失败有界：不得悬挂至 10s 等待总预算")
+                    .isLessThan(4_000L);
+        }
+    }
+
+    /**
+     * 两侧锁定（定时器纯等待）：同口径——永久 `NOT_LEADER` 下 `await(timeout)`
+     * 须有界抛 `NOT_LEADER`，**MUST NOT 以 `false` 混读**（拒绝与超时两形态不得混读）。
+     */
+    @Test
+    void permanentNotLeaderTimerAwaitFailsBounded() throws Exception {
+        try (ScriptedServer staleHome = new ScriptedServer(req -> switch (req.getType()) {
+                    case HELLO -> helloWithoutHint(req, 1500);
+                    case CLUSTER_VIEW -> clusterViewWithoutLeader(req);
+                    case TIMER_OP -> timerNotLeader(req);
+                    default -> null;
+                });
+             OpenLatchClient client = connect(staleHome.address())) {
+            OTimer timer = client.newTimer("repro-wait-timer-pinned");
+            long t0 = System.currentTimeMillis();
+            assertThatThrownBy(() -> timer.await(10, TimeUnit.SECONDS))
+                    .as("永久 NOT_LEADER 须显式抛出，MUST NOT 以 false 混读为超时")
+                    .isInstanceOf(OpenLatchException.class)
+                    .extracting(e -> ((OpenLatchException) e).status())
+                    .isEqualTo(StatusCode.NOT_LEADER);
+            assertThat(System.currentTimeMillis() - t0)
+                    .as("失败有界：不得悬挂至 10s 等待总预算")
+                    .isLessThan(4_000L);
+        }
+    }
+
+    /** 陈旧 home 对相位器纯等待的同型 `NOT_LEADER` 应答（角色门拒绝＝零生效）。 */
+    private static Envelope phaserNotLeader(Envelope req) {
+        return req.toBuilder().setType(MessageType.PHASER_OP)
+                .setPhaserOpResponse(PhaserOpResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setOp(PhaserOp.PHASER_OP_AWAIT_ADVANCE))
+                .build();
+    }
+
+    /** 当值 Leader 的相位器等待了结应答（相位已越过 `expected_phase`）。 */
+    private static Envelope phaserAdvanced(Envelope req) {
+        return req.toBuilder().setType(MessageType.PHASER_OP)
+                .setPhaserOpResponse(PhaserOpResponse.newBuilder()
+                        .setStatus(StatusCode.OK)
+                        .setOp(PhaserOp.PHASER_OP_AWAIT_ADVANCE).setPhase(1))
+                .build();
+    }
+
+    /** 陈旧 home 对定时器纯等待的同型 `NOT_LEADER` 应答。 */
+    private static Envelope timerNotLeader(Envelope req) {
+        return req.toBuilder().setType(MessageType.TIMER_OP)
+                .setTimerOpResponse(TimerOpResponse.newBuilder()
+                        .setStatus(StatusCode.NOT_LEADER)
+                        .setOp(TimerOp.TIMER_OP_AWAIT))
+                .build();
+    }
+
+    /** 当值 Leader 的定时器等待了结应答（当代已到期共见）。 */
+    private static Envelope timerFired(Envelope req) {
+        return req.toBuilder().setType(MessageType.TIMER_OP)
+                .setTimerOpResponse(TimerOpResponse.newBuilder()
+                        .setStatus(StatusCode.OK)
+                        .setOp(TimerOp.TIMER_OP_AWAIT)
+                        .setGeneration(1).setArmed(true).setFireAtMs(1).setMarked(true))
+                .build();
     }
 
     /**

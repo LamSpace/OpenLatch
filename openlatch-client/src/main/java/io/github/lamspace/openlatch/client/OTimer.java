@@ -80,6 +80,14 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>等待谓词跨换主无损自愈</b>：已到期即刻了结、未到期续挂
  *       （沿 {@link OPhaser} 同侧证据，对照 {@link OCondition} signal 丢失
  *       窗的防混读句）。</li>
+ *   <li><b>纯等待对 {@code NOT_LEADER} 应答状态有界重道</b>：{@link #await()}/
+ *       {@link #await(long, TimeUnit)} 收到该应答状态（服务端已答复且本次等待
+ *       从未被受理）时，SDK 摘除本机登记、触发一次共享路由刷新，并在独立短预算
+ *       （上限 2s）内等路由改道；仅当路由<b>会话确已变化</b>才以新会话重发续等，
+ *       预算耗尽或路由未变仍以 {@code NOT_LEADER} 显式失败——既<b>不假绿</b>
+ *       （不返回 {@code true}），也不与超时形态的 {@code false} 混读。变异
+ *       （{@link #schedule}/{@link #disarm}）与读数不在其列，它们的
+ *       {@code NOT_LEADER} 处置属变异车道面。</li>
  * </ul>
  *
  * <p><b>线程模型与幂等</b>：句柄线程安全；服务端以 (会话, 请求 id) 幂等——

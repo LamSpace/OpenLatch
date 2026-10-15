@@ -658,12 +658,11 @@
 ### Requirement: OPhaser API
 
 客户端 SDK SHALL 提供 `OPhaser` 公开契约与 `OClient.newPhaser(String key)` / `newPhaser(String key, int initialParties)` 工厂：句柄构造零网络；`initialParties > 0` 时首次业务操作前同步提交一次 `REGISTER(count = initialParties)` 归属本会话（JDK `new Phaser(n)` 的注册语义对偶——构造后 n 方已注册未到场；注册失败按抛出形态传播，同句柄不重复提交）。API 面：`int register()` / `void bulkRegister(int parties)`（返回/回显到场相位——注册者进入当前相位应到集合）、`int arrive()`、`int arriveAndDeregister()`、`int arriveAndAwaitAdvance()`、`int awaitAdvance(int phase)`（无限挂起形态）、`int awaitAdvanceInterruptibly(int phase, long timeout, TimeUnit unit)`、`long getPhase()` / `int getRegisteredParties()` / `int getArrivedParties()` / `int getUnarrivedParties()`（JDK 返回值形态对齐：相位 long、计数 int）。**不提供** `onAdvance` 覆写钩子、`isTerminated()`/`forceTerminated()` 与父子分层构造——三砍为显式 Non-Goal，与 JDK `Phaser` 的这组差异 MUST 在接口级 Javadoc 降级清单逐条声明并给出应用侧替代惯用法（钩子→以 `arriveAndAwaitAdvance()` 返回的到场相位号判别后本地执行；终止→键级生命周期治理；分层→独立 key）。
-
 车道与闭环：`PHASER_OP` 为直发请求-应答车道（判例 QUEUE/TOPIC/CONDITION——无 ACQUIRE 在途互斥，phaser 无持有概念；同请求超时重发以同 request_id 幂等重演，到场类去重槽、等待登记幂等与了结记录承载重放安全）。变异操作（register/arrive/arriveAndDeregister/arriveAndAwaitAdvance 的到场半程）经提交路径，客户端对 `NOT_LEADER` 执行既有退避改道；等待操作（awaitAdvance/arriveAndAwaitAdvance 的等待半程）收 `QUEUED` 后进入挂起环——按 request_id 过滤 `AWAIT_NOTIFY`（判例队列读车道与 v3 推送桥）、原 request_id 重发取数了结（`OK{相位}`）；`awaitAdvanceInterruptibly` 超时到期 MUST 发 `CANCEL` fire-and-forget 后抛 `TimeoutException`（JDK 对偶签名；`awaitAdvance(int)` 无限形态由等待总超时兜底——超时纪律条款延伸，MUST NOT 提供事实上永挂而无界收口的路径）；被中断（interrupt）同超时路径收束并抛 `InterruptedException`。换主/会话重建后 SDK MUST 以双通道自动重挂全部活跃等待项（车道激活事件 + 周期保活，判例 v8 topic 重挂；谓词在复制态——重挂即刻了结或续挂、**无损耗**，该增强与 v9 条件"换主窗 signal 丢失"的对照差异 MUST 在 Javadoc 与指南声明防混读）。
-
 契约三清单（接口级 Javadoc 全量承载）：**保真面**——动态注册/离场、到场与等待解耦、按已见相位等待、相位号单调、arrive 族返回到场相位、`awaitAdvance` 返回当前相位、`getUnarrivedParties` 口径、旁观者 awaitAdvance 无需配额；**降级面**——每次调用至少一次 RTT（JDK 本地计数器的 `getPhase`/`arrive` 为纳秒级——网络成本模型显式声明，观察类计数建议低频读取或应用侧缓存句柄本地最近所见）、查询为 Leader 本地读数不保证线性化（返回即刻过期是契约）、无 onAdvance 的"动作先于全体放行"排序（应用侧钩子与他人的醒转无先后承诺）、无终止态（JDK 终止语义不映射）、`arriveAndDeregister`/`bulkRegister` 的配额严格归属（JDK 匿名 party 面收敛为会话记账，跨会话代扣不存在）、等待超时的 CANCEL 为尽力撤销（ghost 有界且受护栏钳制——与 v9 AWAIT 权限降级同型的宽容面声明）；**增强面**——跨进程参与者同相合拢（JDK 句柄进程内私有）、等待谓词随复制态跨换主自愈、管理面全集群配额/到场/等待读数可见。句柄无状态：同 key 重复 `newPhaser` 等价绑定同一服务端账簿（判例 v9 命名寻址跨进程等价的同型声明）；SDK MUST NOT 在本地伪造计数（读数恒来自服务端应答回显）。
-
 指标与诊断：`ClientMetrics.statusCodeOf` 扩 `PHASER_OP` 归线；握手常量升 10；`FairOrderingSuite` 类公平性套件对 PHASER 不适用（合拢是广播事件、到场先后由 Raft apply 序承载——判例 v5 D6 BARRIER/ATOMIC 豁免的正文同款，豁免登记随实现提交）。
+
+`NOT_LEADER` **应答状态的零生效重道**（MUST）：**纯等待操作**（`awaitAdvance`、`awaitAdvanceInterruptibly`）收到 `NOT_LEADER` 应答状态时——该答复本身即证明本次等待**从未被受理**（服务端角色门在触达状态机前拒绝）——MUST 摘除本机等待登记、**触发一次共享路由刷新**，并在**本等待从未进入不确定窗**（本逻辑等待无非应答类失败）时以**新会话**重发续等；重道受**独立短预算**约束（上限 2s，与调用方等待总预算无关）。预算耗尽或路由始终未变 → 仍以 `NOT_LEADER` **显式抛出**。MUST NOT 假绿（永不因此返回相位号或宣称相位已推进）。**到场半程不在本条内**：`arriveAndAwaitAdvance` 的 `NOT_LEADER` 不能证明到场未记账（更早的尝试可能已计入），其重道须先立"到场是否已记账"判据（另议）；变异操作（`register`/`arrive`/`arriveAndDeregister`）既有的 `NOT_LEADER` 退避改道不受本条影响。
 
 #### Scenario: 多方会合与返回值保真
 
@@ -685,10 +684,19 @@
 - **WHEN** 会话 A `newPhaser(key, 3)` 后，未注册的会话 B 对其 key 调用 `arriveAndDeregister()`；随后会话 A 第三次 `arriveAndDeregister()` 后又追加一次
 - **THEN** B 被 `INVALID_REQUEST`（零配额拒绝，账簿零扰动）；A 的第三次离场正常（registered 归 0、空转）、第四次的配额透支同样被拒——JDK 匿名 party 的未定义行为在本 SDK 显式化为拒绝
 
+#### Scenario: `NOT_LEADER` 应答状态的纯等待经路由刷新后重道成功
+
+- **WHEN** 客户端路由陈旧（home 活着但已非权威）时发起 `awaitAdvanceInterruptibly`，服务端以 `NOT_LEADER` 应答；随后共享路由刷新把路由指向当值 Leader
+- **THEN** SDK 摘除原登记并在**新会话**上重发同一等待（等待语义与 `expected_phase` 不变），在短预算内由当值 Leader 了结；MUST NOT 因该拒绝直接失败，MUST NOT 假绿宣称相位已推进
+
+#### Scenario: 纯等待的短预算耗尽仍显式失败
+
+- **WHEN** 服务端**持续**以 `NOT_LEADER` 应答（始终没有可用 Leader / 路由始终不变）
+- **THEN** 重道在短预算（2s）耗尽后以 `NOT_LEADER` 显式抛出（耗时有界），不悬挂至等待总预算
+
 ### Requirement: OTimer API
 
 客户端 SDK SHALL 提供 `OTimer` 公开契约与 `OClient.newTimer(key)` 工厂，对应"延时触发（定时单次标记）"原语（JDK `java.util.Timer` 的协调面可判定子集，协议 v11）。契约要求：
-
 - **构造零网络**：句柄创建不发起任何请求（判例 `newPhaser`/`newTopic`）；无初始装载参数——装载恒为显式 `schedule` 操作（对照 `newPhaser(initialParties)`：timer 无"构造即预装"的语义来源）。
 - **API 面**：`long schedule(long delay, TimeUnit unit)`（装载/重装载，返回本代代次回显；`delay < 0` 或超 horizon 由服务端拒绝映射异常，`delay == 0` 即立即可共见）；`void disarm()`（撤销装载，幂等；无条目 `INVALID_REQUEST` 映射异常）；`void await()`（等待当代标记；当代被撤销时以 `OpenLatchException`（`DENIED` 终态映射）异常收束——"等待不可满足"为异常终态而非布尔混读，契约成文）；`boolean await(long timeout, TimeUnit unit)`（`true`=见到当代标记；`false`=超时；当代被撤销 → 同 `await()` 的异常收束）；`boolean isFired()` / `boolean isArmed()` / `long getRemainingMillis()`（`QUERY` 读数映射，advisory——即刻过期是契约，判例 `getPhase()` 语言事实句；`getRemainingMillis()` 为客户端本地差值）。不暴露 `cancel(await)` 面（超时/中断自救内部发 `CANCEL` fire-and-forget，判例 v9/v10）。
 - **周期与任务为显式不提供**：无 `scheduleAt(Instant)`（客户端墙钟偏差注入即污染谓词判据——仅收相对延迟，绝对到期恒由服务端应用点折算，v7 `offerDelayed` 同轴）；无周期重挂参数（服务端周期自触=常驻重发变异，恰与"到期零条目"裁决相反；客户端循环 `schedule` 即等价，差异声明入降级清单）；无任务载荷/回调（服务端不执行用户代码——v10 D4 onAdvance 同轴论证）。
@@ -698,6 +706,8 @@
 - **等待闭环与自动重挂**：`AWAIT` 收 `QUEUED` 后按 request_id 过滤 `AWAIT_NOTIFY` 挂起、以**原 request_id** 重发取终态（`OK`/`DENIED`）；活跃等待项经双通道自动重挂（车道激活事件+周期保活，判例 v8/v10）——谓词在复制账簿，**换主/断连重挂无损：已到期即刻了结、未到期续挂**（与 v9 条件 signal 丢失窗的对照防混读句随行）；重挂 MUST NOT 误换 request_id（v10 过程真缺陷教训的本原语复现钉死——装载去重槽面防假象双换代）。超时/中断 → `CANCEL` fire-and-forget → 抛对应异常（`TimeoutException`/`InterruptedException` 形态沿既有 SDK 纪律）。
 - **直发车道与读数口径**：`TIMER_OP` 不走 ACQUIRE 车道（同 key 无在途互斥——装载无持有概念，判例 QUEUE/TOPIC/CONDITION/PHASER 直发族）；`NOT_LEADER` 既有退避改道（无提示字段判例）；`isFired` 等读数的"已响"判定随判定节点时钟，跨节点可见偏差 ≤ 节点间时钟偏移（显式降级声明——管理面原始 `fire_at_ms` 呈现无歧义读数，接口 Javadoc 同步）。
 - 接口级 Javadoc 全量降级/增强/保真三清单（每次调用至少一次 RTT 的成本模型、`schedule` 回执代次即观察序、`await` 无持有语义、无 `awaitUninterruptibly`/`awaitUntil` 对偶为 Non-Goal）；握手常量升 11；`ClientMetrics.statusCodeOf` 扩 `TIMER_OP` 归线。
+
+`NOT_LEADER` **应答状态的零生效重道**（MUST）：**纯等待操作**（`await()`、`await(timeout)`）收到 `NOT_LEADER` 应答状态时的处置与 `OPhaser` 的纯等待同款——摘除本机等待登记、触发一次共享路由刷新，并**在本等待从未进入不确定窗**时以新会话重发续等（独立短预算 2s）；预算耗尽或路由未变则仍以 `NOT_LEADER` 显式抛出（`await()` 抛 `OpenLatchException`，`await(timeout)` 亦抛而非返回 `false`——拒绝与超时两形态不得混读）。变异操作（`schedule`/`disarm`）与读数（`isFired`/`isArmed`/`getRemainingMillis`）不在本条内——其 `NOT_LEADER` 处置属"变异车道"面，须逐族先立"未生效"判据（另议）。
 
 #### Scenario: 装载-到期-共见闭环
 
@@ -718,6 +728,16 @@
 
 - **WHEN** v11 句柄对 v≤10 服务端使用
 - **THEN** 区间外握手即拒（既有纪律）；不存在旧服务端误执行 timer 语义的窗口；升级序服务端先行的部署声明随指南
+
+#### Scenario: `NOT_LEADER` 应答状态的纯等待经路由刷新后重道成功
+
+- **WHEN** 客户端路由陈旧（home 活着但已非权威）时发起 `await`，服务端以 `NOT_LEADER` 应答；随后共享路由刷新把路由指向当值 Leader
+- **THEN** SDK 摘除原登记并在**新会话**上重发同一等待，在短预算内见到当代标记；MUST NOT 因该拒绝直接失败，MUST NOT 假绿（不返回 `true`）
+
+#### Scenario: 纯等待的短预算耗尽仍显式失败
+
+- **WHEN** 服务端**持续**以 `NOT_LEADER` 应答（始终没有可用 Leader / 路由始终不变）
+- **THEN** 重道在短预算（2s）耗尽后以 `NOT_LEADER` 显式抛出（耗时有界）：`await()` 抛 `OpenLatchException`、`await(timeout)` 亦抛而非返回 `false`
 
 ### Requirement: 虚拟线程亲和
 
