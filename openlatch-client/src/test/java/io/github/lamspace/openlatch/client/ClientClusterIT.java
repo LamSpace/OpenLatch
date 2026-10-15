@@ -25,7 +25,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -84,19 +83,15 @@ class ClientClusterIT {
 
     // ---------- 集群装配 ----------
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
-
     /** 起 n 节点集群（选举超时 800ms，接入端口显式分配以填 client-addresses）。 */
     private void startCluster(int n) throws Exception {
         int[] accessPorts = new int[n];
         int[] raftPorts = new int[n];
         for (int i = 0; i < n; i++) {
-            accessPorts[i] = freePort();
-            raftPorts[i] = freePort();
+            // 取口必须避开 OS 临时端口带：否则"探到的口刚被内核回收、紧接着被同机
+            // 并发 connect 拿走"会让随后的真 bind 撞 EADDRINUSE（机制见 TestPorts）。
+            accessPorts[i] = TestPorts.freeNonEphemeral();
+            raftPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         List<String> addrs = new ArrayList<>();
