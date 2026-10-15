@@ -27,7 +27,6 @@ import io.github.lamspace.openlatch.protocol.NodeInfo;
 import io.github.lamspace.openlatch.protocol.QueueOpRequest;
 import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -38,15 +37,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 非 ACQUIRE 车道路由收敛缺口的**确定性红先夹具**（启动窗提示滞后形态）。
+ * 非 ACQUIRE 车道路由收敛与等待面零生效重道的**契约回归网**（五枚夹具）。
  *
- * <p><b>红是预期</b>：本类不是回归网，而是该缺口的判据——缺口未修复时用例
- * **必须失败**（在册记录见 {@code WATCHLIST.md} 的 W11 行）。默认构建经
- * {@code @Tag("w11-repro")} 排除，取证命令：
- * <pre>{@code
- * mvn -s /home/lam/repo/settings.xml -Pw11-repro -pl openlatch-client verify
- * }</pre>
- * 缺口修复后本类应**由红转绿**，届时该标签与 profile 一并退役。
+ * <p><b>来历与现状</b>：本类原为该缺口未修复时的确定性红先判据集——那时用例
+ * **无修复必红**，故以 {@code @Tag("w11-repro")} + {@code -Pw11-repro} profile
+ * 门控、默认构建排除。缺口四个面陆续收口后五枚全绿，门控与 profile 一并退役：
+ * 本类**现由默认构建执行**，守的是"改道收敛"这条契约——谁把非 ACQUIRE 车道的
+ * 路由取用纪律改回去，默认 CI 即刻见红。
  *
  * <p><b>覆盖的根因窗</b>：种子节点的 Leader 视图尚未随当选事件更新——握手
  * 应答给出无效提示（{@code leaderHint=-1}），只有后续查询集群视图才能得知
@@ -73,7 +70,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 路径上求值：**显式超时与服务端会话失效不判红**（它们是合法终态），
  * 只有静默错值才是缺陷。
  */
-@Tag("w11-repro")
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class RerouteConvergenceReproIT {
 

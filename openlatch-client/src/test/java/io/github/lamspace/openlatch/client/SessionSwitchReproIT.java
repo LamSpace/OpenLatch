@@ -28,7 +28,6 @@ import io.github.lamspace.openlatch.protocol.QueueOpRequest;
 import io.github.lamspace.openlatch.protocol.QueueOpResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.github.lamspace.openlatch.protocol.TimerOpResponse;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -59,10 +58,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>三条合起来回答：两族在不确定窗后的处置是**放弃**，且该放弃**不是靠"无路可换"**
  * 实现的——队列那条证明换会话的机会确实存在过。
  *
- * <p><b>门控</b>：{@code @Tag("w11-repro")}，默认构建排除；取证命令
- * {@code mvn -s /home/lam/repo/settings.xml -Pw11-repro -pl openlatch-client verify}。
+ * <p><b>来历与现状</b>：本类原以 {@code @Tag("w11-repro")} 门控（当时与同族夹具
+ * 同处"无修复必红"的判据集）；结论落地后与 profile 一并转正，**现由默认构建执行**，
+ * 守的是"变异车道在不确定窗后放弃、不跨会话续发"这条契约——谁把它改成续发，默认
+ * CI 即刻见红。
  */
-@Tag("w11-repro")
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 class SessionSwitchReproIT {
 
