@@ -21,7 +21,6 @@ import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -337,18 +336,15 @@ class ClientClusterIT {
         }
     }
 
-    // ---------- 非 ACQUIRE 车道路由收敛缺口：红先夹具（@Tag("w11-repro")） ----------
+    // ---------- 非 ACQUIRE 车道路由收敛：契约回归网（默认构建执行） ----------
 
     /**
-     * 非 ACQUIRE 车道路由收敛缺口的**确定性红先夹具**（home 驻留非权威节点形态）。
+     * 非 ACQUIRE 车道路由收敛的**契约回归网**（home 驻留非权威节点形态）。
      *
-     * <p><b>红是预期</b>：缺口未修复时本用例**必须失败**——在册记录见
-     * {@code WATCHLIST.md} 的 W11 行。默认构建经 {@code @Tag("w11-repro")} 排除，
-     * 取证命令：
-     * <pre>{@code
-     * mvn -s /home/lam/repo/settings.xml -Pw11-repro -pl openlatch-client verify
-     * }</pre>
-     * 缺口修复后本用例应**由红转绿**，届时标签与 profile 一并退役。
+     * <p><b>来历与现状</b>：本用例原为该缺口未修复时的确定性红先夹具——那时它
+     * **无修复必红**，故以 {@code @Tag("w11-repro")} 门控、默认构建排除；缺口
+     * 收口后与同族夹具一并转正，**现由默认构建执行**，守的是"home 活着但已非
+     * 权威时，非 ACQUIRE 请求必须在窗内收敛到当值 Leader"这条契约。
      *
      * <p><b>窗口构造</b>：home 直连当值 Leader 并正常受理（此时无获取车道），
      * 随后令该节点**存活让位**——连接与会话保留、但已非权威。与既有概率锚
@@ -362,7 +358,6 @@ class ClientClusterIT {
      * 在收敛断言处失败），只有静默错值才是缺陷。
      */
     @Test
-    @Tag("w11-repro")
     void residentNonAuthoritativeHomeConvergesNonAcquireRequests() throws Exception {
         startCluster(3);
         NodeRef oldLeader = leader();
