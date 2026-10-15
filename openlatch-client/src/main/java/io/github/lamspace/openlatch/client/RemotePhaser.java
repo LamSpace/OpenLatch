@@ -41,6 +41,16 @@ import java.util.concurrent.TimeUnit;
  * 提交生效与否不确定，应用层裁决）；纯等待/读数：新会话重建信封续发
  * （无复制态副作用，安全）。
  *
+ * <p><b>{@code NOT_LEADER} 应答状态的零生效重道（纯等待）</b>：{@code awaitAdvance}/
+ * {@code awaitAdvanceInterruptibly} 收到该应答状态时——该答复证明本次等待**从未被受理**
+ * （服务端角色门在触达状态机前拒绝）——摘除本机等待登记、触发一次共享路由刷新，并在
+ * 独立短预算（= 2 个路由刷新周期）内等路由改道；仅当路由**会话确已变化**时以新会话重发
+ * 续等（纯等待无复制态副作用，跨会话重建信封安全且本就是其自愈纪律），预算耗尽或路由
+ * 未变则以 {@code NOT_LEADER} 显式失败（不假绿宣称相位已推进、不悬挂至等待总预算）。
+ * **到场半程不在本条内**：{@code arriveAndAwaitAdvance} 的 {@code NOT_LEADER} 不能证明
+ * 到场未记账（更早的尝试可能已计入），其重道须先立"到场是否已记账"判据；变异操作既有的
+ * 退避改道不受本条影响。
+ *
  * <p><b>等待重挂（自愈通道）</b>：挂起以分片轮询承载保活语义——每
  * {@value #REHANG_POLL_MS} 毫秒未收唤醒即向当值 Leader 以同 (会话,请求)
  * 重发等待请求：服务端幂等续挂或谓词即刻了结。换主后路由改道即等价
@@ -251,6 +261,9 @@ final class RemotePhaser implements OPhaser {
         Envelope env = null;
         long envSession = -1;
         long rid = -1;
+        // 不确定窗标志：本等待是否出现过"结果不可判定"的失败（传输失败/读界超时/
+        // 应答缺码形）。一旦置位，`NOT_LEADER` 的换会话重道即不再适用——见方法契约。
+        boolean uncertain = false;
         try {
             while (true) {
                 long remaining = deadline - System.currentTimeMillis();
@@ -281,6 +294,8 @@ final class RemotePhaser implements OPhaser {
                                     TimeUnit.MILLISECONDS);
                 } catch (ExecutionException e) {
                     Throwable cause = unwrap(e);
+                    // 非应答类失败：本次等待结果不可判定，置不确定位。
+                    uncertain = true;
                     registry.remove(envSession, rid);
                     OpenLatchClient.LatchRoute now = client.latchRoute();
                     if (now != null && now.session().sessionId() == envSession
@@ -292,9 +307,12 @@ final class RemotePhaser implements OPhaser {
                     env = null;
                     continue; // 换主/瞬态：新路由重发（纯等待安全重挂）
                 } catch (TimeoutException e) {
+                    // 应答读界兜底：无应答可判，同属非应答类失败。
+                    uncertain = true;
                     continue;
                 }
                 if (!resp.hasPhaserOpResponse()) {
+                    uncertain = true;
                     client.requestRouteRefresh();
                     continue; // 异型码形：同 id 重发（W10 判例）
                 }
@@ -323,6 +341,21 @@ final class RemotePhaser implements OPhaser {
                         Thread.currentThread().interrupt();
                         throw e;
                     }
+                }
+                if (status == StatusCode.NOT_LEADER && !uncertain) {
+                    // 零生效（服务端已答复、本次等待从未被受理）⇒ 允许换会话重道：
+                    // 摘本机登记 → 触发共享刷新并短预算内等改道；仅在路由确已换会话后
+                    // 重发续等（纯等待无复制态副作用，跨会话重建信封安全）。预算耗尽
+                    // 仍显式抛 NOT_LEADER——既不假绿宣称相位已推进，也不悬挂至等待总预算。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "awaitAdvance of phaser '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
+                    continue;
                 }
                 registry.remove(envSession, rid);
                 throw new OpenLatchException(status,

@@ -41,6 +41,15 @@ import java.util.concurrent.TimeoutException;
  * {@code RemotePhaser.submitOneShot} 口径）；纯等待/读数跨会话重建信封
  * 续发（无复制态副作用，安全）。
  *
+ * <p><b>{@code NOT_LEADER} 应答状态的零生效重道（纯等待）</b>：{@code await()}/
+ * {@code await(timeout)} 收到该应答状态时——该答复证明本次等待**从未被受理**——摘除本机
+ * 等待登记、触发一次共享路由刷新，并在独立短预算（= 2 个路由刷新周期）内等路由改道；
+ * 仅当路由**会话确已变化**时以新会话重发续等（纯等待无复制态副作用，跨会话重建信封安全
+ * 且本就是其自愈纪律），预算耗尽或路由未变则以 {@code NOT_LEADER} 显式失败——**不假绿
+ * （不返回 {@code true}），也不与超时的 {@code false} 混读**，不悬挂至等待总预算。
+ * 变异（{@code schedule}/{@code disarm}）与读数（{@code isFired}/{@code isArmed}/
+ * {@code getRemainingMillis}）不在本条内——它们的 {@code NOT_LEADER} 处置属变异车道面。
+ *
  * <p><b>等待重挂（自愈通道）</b>：挂起以分片轮询承载保活语义——每
  * {@value #REHANG_POLL_MS} 毫秒未收唤醒即向当值 Leader 以同 (会话,请求)
  * 重发等待请求：服务端幂等续挂或谓词即刻了结（OK 共见 / DENIED 代终结）。
@@ -154,6 +163,9 @@ final class RemoteTimer implements OTimer {
         Envelope env = null;
         long envSession = -1;
         long rid = -1;
+        // 不确定窗标志：本等待是否出现过"结果不可判定"的失败（传输失败/读界超时/
+        // 应答缺码形）。一旦置位，`NOT_LEADER` 的换会话重道即不再适用——见方法契约。
+        boolean uncertain = false;
         try {
             while (true) {
                 long remaining = deadline - System.currentTimeMillis();
@@ -183,6 +195,8 @@ final class RemoteTimer implements OTimer {
                                     TimeUnit.MILLISECONDS);
                 } catch (ExecutionException e) {
                     Throwable cause = unwrap(e);
+                    // 非应答类失败：本次等待结果不可判定，置不确定位。
+                    uncertain = true;
                     registry.remove(envSession, rid);
                     OpenLatchClient.LatchRoute now = client.latchRoute();
                     if (now != null && now.session().sessionId() == envSession
@@ -194,9 +208,12 @@ final class RemoteTimer implements OTimer {
                     env = null;
                     continue; // 换主/瞬态：新路由重发（纯等待安全重挂）
                 } catch (TimeoutException e) {
-                    continue; // 读界兜底：保持挂起等下一次唤醒/分片重发
+                    // 读界兜底：无应答可判，同属非应答类失败；保持挂起等下一次唤醒/分片重发。
+                    uncertain = true;
+                    continue;
                 }
                 if (!resp.hasTimerOpResponse()) {
+                    uncertain = true;
                     client.requestRouteRefresh();
                 continue; // 异型码形：同 id 重发（W10 判例）
                 }
@@ -232,6 +249,22 @@ final class RemoteTimer implements OTimer {
                         Thread.currentThread().interrupt();
                         throw e;
                     }
+                }
+                if (status == StatusCode.NOT_LEADER && !uncertain) {
+                    // 零生效（服务端已答复、本次等待从未被受理）⇒ 允许换会话重道：
+                    // 摘本机登记 → 触发共享刷新并短预算内等改道；仅在路由确已换会话后
+                    // 重发续等（纯等待无复制态副作用，跨会话重建信封安全）。预算耗尽
+                    // 仍显式抛 NOT_LEADER——不假绿（不返回 true）、不与超时的 false 混读，
+                    // 也不悬挂至等待总预算。
+                    registry.remove(envSession, rid);
+                    OpenLatchClient.LatchRoute rerouted =
+                            client.awaitReroutedRoute(envSession, deadline);
+                    if (rerouted == null) {
+                        throw new OpenLatchException(status,
+                                "await of timer '" + key + "' rejected: " + status);
+                    }
+                    route = rerouted;
+                    continue;
                 }
                 registry.remove(envSession, rid);
                 throw new OpenLatchException(status,

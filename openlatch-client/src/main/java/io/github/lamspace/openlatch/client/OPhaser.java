@@ -81,6 +81,14 @@ import java.util.concurrent.TimeoutException;
  *       复制账簿承载，换主后 SDK 自动重挂——已推进即刻了结、未推进续挂，
  *       无补偿通道亦无需补偿（对照 {@link OCondition}"signal 是事件、换主窗
  *       丢失不补偿"——两者同用唤醒推送但可靠性分层不同，防混读）。</li>
+ *   <li><b>纯等待对 {@code NOT_LEADER} 应答状态有界重道</b>：{@code awaitAdvance}/
+ *       {@code awaitAdvanceInterruptibly} 收到该应答状态（服务端已答复且本次等待
+ *       从未被受理）时，SDK 摘除本机登记、触发一次共享路由刷新，并在独立短预算
+ *       （上限 2s，与调用方等待总预算无关）内等路由改道；仅当路由<b>会话确已变化</b>
+ *       才以新会话重发续等，预算耗尽或路由未变仍以 {@code NOT_LEADER} 显式失败
+ *       ——既<b>不假绿</b>宣称相位已推进、也不悬挂至等待总预算。到场半程
+ *       （{@link #arriveAndAwaitAdvance()}）不在其列：它的 {@code NOT_LEADER} 不能
+ *       证明到场未记账，重道须先立到场记账判据。</li>
  * </ul>
  *
  * <p><b>线程模型与幂等</b>：句柄线程安全；同一时刻每方法调用独立成请求。
