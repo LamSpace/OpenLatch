@@ -142,7 +142,7 @@ final class RemoteTopic implements OTopic {
                 .setPayloadBytes(ByteString.copyFrom(payload))
                 .setOpSeq(client.nextAtomicOpSeq()));
         long budgetMs = client.config().requestTimeout().toMillis();
-        route.mux().sendWithId(env, budgetMs + SLACK_MS).whenComplete((answer, err) -> {
+        route.send(env, budgetMs + SLACK_MS).whenComplete((answer, err) -> {
             if (err != null || answer == null) {
                 future.completeExceptionally(unwrap(err == null
                         ? new ServerUnavailableException("topic publish on '" + key + "' lost") : err));
@@ -237,7 +237,7 @@ final class RemoteTopic implements OTopic {
         Envelope env = topicEnvelope(rid, TopicOpRequest.newBuilder()
                 .setKey(key).setOp(TopicOp.TOPIC_OP_UNSUBSCRIBE));
         try {
-            route.mux().sendWithId(env,
+            route.send(env,
                     client.config().requestTimeout().toMillis() + SLACK_MS);
             // 尽力而为：不等待回执（断连窗内回执必然丢失，服务端清理不依赖它）。
         } catch (RuntimeException e) {
@@ -286,7 +286,7 @@ final class RemoteTopic implements OTopic {
             }
             TopicOpResponse resp;
             try {
-                Envelope answer = route.mux().sendWithId(env,
+                Envelope answer = route.send(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasTopicOpResponse()) {
@@ -379,7 +379,7 @@ final class RemoteTopic implements OTopic {
             }
             TopicOpResponse resp;
             try {
-                Envelope answer = route.mux().sendWithId(env,
+                Envelope answer = route.send(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasTopicOpResponse()) {
@@ -447,7 +447,7 @@ final class RemoteTopic implements OTopic {
         Envelope env = topicEnvelope(rid, TopicOpRequest.newBuilder()
                 .setKey(key).setOp(TopicOp.TOPIC_OP_SUBSCRIBE));
         long budgetMs = client.config().requestTimeout().toMillis();
-        route.mux().sendWithId(env, budgetMs + SLACK_MS).whenComplete((answer, err) -> {
+        route.send(env, budgetMs + SLACK_MS).whenComplete((answer, err) -> {
             s.rebinding.set(false);
             if (err != null || answer == null || s != subscription) {
                 return; // 失败/被替换：旧绑定保留，下一周期或事件再挂

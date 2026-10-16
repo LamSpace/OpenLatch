@@ -125,7 +125,7 @@ final class RemoteBarrier implements OBarrier {
         long rid = route.session().nextRequestId();
         Envelope env = OpenLatchClient.barrierLeaveEnvelope(rid, key, 0);
         try {
-            Envelope resp = route.mux().sendWithId(env, client.config().requestTimeout().toMillis())
+            Envelope resp = route.send(env, client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                             TimeUnit.MILLISECONDS);
             if (!resp.hasBarrierLeaveResponse()) {
@@ -219,7 +219,7 @@ final class RemoteBarrier implements OBarrier {
                             barrierAction != null);
                 }
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
-                CompletableFuture<Envelope> response = route.mux().sendWithId(env,
+                CompletableFuture<Envelope> response = route.send(env,
                         Math.min(remaining, client.config().requestTimeout().toMillis()));
                 StatusCode status;
                 boolean executor;
@@ -393,7 +393,7 @@ final class RemoteBarrier implements OBarrier {
             long remaining = deadline - System.currentTimeMillis();
             StatusCode status;
             try {
-                Envelope resp = route.mux().sendWithId(env,
+                Envelope resp = route.send(env,
                                 Math.max(1, Math.min(remaining,
                                         client.config().requestTimeout().toMillis())))
                         .get(Math.max(1, Math.min(remaining,
@@ -466,7 +466,7 @@ final class RemoteBarrier implements OBarrier {
     private boolean leaveAndAwait(OpenLatchClient.LatchRoute route, long awaitRid) {
         try {
             long rid = route.session().nextRequestId();
-            Envelope resp = route.mux().sendWithId(
+            Envelope resp = route.send(
                             OpenLatchClient.barrierLeaveEnvelope(rid, key, awaitRid),
                             client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,

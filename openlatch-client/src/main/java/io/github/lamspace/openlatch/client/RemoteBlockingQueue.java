@@ -359,7 +359,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
                 Envelope answer;
                 try {
-                    answer = route.mux().sendWithId(env,
+                    answer = route.send(env,
                                     Math.min(remaining, client.config().requestTimeout().toMillis()))
                             .get(Math.min(remaining,
                                     client.config().requestTimeout().toMillis() + SLACK_MS),
@@ -547,7 +547,7 @@ final class RemoteBlockingQueue implements ODelayQueue {
                 }
                 Envelope answer;
                 try {
-                    answer = route.mux().sendWithId(env,
+                    answer = route.send(env,
                                     Math.min(remaining,
                                             client.config().requestTimeout().toMillis()))
                             .get(Math.min(remaining,

@@ -166,7 +166,7 @@ final class RemotePhaser implements OPhaser {
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
                 Envelope resp;
                 try {
-                    resp = route.mux().sendWithId(env,
+                    resp = route.send(env,
                                     Math.min(remaining, client.config().requestTimeout().toMillis()))
                             .get(Math.min(remaining,
                                     client.config().requestTimeout().toMillis() + SLACK_MS),
@@ -287,7 +287,7 @@ final class RemotePhaser implements OPhaser {
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
                 Envelope resp;
                 try {
-                    resp = route.mux().sendWithId(env,
+                    resp = route.send(env,
                                     Math.min(remaining, client.config().requestTimeout().toMillis()))
                             .get(Math.min(remaining,
                                     client.config().requestTimeout().toMillis() + SLACK_MS),
@@ -439,7 +439,7 @@ final class RemotePhaser implements OPhaser {
         for (int attempt = 0; attempt < 3; attempt++) {
             long session = route.session().sessionId();
             try {
-                Envelope resp = route.mux().sendWithId(env,
+                Envelope resp = route.send(env,
                                 client.config().requestTimeout().toMillis())
                         .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                                 TimeUnit.MILLISECONDS);
@@ -521,7 +521,7 @@ final class RemotePhaser implements OPhaser {
                 return;
             }
             long rid2 = route.session().nextRequestId();
-            route.mux().sendWithId(OpenLatchClient.phaserEnvelope(rid2,
+            route.send(OpenLatchClient.phaserEnvelope(rid2,
                     PhaserOp.PHASER_OP_CANCEL, key, 0, null, rid),
                     client.config().requestTimeout().toMillis());
         } catch (RuntimeException ignored) {

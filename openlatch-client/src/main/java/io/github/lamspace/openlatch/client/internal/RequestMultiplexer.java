@@ -44,12 +44,14 @@ import java.util.function.Supplier;
  *       任务不会误杀新条目；</li>
  *   <li>同 id 重复登记（重发交叠）时，旧条目以 {@code superseded} 异常完成后
  *       让位于新条目——任何已挂起调用方的 future 都不会被静默覆盖丢失；</li>
- *   <li><b>出站取口同代</b>：业务出站（{@link #send} 与 {@link #sendWithId}）取口时
- *       要求存在活动会话，且会话与通道<b>同代</b>（取会话 → 取通道 → 回读会话，
- *       三次一致方得写出）；无活动会话（握手未完成、断连/重连窗）或取口期间
- *       会话换代时以瞬态"服务不可用"快速失败，<b>不写出</b>。握手请求先于会话
- *       存在，故经专用出口 {@link #sendHandshake} 发出（不查会话）；该豁免是
- *       路径级的，业务请求无入口可达；</li>
+ *   <li><b>出站取口同代</b>：业务出站（{@link #send}、{@link #sendWithId} 与
+ *       {@link #sendPinned}）取口时要求存在活动会话，且会话与通道<b>同代</b>
+ *       （取会话 → 取通道 → 回读会话，三次一致方得写出）；无活动会话（握手未
+ *       完成、断连/重连窗）、取口期间换代、或**信封的同代基准已非当前会话**时
+ *       以瞬态"服务不可用"快速失败，<b>不写出</b>。持有会话快照（路由）的调用方
+ *       MUST 用 {@link #sendPinned}（以快照为基准判负）。握手请求先于会话存在，
+ *       故经专用出口 {@link #sendHandshake} 发出（不查会话）；该豁免是路径级的，
+ *       业务请求无入口可达；</li>
  *   <li>无匹配挂起项的入站信封（孤儿响应）路由给孤儿下沉点，由等待跟踪
  *       组件处理补偿归还。</li>
  * </ul>
@@ -142,7 +144,7 @@ public final class RequestMultiplexer {
         // 观测收口在 sendWithId（避免双注册双计数）；本方法的 startNanos 仅
         // 服务"无会话即失败"快速路径。分配 requestId 的会话即本信封的"同代"
         // 判据基准：取口若已换代，取口判负（不得让旧代编号落在新代通道上）。
-        return sendWithId(envelope, session, timeoutMs);
+        return sendPinned(envelope, session, timeoutMs);
     }
 
     /**
@@ -152,9 +154,10 @@ public final class RequestMultiplexer {
      * {@link io.github.lamspace.openlatch.client.OpenLatchException} 完成，
      * 保证两个调用方的 future 均有界完成。
      *
-     * <p>同代基准取调用当下的活动会话：调用方若以<b>其它</b>会话分配了信封的
-     * {@code requestId}（手持跨代路由快照），本方法无法据信封识别——该形态不在
-     * 本判据覆盖内，由调用方各自的换代守卫负责。
+     * <p><b>同代基准取调用当下的活动会话</b>——本形态的语义是"信封由当前会话
+     * <b>现取现发</b>"（调用方刚在活动会话上分配了 {@code requestId}）。**持有会话
+     * 快照**（路由、重发登记等）的调用方 MUST NOT 用本形态：快照已非当前会话时
+     * 本形态无从据信封识别，须改用 {@link #sendPinned}，以快照为基准判负。
      *
      * @param envelope  完整信封（已含请求 id）
      * @param timeoutMs 该请求的超时（毫秒）
@@ -162,35 +165,38 @@ public final class RequestMultiplexer {
      *         {@link ServerUnavailableException} 失败（且不写出）
      */
     public CompletableFuture<Envelope> sendWithId(Envelope envelope, long timeoutMs) {
-        return sendWithId(envelope, sessionSupplier.get(), timeoutMs);
+        return sendPinned(envelope, sessionSupplier.get(), timeoutMs);
     }
 
     /**
-     * 业务出站收口：以 {@code stamped}（分配本信封 {@code requestId} 的会话）
-     * 为同代基准执行取口，通过后登记并写出。
+     * 业务出站收口（**带同代基准**）：以 {@code pinned}（分配本信封
+     * {@code requestId} 的会话）为基准执行取口，通过后登记并写出。
      *
-     * <p>取口判据（判负一律瞬态失败且不写出）：
+     * <p>取口判据（判负一律瞬态失败且 <b>不写出</b>）：
      * <ol>
-     *   <li>{@code stamped} 非空——无活动会话（握手未完成、断连/重连窗）时
+     *   <li>{@code pinned} 非空——无活动会话（握手未完成、断连/重连窗）时
      *       业务请求注定被服务端拒（会话取自连接），故本端先判负，不再白写一帧；</li>
      *   <li>活跃通道可从供应者取得——通道不可用即"连接不可用"；</li>
-     *   <li><b>回读会话与 {@code stamped} 同对象</b>——会话对象每连接新建（对象
-     *       身份即代次），且会话与通道在连接状态机内成对更换；两次读到同一对象
-     *       即证明中间取到的通道属该代次连接。换代则判负，杜绝"旧代编号落在
-     *       新代通道上"。</li>
+     *   <li><b>回读会话与 {@code pinned} 同对象</b>——会话对象每连接新建（对象
+     *       身份即代次），且会话与通道在连接状态机内成对更换。换代则判负，
+     *       杜绝"旧代编号落在新代通道上"：服务端按<b>连接</b>判会话，跨代的
+     *       去重槽（{@code (session, op_seq)}）不互相覆盖 ⇒ 跨代落点会被当
+     *       新操作受理，是<b>静默重复生效</b>而非被拒。本方法不做"换会话重发"
+     *       （那正是该静默窗本身）——换会话只能是调用方的决定，且须由其
+     *       换代守卫/幂等判据背书。</li>
      * </ol>
      * 判负用既有瞬态失败语义（{@link ServerUnavailableException}）：调用方按
-     * 可重试处理，重连后由其自身逻辑尝试续发。
+     * 可重试处理（取新路由 / 由其自身逻辑尝试续发）。
      *
      * @param envelope  已带 {@code requestId} 的信封
-     * @param stamped   该信封的同代基准会话；{@code null} 表示当前无活动会话
+     * @param pinned    该信封的同代基准会话；{@code null} 表示当前无活动会话
      * @param timeoutMs 该请求的超时（毫秒）
      * @return 响应 future
      */
-    private CompletableFuture<Envelope> sendWithId(Envelope envelope, SessionContext stamped,
+    public CompletableFuture<Envelope> sendPinned(Envelope envelope, SessionContext pinned,
             long timeoutMs) {
         long startNanos = System.nanoTime();
-        if (stamped == null) {
+        if (pinned == null) {
             return instrumented(failedFuture(new ServerUnavailableException("no active session")),
                     envelope.getType(), startNanos);
         }
@@ -199,9 +205,9 @@ public final class RequestMultiplexer {
             return instrumented(failedFuture(new ServerUnavailableException("connection is not active")),
                     envelope.getType(), startNanos);
         }
-        if (sessionSupplier.get() != stamped) {
+        if (sessionSupplier.get() != pinned) {
             return instrumented(failedFuture(new ServerUnavailableException(
-                    "session changed while picking the connection")),
+                    "session changed after the request was stamped by '" + pinned.sessionId() + "'")),
                     envelope.getType(), startNanos);
         }
         return dispatch(envelope, channel, timeoutMs, startNanos);

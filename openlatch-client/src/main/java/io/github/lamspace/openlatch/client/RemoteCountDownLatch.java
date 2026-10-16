@@ -166,7 +166,7 @@ final class RemoteCountDownLatch implements OCountDownLatch {
                     env = OpenLatchClient.latchAwaitEnvelope(rid, key, total);
                 }
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
-                CompletableFuture<Envelope> response = route.mux().sendWithId(env,
+                CompletableFuture<Envelope> response = route.send(env,
                         Math.min(remaining, client.config().requestTimeout().toMillis()));
                 StatusCode status;
                 long waitMs;
@@ -278,7 +278,7 @@ final class RemoteCountDownLatch implements OCountDownLatch {
         long rid = route.session().nextRequestId();
         Envelope env = OpenLatchClient.latchCountDownEnvelope(rid, key, n, total);
         try {
-            Envelope resp = route.mux().sendWithId(env, client.config().requestTimeout().toMillis())
+            Envelope resp = route.send(env, client.config().requestTimeout().toMillis())
                     .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                             TimeUnit.MILLISECONDS);
             if (!resp.hasLatchCountDownResponse()) {

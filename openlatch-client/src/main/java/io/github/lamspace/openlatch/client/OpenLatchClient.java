@@ -1873,12 +1873,60 @@ public final class OpenLatchClient implements AutoCloseable {
     }
 
     /**
-     * 屏障路由：会话与出站多路复用器配对（请求 id 与发送通道同源）。
+     * 锁原语路由：**会话与出站口配对，并把配对的会话钉为该路由出站的同代基准**。
      *
-     * @param session 路由选定时的会话
-     * @param mux     该会话所属车道的多路复用器
+     * <p>路由选定时的会话被登记为出站基准：{@link #send} 只在<b>该会话仍是连接
+     * 当前会话</b>时写出（见
+     * {@link RequestMultiplexer#sendPinned(Envelope, SessionContext, long)}）。
+     * 这样"按某代会话编号的信封"不可能落在另一代会话的连接上——服务端按连接判
+     * 会话、跨代去重槽不互相覆盖，跨代落点是静默重复生效而非被拒。
+     *
+     * <p><b>无裸出站口</b>：本类**不**暴露多路复用器本身，出站只能经 {@link #send}
+     * ——"经路由出站必带同代基准"因此是结构性的，不靠调用方自觉。路由的
+     * <b>车道选取</b>仍按"起手钉住"纪律（不因外部刷新重取全局路由），本类不改该语义。
      */
-    record LatchRoute(SessionContext session, RequestMultiplexer mux) {
+    static final class LatchRoute {
+
+        /** 路由选定时的会话（本路由出站的同代基准）。 */
+        private final SessionContext session;
+        /** 该会话所属车道的多路复用器。 */
+        private final RequestMultiplexer mux;
+
+        /**
+         * 创建路由。
+         *
+         * @param session 路由选定时的会话
+         * @param mux     该会话所属车道的多路复用器
+         */
+        LatchRoute(SessionContext session, RequestMultiplexer mux) {
+            this.session = session;
+            this.mux = mux;
+        }
+
+        /**
+         * 路由选定时的会话（信封 {@code requestId} 的分配来源）。
+         *
+         * @return 会话
+         */
+        SessionContext session() {
+            return session;
+        }
+
+        /**
+         * 经本路由出站（同代基准 = 本路由的会话）。
+         *
+         * <p>基准已非连接当前会话时以瞬态"服务不可用"失败且**不写出**（调用方
+         * 在其"路由不可用"判定点重取路由；写路径的换会话续发由其换代守卫与幂等
+         * 判据裁决）。登记、同 id 交叠与超时口径见
+         * {@link RequestMultiplexer#sendPinned(Envelope, SessionContext, long)}。
+         *
+         * @param envelope  完整信封（已含请求 id）
+         * @param timeoutMs 该请求的超时（毫秒）
+         * @return 响应 future
+         */
+        CompletableFuture<Envelope> send(Envelope envelope, long timeoutMs) {
+            return mux.sendPinned(envelope, session, timeoutMs);
+        }
     }
 
     // ==================== v8 广播订阅路由（OTopic） ====================

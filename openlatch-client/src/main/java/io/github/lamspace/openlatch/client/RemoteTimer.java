@@ -188,7 +188,7 @@ final class RemoteTimer implements OTimer {
                 CompletableFuture<Void> arrived = registry.register(envSession, rid);
                 Envelope resp;
                 try {
-                    resp = route.mux().sendWithId(env,
+                    resp = route.send(env,
                                     Math.min(remaining, client.config().requestTimeout().toMillis()))
                             .get(Math.min(remaining,
                                     client.config().requestTimeout().toMillis() + SLACK_MS),
@@ -321,7 +321,7 @@ final class RemoteTimer implements OTimer {
         for (int attempt = 0; attempt < 3; attempt++) {
             long session = route.session().sessionId();
             try {
-                Envelope resp = route.mux().sendWithId(env,
+                Envelope resp = route.send(env,
                                 client.config().requestTimeout().toMillis())
                         .get(client.config().requestTimeout().toMillis() + SLACK_MS,
                                 TimeUnit.MILLISECONDS);
@@ -384,7 +384,7 @@ final class RemoteTimer implements OTimer {
                 return;
             }
             long rid2 = route.session().nextRequestId();
-            route.mux().sendWithId(OpenLatchClient.timerCancelEnvelope(rid2, key, rid),
+            route.send(OpenLatchClient.timerCancelEnvelope(rid2, key, rid),
                     client.config().requestTimeout().toMillis());
         } catch (RuntimeException ignored) {
             // 尽力而为：ghost 由簿记换主清零与三路回收收敛（契约声明面）

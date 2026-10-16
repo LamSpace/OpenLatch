@@ -21,7 +21,9 @@ import io.github.lamspace.openlatch.client.internal.RequestMultiplexer;
 import io.github.lamspace.openlatch.client.internal.ScriptedServer;
 import io.github.lamspace.openlatch.client.internal.SessionContext;
 import io.github.lamspace.openlatch.protocol.Envelope;
+import io.github.lamspace.openlatch.protocol.HelloResponse;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.StatusCode;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.HashedWheelTimer;
 import org.junit.jupiter.api.Test;
@@ -31,25 +33,30 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 业务出站取口的**会话/通道同代**判据（确定性夹具）。
+ * 业务出站的**会话/通道同代**判据（确定性夹具）。
  *
- * <p>锁定的两条形态：
+ * <p>锁定的形态：
  * <ol>
  *   <li><b>握手未完成期</b>——TCP 已连通（{@code HELLO} 已发出）而会话尚未建立时，
  *       业务请求 MUST NOT 写到线上，MUST 以瞬态"服务不可用"收场；握手请求自身
  *       不受该门约束（同一窗口内仍须正常发出）。</li>
  *   <li><b>取口期间换代</b>——取会话与取通道之间会话已更新时，请求 MUST NOT 以
  *       旧代编号落在新一代通道上，MUST 以瞬态"服务不可用"收场。</li>
+ *   <li><b>陈旧路由出站</b>——调用方在会话 A 下取定路由（会话快照），连接换代到
+ *       B 后再经该陈旧路由出站时，请求 MUST NOT 落在 B 的连接上（服务端按连接
+ *       判会话，跨代落点会被当新操作受理 ⇒ 静默重复生效），MUST 以瞬态"服务
+ *       不可用"收场。</li>
  * </ol>
  *
- * <p>两条判据都以"服务端（或内存通道）侧零出现该请求"为观测点：既能红在
+ * <p>各判据都以"服务端（或内存通道）侧零出现该请求"为观测点：既能红在
  * "写了不该写的东西"，也不会被"本端先超时"这类时序噪声误判成绿。
- * 第三个用例是反向锁：会话稳定且通道可用时请求**必须**照常写出——挡住
+ * 另两枚用例是反向锁：会话稳定/路由同代时请求**必须**照常写出——挡住
  * "把闸门焊死后连正常路径一起掐死"的过修复。
  */
 class OutboundPickupCoherenceTest {
@@ -127,6 +134,67 @@ class OutboundPickupCoherenceTest {
         } finally {
             timer.stop();
             channel.close();
+        }
+    }
+
+    /**
+     * 陈旧路由：连接换代后经旧会话快照的路由出站，请求不得落到新会话的连接上。
+     *
+     * <p>脚本化桩对每次 {@code HELLO} 回 {@code OK} 与逐次递增的 {@code sessionId}；
+     * 客户端首连取路由（快照会话 A）后关闭通道强制换代，等新会话 B 就绪，再经该
+     * **陈旧路由**出站。观测点在桩侧：新会话的连接上 MUST NOT 出现该请求。
+     *
+     * @throws Exception 等待或断言失败
+     */
+    @Test
+    void staleRouteSendIsNotWrittenAfterSessionSwitch() throws Exception {
+        AtomicLong sids = new AtomicLong(1_000L);
+        try (ScriptedServer server = new ScriptedServer(env -> {
+            if (env.getType() != MessageType.HELLO) {
+                return null; // 业务请求一概不应答：写出与否由桩侧入站记录判定
+            }
+            return Envelope.newBuilder()
+                    .setProtocolVersion(env.getProtocolVersion())
+                    .setType(MessageType.HELLO)
+                    .setRequestId(env.getRequestId())
+                    .setHelloResponse(HelloResponse.newBuilder()
+                            .setStatus(StatusCode.OK)
+                            .setSessionId(sids.incrementAndGet()))
+                    .build();
+        })) {
+            OpenLatchClient client = OpenLatchClient.builder()
+                    .address(server.address())
+                    .reconnectInitialBackoff(Duration.ofMillis(50))
+                    .reconnectMaxBackoff(Duration.ofMillis(200))
+                    .build();
+            try {
+                client.connectAsync().get(WINDOW_WAIT_MS, TimeUnit.MILLISECONDS);
+                OpenLatchClient.LatchRoute stale = client.latchRoute();
+                assertThat(stale).as("首连后应可取到路由").isNotNull();
+                long sessionA = stale.session().sessionId();
+
+                // 强制换代：关闭当前通道 → 退避重连 → 新会话 B
+                client.connectionManager().activeChannel().close().syncUninterruptibly();
+                assertThat(awaitTrue(() -> {
+                    SessionContext current = client.connectionManager().session();
+                    return current != null && current.sessionId() != sessionA;
+                }, WINDOW_WAIT_MS)).as("应已换代为会话 B").isTrue();
+
+                server.clearReceived();
+                Envelope business = Envelope.newBuilder()
+                        .setType(MessageType.LOCK_ACQUIRE)
+                        .setRequestId(stale.session().nextRequestId())
+                        .build();
+                Throwable failure = failureOf(
+                        stale.send(business, SEND_BUDGET_MS));
+
+                assertThat(server.countType(MessageType.LOCK_ACQUIRE))
+                        .as("陈旧路由出站不得落在新会话的连接上").isZero();
+                assertThat(failure).as("陈旧路由出站须以瞬态不可用收场")
+                        .isInstanceOf(ServerUnavailableException.class);
+            } finally {
+                client.shutdown();
+            }
         }
     }
 

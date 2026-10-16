@@ -199,7 +199,7 @@ abstract class RemoteAtomicBase {
             }
             AtomicOpResponse resp;
             try {
-                Envelope answer = route.mux().sendWithId(env,
+                Envelope answer = route.send(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasAtomicOpResponse()) {
@@ -367,7 +367,7 @@ abstract class RemoteAtomicBase {
             }
             AtomicOpResponse resp;
             try {
-                Envelope answer = route.mux().sendWithId(env,
+                Envelope answer = route.send(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasAtomicOpResponse()) {
