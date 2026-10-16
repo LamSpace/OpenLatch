@@ -31,4 +31,4 @@
 
 - [x] 5.1 夹具 3 轮全绿（不 flaky）。→ 全反应堆轮内 4/4 绿 + 单跑 2 轮 4/4 绿（`w22b-green-round{1,2,3}.log`）
 - [x] 5.2 `mvn -s /home/lam/repo/settings.xml clean verify` 全反应堆通过（含 `verify-javadoc`）。→ `BUILD SUCCESS`（8/8；客户端夹具 4/4、`ClientClusterIT` 9/9 绿）
-- [ ] 5.3 归档 change、按 fix/docs 拆分提交、推送开 PR；CI 两检查绿（PR 侧回读）。
+- [x] 5.3 归档 change、按 fix/docs 拆分提交、推送开 PR；CI 两检查绿（PR 侧回读）。→ PR #43（run 38914002504：`verify` 14m17s 与 citation gate 均 pass，`attempt=1`、`mergeStateStatus=CLEAN`）
