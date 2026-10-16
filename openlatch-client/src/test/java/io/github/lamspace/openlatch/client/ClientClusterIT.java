@@ -236,6 +236,24 @@ class ClientClusterIT {
         }
     }
 
+    /**
+     * 标量原子量的换主持久锚：**已提交账本不丢、不双加、版本戳不漂移**（契约面判据）。
+     *
+     * <p><b>判据口径（2026-10-16 由"严格活性"改到契约面，判例见台账 W19）</b>：
+     * 原子族为 exactly-once 有意让渡活性——换主/启动窗内的读写遇**显式终态**
+     * （会话换代拒绝、请求预算耗尽、连接不可用）是契约已声明的合法收场，契约
+     * 给出的补救即 {@code getStamped()} 复核。故本锚不再要求"每一步都在预算内
+     * 一次成功"，改判 <b>不静默错值</b>：显式失败由
+     * {@link LeaderKillLedger} 先复核解除不确定、再据实况**有界**推进
+     * （<b>不盲目重发</b>——重发已生效的增量会重复生效），而安全面断言**照旧
+     * 跑完**：换主后已提交态 MUST 原样存续、增量步的读数 MUST 只落在
+     * "未生效／已生效一次"两态内（双加即红）、推进 MUST 有界收敛（真 wedge 仍红）。
+     *
+     * <p><b>本锚不再覆盖</b>：换主窗内的**成功率**（严格活性）；该面若劣化，
+     * 由 W11 收敛锚与故障注入类 IT 承载。
+     *
+     * @throws Exception 等待或断言失败
+     */
     @Test
     void committedAtomicValueSurvivesLeaderKillWithoutDoubleApply() throws Exception {
         startCluster(3);
@@ -244,22 +262,36 @@ class ClientClusterIT {
         try (OpenLatchClient client = clientTo(allSeeds)) {
             client.connectAsync().get(10, TimeUnit.SECONDS);
             OAtomicLong a = client.newAtomicLong("ak");
-            assertThat(a.addAndGet(5)).isEqualTo(5);
-            assertThat(a.incrementAndGet()).isEqualTo(6);   // version 2
+            // 前置态：有界推进到 5 再 6（显式失败先复核再推进；读数只许落在两态内）
+            long atFive = LeaderKillLedger.advanceScalar("建立 5", a, 0, 5);
+            assertThat(atFive).isEqualTo(5);
+            long atSix = LeaderKillLedger.advanceScalar("建立 6", a, atFive, 1);
+            assertThat(atSix).isEqualTo(6);   // version 2
             NodeRef victim = leader();
             stopNode(victim);
             awaitTrue(() -> {
                 NodeRef l = leader();
                 return l != null && l != victim;
             }, "新主选出");
-            // 已提交值：不丢（回 0）、不双加（12）；版本戳无漂移（2）。
-            assertThat(a.get()).isEqualTo(6);
-            assertThat(a.getVersion()).isEqualTo(2);
-            // 后续写经改道到新主照常落值（同窗口重发由去重槽保证不双加）。
-            assertThat(a.incrementAndGet()).isEqualTo(7);
+            // 已提交值：不丢（回 0）、不双加（12）；版本戳无漂移（2）——读幂等可重发
+            OAtomicLong.Stamped afterKill = LeaderKillLedger.readScalarStamped("换主后读", a);
+            LeaderKillLedger.assertDurable("换主后账本", afterKill.value(), afterKill.version(), 6, 2);
+            // 后续写经改道到新主有界落值（同窗口重发由去重槽保证不双加）
+            assertThat(LeaderKillLedger.advanceScalar("换主后续写", a, afterKill.value(), 1))
+                    .isEqualTo(7);
         }
     }
 
+    /**
+     * 有值引用的换主持久锚：**已提交载荷字节级不丢不漂、版本戳不漂、续写照常**
+     * （契约面判据，口径同 {@link #committedAtomicValueSurvivesLeaderKillWithoutDoubleApply}）。
+     *
+     * <p>引用族的增量步是 CAS 形态（期望载荷 + 每会话去重槽双保险），推进同样走
+     * "先复核、再有界推进"纪律；复核读到的载荷只允许停在
+     * "前置载荷／目标载荷"两态内——读到第三方载荷即红（被写坏）。
+     *
+     * @throws Exception 等待或断言失败
+     */
     @Test
     void committedReferencePayloadSurvivesLeaderKillWithoutDrift() throws Exception {
         startCluster(3);
@@ -268,18 +300,18 @@ class ClientClusterIT {
         try (OpenLatchClient client = clientTo(allSeeds)) {
             client.connectAsync().get(10, TimeUnit.SECONDS);
             OAtomicReference r = client.newAtomicReference("rpk");
-            r.set("v1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            assertThat(r.compareAndSetString("v1", "v2")).isTrue(); // version 2
+            assertThat(LeaderKillLedger.advanceRef("建立 v1", r, null, "v1")).isEqualTo("v1");
+            assertThat(LeaderKillLedger.advanceRef("CAS v2", r, "v1", "v2")).isEqualTo("v2");
             NodeRef victim = leader();
             stopNode(victim);
             awaitTrue(() -> {
                 NodeRef l = leader();
                 return l != null && l != victim;
             }, "新主选出");
-            assertThat(r.getAsString()).isEqualTo("v2");
-            assertThat(r.getVersion()).isEqualTo(2);
-            assertThat(r.compareAndSetString("v2", "v3")).isTrue(); // 换主后续写
-            assertThat(r.getAsString()).isEqualTo("v3");
+            OAtomicReference.Stamped afterKill = LeaderKillLedger.readRefStamped("换主后读", r);
+            assertThat(afterKill.valueAsString()).as("换主后载荷不漂").isEqualTo("v2");
+            assertThat(afterKill.version()).as("换主后版本戳不漂").isEqualTo(2);
+            assertThat(LeaderKillLedger.advanceRef("换主后续写", r, "v2", "v3")).isEqualTo("v3");
         }
     }
 
