@@ -74,9 +74,10 @@ import java.util.function.Consumer;
  * 触发 {@link #doConnect()}）与 EventLoop 线程（TCP 连接回调、通道失效）。
  * {@code stateLock} 仅保护四个非 volatile 字段（{@code state}、
  * {@code connectFuture}、{@code currentBackoffMs}、{@code reconnectTask}）；
- * {@code channel}、{@code session}、{@code pendingSession} 为 volatile，
- * {@link #activeChannel()}/{@link #session()} 不经锁读取，读方可能短暂
- * 看到旧值——「读到 {@code null} 即视为非 ACTIVE」是调用方须容忍的窗口语义。
+ * {@code channel}、{@code session}、{@code pendingSession} 为 volatile。
+ * {@link #activeChannel()} 在 {@code stateLock} 内联读"状态 + 通道"（保证通道
+ * 只在 ACTIVE 交出，见其方法注释），{@link #session()} 仍为无锁读取，读方可能
+ * 短暂看到旧值——「读到 {@code null} 即视为非 ACTIVE」是调用方须容忍的窗口语义。
  * 断连/握手回调中的用户级联动（断连回调、ACTIVE 监听）一律在锁外执行。
  *
  * <p><b>断连处理</b>：通道失效时先调用断连回调（由客户端装配：挂起请求
@@ -136,7 +137,12 @@ public final class ConnectionManager {
 
     /** 当前状态。 */
     private State state = State.DISCONNECTED;
-    /** 当前活动通道；非活动状态为 {@code null}。 */
+    /**
+     * 当前连接通道：建连成功即置、断连置空——<b>不代表会话就绪</b>
+     * （{@link State#HELLO_SENT} 期它已连通而会话尚未建立）。
+     * 对外只经 {@link #activeChannel()} 交出（非 ACTIVE 返回 {@code null}）；
+     * 握手路径直接持用本通道。
+     */
     private volatile Channel channel;
     /** 当前会话上下文；仅 ACTIVE 状态非 {@code null}。 */
     private volatile SessionContext session;
@@ -401,12 +407,21 @@ public final class ConnectionManager {
     }
 
     /**
-     * 当前活动通道。
+     * 当前活动通道（仅 {@link State#ACTIVE} 交出）。
      *
-     * @return 活动通道；非活动状态返回 {@code null}
+     * <p>与 {@link #session()} 同表：{@link State#HELLO_SENT} 期通道虽已连通
+     * （TCP 就绪）而会话尚未建立，此时交出通道会让业务出站以"无会话"的配对
+     * 写出一帧注定被服务端拒的请求（服务端按连接判会话）。故非 ACTIVE 一律
+     * 返回 {@code null}，由调用方（请求多路复用器的通道供应者）判为"连接
+     * 不可用"瞬态失败。握手不经此处——它由连接状态机把自己的通道交给
+     * 握手出站路径。
+     *
+     * @return 活动通道；非 ACTIVE 状态返回 {@code null}
      */
     public Channel activeChannel() {
-        return channel;
+        synchronized (stateLock) {
+            return state == State.ACTIVE ? channel : null;
+        }
     }
 
     /**
@@ -625,7 +640,7 @@ public final class ConnectionManager {
                 .setRequestId(context.nextRequestId())
                 .setHelloRequest(helloReq)
                 .build();
-        multiplexer.sendWithId(hello, remainingMs)
+        multiplexer.sendHandshake(hello, ch, remainingMs)
                 .whenComplete((resp, err) -> onHelloResult(ch, resp, err));
     }
 

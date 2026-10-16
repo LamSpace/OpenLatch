@@ -184,7 +184,7 @@ public final class SeedDiscovery {
                     .setRequestId(sc.nextRequestId())
                     .setHelloRequest(helloReq)
                     .build();
-            mux.sendWithId(hello, probeMs).whenComplete((resp, err) -> {
+            mux.sendHandshake(hello, ch, probeMs).whenComplete((resp, err) -> {
                 if (err != null || resp == null || !resp.hasHelloResponse()) {
                     finish(ch, result, err);
                     return;

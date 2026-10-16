@@ -50,6 +50,8 @@ class ClientMetricsTest {
     private io.micrometer.core.instrument.simple.SimpleMeterRegistry registry;
     /** 启用形态门面。 */
     private ClientMetrics metrics;
+    /** 活动会话：与"通道可用"成对（业务出站取口要求会话与通道同代）。 */
+    private SessionContext session;
 
     @BeforeEach
     void setUp() {
@@ -60,6 +62,7 @@ class ClientMetricsTest {
         }, 20, TimeUnit.MILLISECONDS);
         registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         metrics = new ClientMetrics(registry);
+        session = new SessionContext(42L);
     }
 
     @AfterEach
@@ -120,7 +123,7 @@ class ClientMetricsTest {
     @Test
     void responseStatusNameBecomesLabel() {
         Channel ch = new EmbeddedChannel();
-        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> null, metrics);
+        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> session, metrics);
         try {
             mux.sendWithId(request(7), 5_000);
             mux.onResponse(response(7, StatusCode.OK));
@@ -137,7 +140,7 @@ class ClientMetricsTest {
     @Test
     void timeoutCountsTimeoutLabel() throws Exception {
         Channel ch = new EmbeddedChannel();
-        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> null, metrics);
+        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> session, metrics);
         mux.setOutboundGate(e -> false); // 写黑洞：必超时
         try {
             CompletableFuture<Envelope> f = mux.sendWithId(request(9), 50);
@@ -153,7 +156,7 @@ class ClientMetricsTest {
     @Test
     void supersededOldFutureCountsFailed() {
         Channel ch = new EmbeddedChannel();
-        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> null, metrics);
+        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> session, metrics);
         try {
             CompletableFuture<Envelope> first = mux.sendWithId(request(11), 5_000);
             mux.sendWithId(request(11), 5_000); // 同 id 交叠：旧条目 superseded
@@ -169,7 +172,7 @@ class ClientMetricsTest {
     @Test
     void disconnectFailAllCountsUnavailable() {
         Channel ch = new EmbeddedChannel();
-        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> null, metrics);
+        RequestMultiplexer mux = new RequestMultiplexer(timer, () -> ch, () -> session, metrics);
         try {
             CompletableFuture<Envelope> f = mux.sendWithId(request(13), 5_000);
             mux.failAll(new ServerUnavailableException("connection lost"));
