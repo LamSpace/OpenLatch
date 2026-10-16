@@ -273,7 +273,7 @@ final class RemoteCondition implements OCondition {
             }
             StatusCode status;
             try {
-                Envelope answer = route.mux().sendWithId(env,
+                Envelope answer = route.send(env,
                         Math.min(remaining, budgetMs + SLACK_MS))
                         .get(Math.min(remaining, budgetMs + SLACK_MS), TimeUnit.MILLISECONDS);
                 if (!answer.hasConditionOpResponse()) {
@@ -346,7 +346,7 @@ final class RemoteCondition implements OCondition {
         }
         Envelope env = OpenLatchClient.conditionEnvelope(route.session().nextRequestId(),
                 ConditionOp.CONDITION_OP_LEAVE, key, name, 0L, awaitRequestId);
-        route.mux().sendWithId(env, client.config().requestTimeout().toMillis())
+        route.send(env, client.config().requestTimeout().toMillis())
                 .whenComplete((resp, err) -> {
                     if (err != null) {
                         log.debug("condition LEAVE on '{}' (await rid={}) best-effort failed: {}",
