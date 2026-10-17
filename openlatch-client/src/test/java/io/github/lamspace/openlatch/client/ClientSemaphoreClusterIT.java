@@ -40,6 +40,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(value = 150, unit = TimeUnit.SECONDS)
 class ClientSemaphoreClusterIT {
 
+    /** 转交重试上限：覆盖目标日志在竞选中再次落后的窗口。 */
+    private static final int TRANSFER_ATTEMPTS = 5;
+    /** 转交重试轮间静置（毫秒）：等待选举静默与目标日志追平。 */
+    private static final long TRANSFER_RETRY_PAUSE_MS = 200;
+
     /** 集群节点句柄。 */
     private static final class NodeRef {
         /** 节点序号。 */
@@ -170,7 +175,7 @@ class ClientSemaphoreClusterIT {
         OSemaphore sa = a.newSemaphore("csem-handover", 2);
         sa.acquire(2);
         NodeRef before = leader();
-        transferLeadership(nodes.stream().filter(n -> !n.isLeader()).findFirst().orElseThrow());
+        transferLeadership(before);
         awaitTrue(() -> leader() != null && leader() != before, "让位完成");
         // 让位后释放经转发道送达新 Leader：成功且不泄漏。
         sa.release(2);
@@ -180,16 +185,56 @@ class ClientSemaphoreClusterIT {
         b.newSemaphore("csem-handover", 2).release(2);
     }
 
-    /** 当值 Leader 存活让位至目标节点。 */
-    private void transferLeadership(NodeRef to) {
-        NodeRef l = leader();
-        assertThat(l).as("让位前存在 Leader").isNotNull();
-        try {
-            var reply = l.server.cluster().subsystem().acquireClient().admin()
-                    .transferLeadership(org.apache.ratis.protocol.RaftPeerId.valueOf("n" + to.id), 5_000);
-            assertThat(reply.isSuccess()).as("transferLeadership 成功").isTrue();
-        } catch (java.io.IOException e) {
-            throw new AssertionError(e);
+    /**
+     * 当值 Leader 存活让位至任一非 Leader 节点；转交竞态下有界重试。
+     *
+     * <p>Ratis 转交与并发选举存在竞态：目标日志追平确认后，旧 Leader 发送
+     * {@code StartLeaderElection}，但目标在竞选前可能又落后一条，投票者以其日志落后
+     * 拒绝；旧 Leader 因更高 term 降级后可能重新当选。此时
+     * {@code onGroupLeaderElected} 以成功完成 pending 请求，
+     * {@code PendingRequest.complete} 发现当前 Leader 不是目标，遂转
+     * {@code DIFFERENT_LEADER}。这是转交尝试的合法失败，不是产品缺陷——本夹具只要求
+     * 领导权离开 {@code before}，故重读 Leader 后重试，而非把一次竞态包装成断言失败。
+     *
+     * <p><b>判定顺序</b>：每轮先看领导权是否已离开 {@code before}（是则直接达成）；
+     * 否则取当前 Leader 与任一当前非 Leader 节点发起转交。仅
+     * {@code TransferLeadershipException} 触发重试；其他 {@code IOException}
+     * 仍立即失败，不掩盖真实故障。最多 {@value #TRANSFER_ATTEMPTS} 轮，轮间静置
+     * {@value #TRANSFER_RETRY_PAUSE_MS} 毫秒等待选举静默与日志追平。
+     *
+     * @param before 转交前的 Leader；领导权一旦不再属于它即视为达成
+     * @throws InterruptedException 轮间静置被中断
+     */
+    private void transferLeadership(NodeRef before) throws InterruptedException {
+        assertThat(before).as("让位前存在 Leader").isNotNull();
+        org.apache.ratis.protocol.exceptions.TransferLeadershipException last = null;
+        for (int attempt = 0; attempt < TRANSFER_ATTEMPTS; attempt++) {
+            NodeRef now = leader();
+            if (now != null && now != before) {
+                return; // 领导权已离开 before：夹具意图达成
+            }
+            NodeRef target = now == null ? null : nodes.stream()
+                    .filter(n -> !n.isLeader())
+                    .findFirst().orElse(null);
+            if (now == null || target == null) {
+                Thread.sleep(TRANSFER_RETRY_PAUSE_MS);
+                continue;
+            }
+            try {
+                var reply = now.server.cluster().subsystem().acquireClient().admin()
+                        .transferLeadership(org.apache.ratis.protocol.RaftPeerId.valueOf("n" + target.id), 5_000);
+                if (reply.isSuccess()) {
+                    return;
+                }
+            } catch (org.apache.ratis.protocol.exceptions.TransferLeadershipException e) {
+                last = e;
+                System.err.println("[W25] transferLeadership retry " + (attempt + 1)
+                        + " (leader=" + now.id + ", target=" + target.id + "): " + e.getMessage());
+            } catch (java.io.IOException e) {
+                throw new AssertionError(e);
+            }
+            Thread.sleep(TRANSFER_RETRY_PAUSE_MS);
         }
+        throw new AssertionError("transferLeadership 连续失败（领导权未离开 " + before.id + "）", last);
     }
 }
