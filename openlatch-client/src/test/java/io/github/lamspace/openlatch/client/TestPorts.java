@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.client;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -53,6 +55,12 @@ final class TestPorts {
     static final int BAND_HI = 29_999;
     /** 带内换候选的最大次数（容忍带内偶发占用）。 */
     private static final int MAX_ATTEMPTS = 100;
+    /**
+     * 本 JVM 已交出的端口：**不再二次发放**。多节点装配会在任何服务端 bind 之前
+     * 连续取样 2n 次，随机候选可能重复（带宽 10k、十余次取样时重复概率不可忽略）；
+     * 探针只能证明"此刻可绑定"，不能防止把同一个口交给两个节点。
+     */
+    private static final Set<Integer> HANDED_OUT = ConcurrentHashMap.newKeySet();
 
     /**
      * 工具类，不实例化。
@@ -65,22 +73,28 @@ final class TestPorts {
      *
      * <p>语义：返回的口在调用时刻**确可绑定**（探针实测过），且因位于取样带内而
      * **不可能被内核的临时口分配器派给并发 {@code connect}**——这正是探针-重绑窗口
-     * 安全的前提。返回值只保证"此刻"，调用方仍应在 bind 失败时按业务语义处置
+     * 安全的前提。**同一 JVM 内不会重复发放**（{@link #HANDED_OUT} 预留），因为多节点
+     * 装配会在任何服务端 bind 之前连续取样，探针无法阻止同一口被交给两个节点。
+     * 返回值只保证"此刻"，调用方仍应在 bind 失败时按业务语义处置
      * （本仓既有纪律：装配失败即测试失败，不靠重试掩盖）。
      *
-     * @return 取样带内的可绑定端口号
-     * @throws IOException 带内连续 {@value #MAX_ATTEMPTS} 次候选均被占用（异常信息含带范围）
+     * @return 取样带内的可绑定、且本 JVM 从未交出过的端口号
+     * @throws IOException 带内连续 {@value #MAX_ATTEMPTS} 次候选均不可用（异常信息含带范围）
      */
     static int freeNonEphemeral() throws IOException {
         for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
             int candidate = BAND_LO + ThreadLocalRandom.current()
                     .nextInt(BAND_HI - BAND_LO + 1);
+            if (!HANDED_OUT.add(candidate)) {
+                continue; // 本 JVM 已发放过：换候选（防同一装配批次内重号）
+            }
             try (ServerSocket probe = new ServerSocket()) {
                 probe.setReuseAddress(false);
                 probe.bind(new InetSocketAddress(candidate));
                 return candidate;
             } catch (IOException busy) {
-                // 被占或 TIME_WAIT 残留：换下一个候选
+                // 被占或 TIME_WAIT 残留：释放预留并换下一个候选
+                HANDED_OUT.remove(candidate);
             }
         }
         throw new IOException("no free non-ephemeral port in ["
