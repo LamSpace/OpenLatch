@@ -16,9 +16,11 @@
 
 package io.github.lamspace.openlatch.client;
 
+import io.github.lamspace.openlatch.client.internal.LockDeniedException;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.server.raft.ShadowTable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -35,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -83,6 +86,8 @@ class ClientChaosIT {
     static final String SOAK_PROPERTY = "openlatch.chaos.soak-minutes";
     /** 固定种子（可复现）。 */
     private static final long SEED = 20260902L;
+    /** 授予可核验窗口（毫秒）：须在此窗口内于存活节点找到匹配 stamp 的服务端读数。 */
+    private static final long VERIFY_TIMEOUT_MS = 5_000L;
 
     private static final class NodeRef {
         final int id;
@@ -136,6 +141,63 @@ class ClientChaosIT {
     }
 
     /**
+     * 确定性反向夹具：**合法易手不得被判为双授**（W21 假阳性机理的证伪）。
+     *
+     * <p>场景：A 授予 key → 杀掉 A 所在节点（会话清理/租约到期使锁合法易手）
+     * → B 再授予。此间 A 的客户端注册表登记仍在（其 release 尚未收场），
+     * 旧口径（注册表命中即计冲突）必然误报；服务端权威读数的 holders 只有 B。
+     *
+     * <p>断言：服务端读数与本次授予 stamp 一致且只含 B；{@link #isDoubleGrant}
+     * 返回 {@code false}（新口径）。第一条断言保证构造确实触发了"注册表陈旧"
+     * 这一触发条件。
+     *
+     * @throws Exception 等待或断言失败
+     */
+    @Test
+    void legalHandoffAfterHolderNodeDeathIsNotDoubleGrant() throws Exception {
+        startCluster(3, 60L);
+        String key = "ck-handoff";
+        long tidA = 41_000L;
+        long tidB = 41_001L;
+        try (OpenLatchClient a = clientTo()) {
+            a.connectAsync().get(15, TimeUnit.SECONDS);
+            LockGrant ga = acquireEventually(a, key, tidA, 15_000L);
+            assertThat(ga).as("A 首次授予").isNotNull();
+            NodeRef holderNode = leader();
+            assertThat(holderNode).as("A 所在 Leader 存活").isNotNull();
+            stopNode(holderNode);
+        }
+        // 持有者节点死亡：租约到期 + 会话清理落地。先等过一个租约期，排除
+        // "新 Leader 尚未应用授予条目"造成的 heldRef==null 假释放。
+        Thread.sleep(LEASE_MS + 2_000L);
+        awaitTrue(() -> {
+            NodeRef l = leader();
+            return l != null && heldRef(l, key) == null;
+        }, "持有者节点死亡后 key 释放");
+        try (OpenLatchClient b = clientTo()) {
+            b.connectAsync().get(15, TimeUnit.SECONDS);
+            LockGrant gb = acquireEventually(b, key, tidB, 15_000L);
+            assertThat(gb).as("合法易手后 B 授予成功").isNotNull();
+            NodeRef l = leader();
+            assertThat(l).as("混沌后当选 Leader").isNotNull();
+            ShadowTable.HeldRef ref = heldRef(l, key);
+            assertThat(ref).as("服务端权威读数存在").isNotNull();
+            assertThat(ref.leaseToken()).as("stamp 与本次授予一致").isEqualTo(gb.leaseToken());
+            assertThat(ref.holders()).as("只有 B 持有").hasSize(1);
+            assertThat(ref.holders().iterator().next().threadId()).isEqualTo(tidB);
+            // 旧口径重现：A 的登记仍在（其 release 尚未收场），B 登记时命中
+            // "另一线程持有" ⇒ 旧判据必计一次假阳性（W21 机理成立）。
+            Map<String, Long> staleRegistry = new ConcurrentHashMap<>();
+            staleRegistry.put(key, tidA);
+            Long prev = staleRegistry.put(key, tidB);
+            assertThat(prev).as("旧口径：注册表仍登记 A ⇒ 必误报").isEqualTo(tidA);
+            // 新口径：服务端权威面无双持有
+            assertThat(isDoubleGrant(key, gb, new AtomicLong()))
+                    .as("合法易手不构成双授").isFalse();
+        }
+    }
+
+    /**
      * 字面持续负载 soak（发布级独占环境单轮补跑）：负载
      * 窗口为 {@value #SOAK_PROPERTY} 分钟（墙钟预算，正整数），驱动逻辑、
      * 随机种子与不变式断言同常规回归，唯一变量是预算——随机性与语义面与短
@@ -167,6 +229,8 @@ class ClientChaosIT {
         AtomicBoolean stop = new AtomicBoolean();
         Map<String, Long> holders = new ConcurrentHashMap<>();
         AtomicLong conflicts = new AtomicLong();
+        AtomicLong handoffs = new AtomicLong();
+        AtomicLong unverified = new AtomicLong();
         AtomicLong grants = new AtomicLong();
         AtomicInteger kills = new AtomicInteger();
         AtomicInteger restarts = new AtomicInteger();
@@ -192,10 +256,20 @@ class ClientChaosIT {
                         // DENIED（键忙）/断连/无 Leader：调用方重试的合法语义。
                         continue;
                     }
-                    // 授予成功：登记本线程持有。冲突=另一线程已持有同 key（双授）。
+                    // 授予成功：登记本线程持有。注册表命中（另一线程仍登记持有）
+                    // 只作触发——合法易手会留下陈旧登记，须由服务端权威读数裁决。
                     Long prev = holders.put(key, tid);
                     if (prev != null && prev != tid) {
-                        conflicts.incrementAndGet();
+                        try {
+                            if (isDoubleGrant(key, g, unverified)) {
+                                conflicts.incrementAndGet();
+                            } else {
+                                handoffs.incrementAndGet();
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
                     }
                     grants.incrementAndGet();
                     try {
@@ -237,6 +311,8 @@ class ClientChaosIT {
             } else {
                 Thread.sleep(150); // 让位路径混沌占比小，本轮仅退避
             }
+            // 服务端权威采样：兜住"两次授予核对之间"的形态
+            sampleDoubleHoldAway(conflicts);
             Thread.sleep(120);
         }
 
@@ -252,9 +328,10 @@ class ClientChaosIT {
             th.join(15_000);
         }
         // 负载窗口与扰动计数汇总（soak 取证入库用；短窗口档同样打印，口径统一）。
-        System.out.printf("[CHAOS] windowBudgetMs=%d loadWallMs=%d kills=%d restarts=%d grants=%d conflicts=%d%n",
+        System.out.printf("[CHAOS] windowBudgetMs=%d loadWallMs=%d kills=%d restarts=%d grants=%d "
+                        + "conflicts=%d handoffs=%d unverified=%d%n",
                 chaosMs, System.currentTimeMillis() - loadStart, kills.get(), restarts.get(),
-                grants.get(), conflicts.get());
+                grants.get(), conflicts.get(), handoffs.get(), unverified.get());
         for (OpenLatchClient c : clients) {
             c.shutdown();
         }
@@ -264,7 +341,10 @@ class ClientChaosIT {
         for (NodeRef n : nodes) {
             assertThat(lockCount(n)).as("节点%d 混沌停载后无锁泄漏", n.id).isZero();
         }
-        assertThat(conflicts.get()).as("任何时刻同 key 至多一写持有者").isZero();
+        assertThat(conflicts.get())
+                .as("任何时刻同 key 至多一写持有者（服务端权威面：授予 stamp 核对 + 全节点采样）")
+                .isZero();
+        assertThat(unverified.get()).as("每次成功授予都须在窗口内可核验").isZero();
         assertThat(grants.get()).as("混沌窗口内系统确实持续授予").isGreaterThan(0);
     }
 
@@ -352,6 +432,124 @@ class ClientChaosIT {
 
     private static String digest(NodeRef n) {
         return n.server.cluster().core().digest();
+    }
+
+    /**
+     * 有界授予：立即式 acquire 的 {@code DENIED} 属合法过渡态——键忙，或本客户端
+     * 前一次"不确定授予"的旧会话仍持锁（应答丢失/会话换代后重发会被判为新请求，
+     * 服务端按"锁被占"拒绝）。重试直至授予或预算耗尽。
+     *
+     * @param c        客户端
+     * @param key      锁键
+     * @param tid      线程标识
+     * @param budgetMs 预算（毫秒）
+     * @return 授予
+     * @throws Exception 预算耗尽或非 {@code DENIED} 的失败
+     */
+    private LockGrant acquireEventually(OpenLatchClient c, String key, long tid, long budgetMs)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return c.acquireAsync(new AcquireSpec(key, LockType.REENTRANT, tid, LEASE_MS, 0))
+                        .get(15, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                if (!(e.getCause() instanceof LockDeniedException)) {
+                    throw e;
+                }
+                Thread.sleep(50);
+            }
+        }
+        throw new AssertionError("授予预算耗尽: " + key);
+    }
+
+    /** 服务端权威读数：指定节点影子表上该 key 的持有索引（无持有返回 {@code null}）。 */
+    private static ShadowTable.HeldRef heldRef(NodeRef n, String key) {
+        var cluster = n.server.cluster();
+        if (cluster == null) {
+            return null;
+        }
+        var core = cluster.core();
+        return core == null ? null : core.shadow().heldRef(key);
+    }
+
+    /**
+     * 服务端权威裁决：客户端注册表命中（同 key 另有陈旧登记）时，本次授予是否
+     * 构成真正的双持有。
+     *
+     * <p><b>为什么不能只看注册表</b>：混沌杀节点会让锁经租约到期/会话清理
+     * **合法易手**；原持有者的 {@code finally} 摘除要等其 release 收场，其间
+     * 新持有者登记即会被误判为冲突（W21 的假阳性机理）。
+     *
+     * <p><b>判据</b>：按本次授予的 {@code leaseToken} 在存活节点上定位已应用
+     * 该授予的影子表读数；该读数的 holders 出现 ≥2 个不同 {@code Holder}
+     * 才是真双授。应用日志序保证"应用了授予 ⇒ 此前的释放/清理均已应用"，
+     * 故匹配 stamp 的读数若仍见其他持有者即为真违规。
+     *
+     * @param key        锁键
+     * @param grant      本次授予（携 leaseToken）
+     * @param unverified 不可核验计数（调用方持有；窗口内无节点匹配 stamp 时递增）
+     * @return 真双授返回 {@code true}；已核验且仅本次持有者、或不可核验时返回 {@code false}
+     * @throws InterruptedException 等待被中断
+     */
+    private boolean isDoubleGrant(String key, LockGrant grant, AtomicLong unverified)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + VERIFY_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            for (NodeRef n : nodes) {
+                if (!n.isAlive()) {
+                    continue;
+                }
+                var cluster = n.server.cluster();
+                if (cluster == null) {
+                    continue;
+                }
+                var core = cluster.core();
+                if (core == null) {
+                    continue;
+                }
+                ShadowTable.HeldRef ref = core.shadow().heldRef(key);
+                if (ref != null && ref.leaseToken() == grant.leaseToken()) {
+                    return ref.holders().size() >= 2;
+                }
+            }
+            Thread.sleep(20);
+        }
+        unverified.incrementAndGet();
+        return false;
+    }
+
+    /**
+     * 服务端权威周期采样：遍历全部存活节点的影子表持有索引，测试 key 出现
+     * ≥2 个不同 {@code Holder} 即计一次冲突（同一步同 key 只计一次）。
+     *
+     * <p>状态机确定性与应用序保证：任何节点（哪怕落后）都不会展示从未出现
+     * 过的"双持有"状态，故采样按定义不产生假阳性。
+     *
+     * @param conflicts 冲突计数（调用方持有）
+     */
+    private void sampleDoubleHoldAway(AtomicLong conflicts) {
+        java.util.Set<String> flagged = new java.util.HashSet<>();
+        for (NodeRef n : nodes) {
+            if (!n.isAlive()) {
+                continue;
+            }
+            var cluster = n.server.cluster();
+            if (cluster == null) {
+                continue;
+            }
+            var core = cluster.core();
+            if (core == null) {
+                continue;
+            }
+            Map<String, ShadowTable.HeldRef> held = core.shadow().heldEntries();
+            for (String key : KEYS) {
+                ShadowTable.HeldRef ref = held.get(key);
+                if (ref != null && ref.holders().size() >= 2 && flagged.add(key)) {
+                    conflicts.incrementAndGet();
+                }
+            }
+        }
     }
 
     private OpenLatchClient clientTo() {
