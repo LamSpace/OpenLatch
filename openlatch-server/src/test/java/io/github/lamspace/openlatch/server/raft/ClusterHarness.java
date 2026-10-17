@@ -8,12 +8,12 @@ import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
 import io.github.lamspace.openlatch.server.session.ServerSession;
 import io.github.lamspace.openlatch.server.session.ServerSessionRegistry;
+import io.github.lamspace.openlatch.test.TestPorts;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -186,7 +186,7 @@ final class ClusterHarness implements AutoCloseable {
                                 int logSegmentBytes) throws IOException {
         int[] ports = new int[n];
         for (int i = 0; i < n; i++) {
-            ports[i] = freePort();
+            ports[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -218,7 +218,7 @@ final class ClusterHarness implements AutoCloseable {
         if (nodes.stream().anyMatch(x -> x.id == nodeId)) {
             throw new IllegalArgumentException("node id 已存在: " + nodeId);
         }
-        int port = freePort();
+        int port = TestPorts.freeNonEphemeral();
         List<String> peersWithNew = new ArrayList<>(peerSpecs);
         peersWithNew.add(nodeId + "@127.0.0.1:" + port);
         Path dir = Files.createTempDirectory("openlatch-cluster-" + nodeId + "-");
@@ -259,13 +259,6 @@ final class ClusterHarness implements AutoCloseable {
         return new ServerConfig(0, d.workerThreads(), d.idleTimeoutMs(), 5_000L,
                 100L, 3_600_000L, 200L, 1_500L,
                 d.maxKeyLength(), d.maxQueueDepthPerKey(), d.maxInflightPerConnection());
-    }
-
-    /** 找一个空闲 TCP 端口。 */
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
     }
 
     /** 节点列表（按 id 升序）。 */

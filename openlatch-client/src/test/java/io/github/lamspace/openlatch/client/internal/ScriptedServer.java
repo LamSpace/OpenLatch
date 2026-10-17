@@ -17,6 +17,7 @@
 package io.github.lamspace.openlatch.client.internal;
 
 import io.github.lamspace.openlatch.protocol.Envelope;
+import io.github.lamspace.openlatch.test.TestPorts;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -32,7 +33,6 @@ import io.netty.handler.codec.protobuf.ProtobufDecoder;
 import io.netty.handler.codec.protobuf.ProtobufEncoder;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
@@ -77,7 +77,7 @@ public final class ScriptedServer implements AutoCloseable {
         this.handler = handler;
         this.boss = new NioEventLoopGroup(1);
         this.worker = new NioEventLoopGroup(1);
-        int port = freePort();
+        int port = TestPorts.freeNonEphemeral();
         ServerBootstrap b = new ServerBootstrap()
                 .group(boss, worker)
                 .channel(NioServerSocketChannel.class)
@@ -110,13 +110,6 @@ public final class ScriptedServer implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("bind interrupted", e);
-        }
-    }
-
-    /** 空闲端口探测。 */
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
         }
     }
 

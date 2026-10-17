@@ -19,6 +19,7 @@ package io.github.lamspace.openlatch.client;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;

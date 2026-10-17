@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.github.lamspace.openlatch.client;
+package io.github.lamspace.openlatch.test;
 
 import org.junit.jupiter.api.Test;
 

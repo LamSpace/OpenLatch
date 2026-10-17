@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.github.lamspace.openlatch.client;
+package io.github.lamspace.openlatch.test;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -47,7 +47,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * <p><b>线程模型</b>：无状态、可并发调用；候选随机取样（{@link ThreadLocalRandom}）。
  */
-final class TestPorts {
+public final class TestPorts {
 
     /** 取样带下界（含）：刻意位于 OS 临时端口带之外，见类契约。 */
     static final int BAND_LO = 20_000;
@@ -81,7 +81,7 @@ final class TestPorts {
      * @return 取样带内的可绑定、且本 JVM 从未交出过的端口号
      * @throws IOException 带内连续 {@value #MAX_ATTEMPTS} 次候选均不可用（异常信息含带范围）
      */
-    static int freeNonEphemeral() throws IOException {
+    public static int freeNonEphemeral() throws IOException {
         for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
             int candidate = BAND_LO + ThreadLocalRandom.current()
                     .nextInt(BAND_HI - BAND_LO + 1);

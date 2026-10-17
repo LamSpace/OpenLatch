@@ -21,6 +21,7 @@ import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.raft.ShadowTable;
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -28,7 +29,6 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -350,18 +350,12 @@ class ClientChaosIT {
 
     // ---------- 集群装配 / 杀 / 重启 / 探测 ----------
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
-
     private void startCluster(int n, long snapshotThreshold) throws Exception {
         int[] accessPorts = new int[n];
         int[] raftPorts = new int[n];
         for (int i = 0; i < n; i++) {
-            accessPorts[i] = freePort();
-            raftPorts[i] = freePort();
+            accessPorts[i] = TestPorts.freeNonEphemeral();
+            raftPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         List<String> addrs = new ArrayList<>();
