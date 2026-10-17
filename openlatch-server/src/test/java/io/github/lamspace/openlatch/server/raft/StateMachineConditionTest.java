@@ -93,9 +93,11 @@ class StateMachineConditionTest {
             Envelope second = signaler.request(acquire(3, "ck", 2L, -1L, null));
             assertThat(second.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
 
+            // 基线前置：摘要收敛是异步的，有界等待追平——原裸断言在常规 CI
+            // 上曾因副本未追平而红（台账 W23）；不收敛仍在超时处红。
+            h.awaitTrue(h::aliveAgreeWithLeader, 20_000, "基线摘要追平");
             long baselineIndex = leader.lastApplied();
             String baselineDigest = leader.digest();
-            assertThat(h.aliveAgreeWithLeader()).isTrue();
 
             // 守卫流量：SIGNAL 首次搬运（登记转入等待队列管辖，零条目）、
             // 其后空集无操作；SIGNAL_ALL 空集；LEAVE 幂等——全链零日志贡献。

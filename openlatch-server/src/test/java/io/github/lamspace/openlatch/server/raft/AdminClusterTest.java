@@ -200,6 +200,16 @@ class AdminClusterTest {
         conn.hello(1, 3);
         conn.request(acquire(2, "still", 21, -1)); // 授予产生条目（计入基线前）
 
+        // 基线前置：副本应用是异步的——不等待追平，取样后副本的追赶会把
+        // lastApplied 推前，被 `after == before` 误读成"管理查询产生了条目"。
+        // 有界等待（20s）：真不收敛在此处红，判据方向仍是"零新增条目"。
+        harness.awaitTrue(() -> {
+            ClusterHarness.Node l = harness.leader();
+            return l != null && harness.nodes().stream()
+                    .filter(ClusterHarness.Node::alive)
+                    .allMatch(x -> x.lastApplied() == l.lastApplied());
+        }, 20_000, "基线追平");
+
         AdminRequestHandler handler = handlerFor(leader);
         List<Long> before = harness.nodes().stream().map(ClusterHarness.Node::lastApplied).toList();
         admin(leader, handler, conn, summary(3));
