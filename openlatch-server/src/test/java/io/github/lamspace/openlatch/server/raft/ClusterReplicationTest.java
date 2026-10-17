@@ -10,10 +10,12 @@ import io.github.lamspace.openlatch.protocol.MessageType;
 import io.github.lamspace.openlatch.protocol.ReleaseRequest;
 import io.github.lamspace.openlatch.protocol.ReleaseResponse;
 import io.github.lamspace.openlatch.protocol.StatusCode;
+import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,6 +55,39 @@ class ClusterReplicationTest {
                 .setLeaseRenewRequest(LeaseRenewRequest.newBuilder().setKey(key)
                         .setLeaseToken(token).setLeaseMs(leaseMs))
                 .build();
+    }
+
+    /**
+     * 读取 {@code before} 之后到节点当前应用位点之间的用户条目类型。
+     *
+     * <p>造载下会话/探针/到期扫描等后台条目可能于窗口内前移；本方法按
+     * {@link RaftEntryType} 过滤后台条目，只保留用户操作条目（锁/显式续租/闩/
+     * 原子/队列等），供"请求零日志"断言使用。
+     *
+     * @param node   目标节点（通常为 Leader）
+     * @param before 窗口起点（不含）
+     * @return 窗口内用户条目类型（按日志索引升序）
+     * @throws IOException 日志读取失败
+     */
+    private static List<RaftEntryType> userEntriesSince(ClusterHarness.Node node, long before)
+            throws IOException {
+        return node.entryTypesBetween(before, node.lastApplied()).stream()
+                .filter(ClusterReplicationTest::isUserEntry)
+                .toList();
+    }
+
+    /**
+     * 条目类型是否属于用户操作（非后台会话登记/关闭、探针、到期扫描与未知值）。
+     *
+     * @param type 复制条目类型
+     * @return {@code true}=属于用户操作条目
+     */
+    private static boolean isUserEntry(RaftEntryType type) {
+        return type != RaftEntryType.SESSION_OPEN
+                && type != RaftEntryType.SESSION_CLOSE
+                && type != RaftEntryType.NOOP
+                && type != RaftEntryType.LEASE_EXPIRE_ENTRY
+                && type != RaftEntryType.RAFT_ENTRY_UNKNOWN;
     }
 
     // ---------- 授予路径 ----------
@@ -118,15 +153,23 @@ class ClusterReplicationTest {
             Envelope g = c1.request(acquire(3, "qk", LockType.LOCK_TYPE_REENTRANT, -1, 30_000));
             assertThat(g.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
 
+            // 绝对 lastApplied 会被造载下的后台条目（会话/NOOP/到期扫描等）前移，
+            // 因此只断言窗口内没有新增用户条目；QUEUED/DENIED 零日志原意不变。
             long before = leader.lastApplied();
             Envelope q = c2.request(acquire(4, "qk", LockType.LOCK_TYPE_REENTRANT, -1, 30_000));
             assertThat(q.getAcquireResponse().getStatus()).isEqualTo(StatusCode.QUEUED);
             assertThat(q.getAcquireResponse().getQueuePosition()).isEqualTo(1);
-            assertThat(leader.lastApplied()).isEqualTo(before); // QUEUED 零日志
+            assertThat(userEntriesSince(leader, before))
+                    .as("QUEUED 零用户条目（窗口 before=%d, after=%d）",
+                            before, leader.lastApplied())
+                    .isEmpty();
 
             Envelope d = c2.request(acquire(5, "qk", LockType.LOCK_TYPE_REENTRANT, 0, 30_000));
             assertThat(d.getAcquireResponse().getStatus()).isEqualTo(StatusCode.DENIED);
-            assertThat(leader.lastApplied()).isEqualTo(before); // 立即式冲突同样零日志
+            assertThat(userEntriesSince(leader, before))
+                    .as("立即式冲突零用户条目（窗口 before=%d, after=%d）",
+                            before, leader.lastApplied())
+                    .isEmpty();
         }
     }
 
@@ -305,8 +348,10 @@ class ClusterReplicationTest {
             c.hello(1);
             Envelope g = c.request(acquire(2, "fk2", LockType.LOCK_TYPE_REENTRANT, -1, 3_000));
             assertThat(g.getAcquireResponse().getStatus()).isEqualTo(StatusCode.OK);
-            c.disconnect(); // 持有会话保持（连接断开才清；此处保留锁经复制存活）
-            // 上面 disconnect 会释放该会话的锁——重授到 leader 上另一会话再杀主：
+            // disconnect 的 SESSION_CLOSE 异步入日志（会释放该会话的锁）：
+            // 先等该 key 在 Leader 上不再 held，再做重授，避免重授先到而得到 QUEUED。
+            c.disconnect();
+            h.awaitKeyNotHeld("fk2", 10_000);
             ClusterHarness.TestConn c2 = h.connect(leader);
             c2.hello(3);
             Envelope g2 = c2.request(acquire(4, "fk2", LockType.LOCK_TYPE_REENTRANT, -1, 3_000));

@@ -1,8 +1,11 @@
 package io.github.lamspace.openlatch.server.raft;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.github.lamspace.openlatch.protocol.Envelope;
 import io.github.lamspace.openlatch.protocol.HelloRequest;
 import io.github.lamspace.openlatch.protocol.MessageType;
+import io.github.lamspace.openlatch.protocol.raft.RaftEntryType;
+import io.github.lamspace.openlatch.protocol.raft.RaftLogEntry;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.ServerConfig;
 import io.github.lamspace.openlatch.server.metrics.ServerMetrics;
@@ -111,6 +114,43 @@ final class ClusterHarness implements AutoCloseable {
             }
             var ti = rt.subsystem().stateMachine().lastApplied();
             return ti == null ? 0 : ti.getIndex();
+        }
+
+        /**
+         * 读取本节点已提交日志闭区间 {@code (fromExclusive, toInclusive]} 内的
+         * 条目类型（"零日志"断言的诊断入口）。
+         *
+         * <p>逐索引经 Ratis {@code RaftLog#get(index)} 读取并解析状态机日志载荷；
+         * 非状态机条目（配置/元数据）跳过。调用方 MUST 保证区间落在本节点仍有
+         * 日志副本的已应用范围内（本夹具未触发快照截断）。并发追加的更高位点
+         * 不在本方法可见区间内，不影响已返回结果。
+         *
+         * @param fromExclusive 起始位点（不含）
+         * @param toInclusive   结束位点（含，通常取 {@link #lastApplied()}）
+         * @return 按索引升序的条目类型；区间为空返回空列表
+         * @throws IOException 运行时已停、日志读取失败或载荷不可解析
+         */
+        List<RaftEntryType> entryTypesBetween(long fromExclusive, long toInclusive)
+                throws IOException {
+            ClusterRuntime rt = runtime;
+            if (rt == null) {
+                throw new IllegalStateException("node " + id + " stopped");
+            }
+            var raftLog = rt.subsystem().division().getRaftLog();
+            List<RaftEntryType> types = new ArrayList<>();
+            for (long index = fromExclusive + 1; index <= toInclusive; index++) {
+                var proto = raftLog.get(index);
+                if (proto == null || !proto.hasStateMachineLogEntry()) {
+                    continue;
+                }
+                try {
+                    types.add(RaftLogEntry.parseFrom(proto.getStateMachineLogEntry()
+                            .getLogData().toByteArray()).getType());
+                } catch (InvalidProtocolBufferException e) {
+                    throw new IOException("unparsable log entry at index " + index, e);
+                }
+            }
+            return types;
         }
     }
 
@@ -376,6 +416,66 @@ final class ClusterHarness implements AutoCloseable {
                 .findFirst().orElseThrow(() -> new IllegalStateException("no follower to stop"));
         stopNode(victim.id);
         return victim.id;
+    }
+
+    /**
+     * 有界等待指定 key 在 Leader 复制投影上不再 held（断连释放的夹具侧同步点）。
+     *
+     * <p>{@link TestConn#disconnect()} 的 {@code SESSION_CLOSE} 经
+     * {@link SessionCoordinator#submitClose} <b>异步入日志</b>；应用前 Leader
+     * 影子表仍可能持有该 key，紧接着的重授会被预检判定 busy 而得到
+     * {@code QUEUED}。本方法以 50ms 周期轮询当值 Leader，直至
+     * {@code shadow().isHeld(key)} 为 false。
+     *
+     * @param key       锁键
+     * @param timeoutMs 超时预算（毫秒）
+     * @throws AssertionError 超时仍未释放；消息含各节点角色、held 读数与
+     *                        {@code lastApplied} 诊断
+     */
+    void awaitKeyNotHeld(String key, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            Node l = leader();
+            ClusterRuntime rt = l == null ? null : l.runtime;
+            if (rt != null && !rt.core().shadow().isHeld(key)) {
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("等待 key 释放被中断: " + key);
+            }
+        }
+        throw new AssertionError("超时未满足: key=" + key + " 在 Leader 上不再 held"
+                + "（timeoutMs=" + timeoutMs + "）；" + heldDiagnostics(key));
+    }
+
+    /**
+     * 组装等待释放超时的诊断串（节点角色、held 读数、应用位点）。
+     *
+     * @param key 待观察的锁键
+     * @return 含全部节点 id、角色、held 与 {@code lastApplied} 的单行诊断
+     */
+    private String heldDiagnostics(String key) {
+        StringBuilder sb = new StringBuilder("诊断[");
+        for (Node x : nodes) {
+            ClusterRuntime rt = x.runtime;
+            sb.append("node=").append(x.id).append(" role=");
+            if (rt == null) {
+                sb.append("stopped");
+            } else {
+                sb.append(x.isLeader() ? "leader" : "follower");
+                try {
+                    sb.append(" held=").append(rt.core().shadow().isHeld(key));
+                } catch (RuntimeException e) {
+                    sb.append(" held=<error:").append(e.getClass().getSimpleName()).append('>');
+                }
+                sb.append(" lastApplied=").append(x.lastApplied());
+            }
+            sb.append("; ");
+        }
+        return sb.append(']').toString();
     }
 
     /** 轮询等待条件成立（超时抛断言错误）。 */
