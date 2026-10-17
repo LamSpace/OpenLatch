@@ -256,6 +256,13 @@ class RemotePhaserScriptedTest {
                 assertThatThrownBy(() -> ph.awaitAdvanceInterruptibly(5, 800,
                         TimeUnit.MILLISECONDS))
                         .isInstanceOf(TimeoutException.class);
+                // CANCEL 为 fire-and-forget（契约不承诺"服务端已观察"与"超时异常
+                // 返回"的先后）：有界等待最终必达（与同文件中断用例同款 3s/20ms），
+                // 不到达仍在 3s 后红——是等可见性，不是放宽判据。
+                long cancelDeadline = System.currentTimeMillis() + 3_000;
+                while (cancelFrame.get() == null && System.currentTimeMillis() < cancelDeadline) {
+                    Thread.sleep(20);
+                }
                 assertThat(cancelFrame.get()).isNotNull();
                 assertThat(req(cancelFrame.get()).getOp())
                         .isEqualTo(PhaserOp.PHASER_OP_CANCEL);
