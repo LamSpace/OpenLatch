@@ -16,12 +16,12 @@
 
 package io.github.lamspace.openlatch.client;
 
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Assumptions;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,7 +59,7 @@ class ClientProcessKillIT {
         }
         Assumptions.assumeTrue(jar != null, "openlatch-server shaded jar not built; run 'mvn install' first");
 
-        int port = freePort();
+        int port = TestPorts.freeNonEphemeral();
         Process first = startServer(jar, port);
         OpenLatchClient client = null;
         try {
@@ -198,17 +198,5 @@ class ClientProcessKillIT {
             }
         }
         return null;
-    }
-
-    /**
-     * 取一个当前空闲的端口（取后立即释放）。
-     *
-     * @return 空闲端口
-     * @throws IOException 套接字操作失败
-     */
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 }

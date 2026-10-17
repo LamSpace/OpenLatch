@@ -19,13 +19,13 @@ package io.github.lamspace.openlatch.client;
 import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -91,19 +91,13 @@ class IdleNodeGracefulStopIT {
 
     // ---------- 装配（沿 ClientChaosIT 口径，负载与杀点留给混沌档） ----------
 
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
-    }
-
     private void startCluster() throws IOException {
         int n = 3;
         int[] accessPorts = new int[n];
         int[] raftPorts = new int[n];
         for (int i = 0; i < n; i++) {
-            accessPorts[i] = freePort();
-            raftPorts[i] = freePort();
+            accessPorts[i] = TestPorts.freeNonEphemeral();
+            raftPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         List<String> addrs = new ArrayList<>();

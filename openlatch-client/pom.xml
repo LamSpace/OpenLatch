@@ -64,6 +64,14 @@
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- 测试基座：TestPorts 随 server test-jar 共享（带外取口单一事实源） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>

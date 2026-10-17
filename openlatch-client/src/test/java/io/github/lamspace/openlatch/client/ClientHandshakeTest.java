@@ -17,10 +17,9 @@
 package io.github.lamspace.openlatch.client;
 
 import io.github.lamspace.openlatch.server.OpenLatchServer;
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.net.ServerSocket;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -66,7 +65,7 @@ class ClientHandshakeTest {
     /** 服务不可达：连接尝试失败但客户端持续重试，不抛未捕获异常；关停后连接尝试失败收尾。 */
     @Test
     void unreachableServerKeepsRetryingUntilShutdown() throws Exception {
-        int deadPort = freePort();
+        int deadPort = TestPorts.freeNonEphemeral();
         OpenLatchClient client = OpenLatchClient.builder()
                 .address("127.0.0.1:" + deadPort)
                 .reconnectInitialBackoff(Duration.ofMillis(50))
@@ -83,18 +82,6 @@ class ClientHandshakeTest {
                     .hasCauseInstanceOf(IllegalStateException.class);
         } finally {
             client.shutdown();
-        }
-    }
-
-    /**
-     * 取一个当前空闲的端口（取后立即释放，随后连接该端口将被拒绝）。
-     *
-     * @return 空闲端口
-     * @throws IOException 套接字操作失败
-     */
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
         }
     }
 }

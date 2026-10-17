@@ -22,6 +22,14 @@
             <artifactId>openlatch-server</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- 测试基座：TestPorts 随 server test-jar 共享（带外取口单一事实源） -->
+        <dependency>
+            <groupId>io.github.lamspace</groupId>
+            <artifactId>openlatch-server</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
         <!-- Boot BOM 托管零版本（design D6）：Web + Thymeleaf 服务端渲染，无前端构建链 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

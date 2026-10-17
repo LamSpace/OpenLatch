@@ -23,6 +23,7 @@ import io.github.lamspace.openlatch.server.ClusterConfig;
 import io.github.lamspace.openlatch.server.MetricsConfig;
 import io.github.lamspace.openlatch.server.OpenLatchServer;
 import io.github.lamspace.openlatch.server.ServerConfig;
+import io.github.lamspace.openlatch.test.TestPorts;
 import org.junit.jupiter.api.AfterAll;
 
 import org.junit.jupiter.api.Test;
@@ -32,8 +33,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -103,7 +102,7 @@ class ConsoleClusterTest {
     private static void bootCluster() throws Exception {
         int[] raftPorts = new int[NODES];
         for (int i = 0; i < NODES; i++) {
-            raftPorts[i] = freePort();
+            raftPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         for (int i = 0; i < NODES; i++) {
@@ -113,7 +112,7 @@ class ConsoleClusterTest {
         // Leader 提示地址可直达（车道/改道语义完整）。
         int[] accessPorts = new int[NODES];
         for (int i = 0; i < NODES; i++) {
-            accessPorts[i] = freePort();
+            accessPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> addrs = new ArrayList<>();
         for (int i = 0; i < NODES; i++) {
@@ -289,18 +288,6 @@ class ConsoleClusterTest {
             if (s != null) {
                 s.stop();
             }
-        }
-    }
-
-    /**
-     * 找一个空闲端口。
-     *
-     * @return 端口
-     * @throws IOException 分配失败
-     */
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
         }
     }
 
