@@ -23,8 +23,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -88,8 +86,8 @@ class ClientSemaphoreClusterIT {
         int[] accessPorts = new int[n];
         int[] raftPorts = new int[n];
         for (int i = 0; i < n; i++) {
-            accessPorts[i] = freePort();
-            raftPorts[i] = freePort();
+            accessPorts[i] = TestPorts.freeNonEphemeral();
+            raftPorts[i] = TestPorts.freeNonEphemeral();
         }
         List<String> peers = new ArrayList<>();
         List<String> addrs = new ArrayList<>();
@@ -126,12 +124,6 @@ class ClientSemaphoreClusterIT {
                 .build();
         clients.add(c);
         return c;
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
-        }
     }
 
     private static void awaitTrue(java.util.function.BooleanSupplier condition, String what)

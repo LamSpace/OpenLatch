@@ -19,6 +19,8 @@ package io.github.lamspace.openlatch.client;
 import org.junit.jupiter.api.Test;
 
 import java.net.ServerSocket;
+import java.util.HashSet;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -47,6 +49,23 @@ class TestPortsTest {
             assertThat(TestPorts.freeNonEphemeral())
                     .as("取样必须落在非临时带内，否则仍可能被并发 connect 抢走")
                     .isBetween(TestPorts.BAND_LO, TestPorts.BAND_HI);
+        }
+    }
+
+    /**
+     * 同一 JVM 内不重复发放：多节点装配会在任何服务端 bind 之前连续取样，重号会让
+     * 后一个节点 bind 失败（实测：{@code n1} 与 {@code n3} 拿到同一 Raft 口 ⇒
+     * {@code Address already in use}）。本测试是概率性护栏（200 次取样在 10k 带内
+     * 无预留时重复概率约 86%）；结构性保证由 {@link TestPorts} 的预留集合承担。
+     */
+    @Test
+    void handedOutPortsAreNeverRepeated() throws Exception {
+        Set<Integer> seen = new HashSet<>();
+        for (int i = 0; i < 200; i++) {
+            int port = TestPorts.freeNonEphemeral();
+            assertThat(seen.add(port))
+                    .as("同一 JVM 内端口不得重复发放: " + port)
+                    .isTrue();
         }
     }
 
