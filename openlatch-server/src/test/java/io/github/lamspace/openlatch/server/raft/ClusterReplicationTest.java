@@ -343,7 +343,9 @@ class ClusterReplicationTest {
     @Test
     void failoverKeepsExpiryDriving() throws IOException {
         try (ClusterHarness h = ClusterHarness.start(3, 500)) {
-            ClusterHarness.Node leader = h.leader();
+            // start 只等"存在 Leader"；500ms 选举超时在造载下可能刚选出即降级。
+            // 首请求前等同一 Leader 连续静置 2× 选举超时（1s），避开启动竞选窗。
+            ClusterHarness.Node leader = h.awaitStableLeader(1_000, 20_000);
             ClusterHarness.TestConn c = h.connect(leader);
             c.hello(1);
             Envelope g = c.request(acquire(2, "fk2", LockType.LOCK_TYPE_REENTRANT, -1, 3_000));
