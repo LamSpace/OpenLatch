@@ -478,6 +478,66 @@ final class ClusterHarness implements AutoCloseable {
         return sb.append(']').toString();
     }
 
+    /**
+     * 有界等待领导权稳定：同一 Leader 连续保持 {@code quietMs} 后才返回。
+     *
+     * <p>{@link #start} 的初始选主只保证"存在 Leader"，不保证其稳定；低选举超时
+     * （如 500ms）在 CPU 重载下可能刚选出即因心跳延迟降级，首请求若落在竞选窗
+     * 会得到 {@code NOT_LEADER}。本方法以连续静置窗口过滤该窗口：期间 Leader
+     * 变化或暂时消失即重新计时。
+     *
+     * @param quietMs   要求同一 Leader 连续保持的时长（毫秒）
+     * @param timeoutMs 总等待预算（毫秒）
+     * @return 连续保持超过 {@code quietMs} 的 Leader 节点
+     * @throws AssertionError 预算内未出现稳定 Leader；消息含各节点角色诊断
+     */
+    Node awaitStableLeader(long quietMs, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        Node stable = null;
+        long stableSince = 0;
+        while (System.currentTimeMillis() < deadline) {
+            Node current = leader();
+            long now = System.currentTimeMillis();
+            if (current == null) {
+                stable = null;
+            } else if (current != stable) {
+                stable = current;
+                stableSince = now;
+            } else if (now - stableSince >= quietMs) {
+                return stable;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("等待领导权稳定被中断");
+            }
+        }
+        throw new AssertionError("超时未出现稳定 Leader（quietMs=" + quietMs
+                + ", timeoutMs=" + timeoutMs + "）；" + leaderDiagnostics());
+    }
+
+    /**
+     * 组装领导权稳定性超时的诊断串。
+     *
+     * @return 含全部节点 id、角色与 {@code lastApplied} 的单行诊断
+     */
+    private String leaderDiagnostics() {
+        StringBuilder sb = new StringBuilder("诊断[");
+        for (Node x : nodes) {
+            sb.append("node=").append(x.id).append(" role=");
+            ClusterRuntime rt = x.runtime;
+            if (rt == null) {
+                sb.append("stopped");
+            } else {
+                sb.append(x.isLeader() ? "leader" : "follower");
+                sb.append(" lastApplied=").append(x.lastApplied());
+            }
+            sb.append("; ");
+        }
+        return sb.append(']').toString();
+    }
+
     /** 轮询等待条件成立（超时抛断言错误）。 */
     void awaitTrue(BooleanSupplier cond, long timeoutMs, String what) {
         long deadline = System.currentTimeMillis() + timeoutMs;
