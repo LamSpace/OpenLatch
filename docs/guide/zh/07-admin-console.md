@@ -34,11 +34,11 @@ timer 键（v11）同双速呈现：账簿三元组（`timer_generation`/`timer_
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console-1.0.0-executable.jar
+     -jar openlatch-console-1.1.0-executable.jar
 ```
 
 （本地源码构建则位于
-`openlatch-console/target/openlatch-console-1.0.0-executable.jar`。）
+`openlatch-console/target/openlatch-console-1.1.0-executable.jar`。）
 
 与控制端同机部署的被观察节点也完全兼容（不同进程即可）。配置模板见仓库
 `openlatch-console/console.properties.example`。

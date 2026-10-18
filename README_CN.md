@@ -65,22 +65,22 @@ Spring Boot 4 声明式注解 `@OpenLatch`、只读 Web **管理控制台**、Pr
 <dependency>
     <groupId>io.github.lamspace</groupId>
     <artifactId>openlatch-client</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 
 <!-- 或 Spring Boot 4 starter -->
 <dependency>
     <groupId>io.github.lamspace</groupId>
     <artifactId>openlatch-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
 单节点服务器——从 [GitHub Releases](https://github.com/LamSpace/OpenLatch/releases) 下载可执行 jar：
 
 ```bash
-curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.0.0/openlatch-server-1.0.0-executable.jar
-java -jar openlatch-server-1.0.0-executable.jar    # 监听 :9410
+curl -LO https://github.com/LamSpace/OpenLatch/releases/download/v1.1.0/openlatch-server-1.1.0-executable.jar
+java -jar openlatch-server-1.1.0-executable.jar    # 监听 :9410
 ```
 
 ```java

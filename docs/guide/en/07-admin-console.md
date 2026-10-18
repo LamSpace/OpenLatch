@@ -13,11 +13,11 @@ Grab the executable jar from
 
 ```bash
 java -Dopenlatch.console.config=/path/to/console.properties \
-     -jar openlatch-console-1.0.0-executable.jar
+     -jar openlatch-console-1.1.0-executable.jar
 ```
 
 (If you built from source instead, the jar is at
-`openlatch-console/target/openlatch-console-1.0.0-executable.jar`.)
+`openlatch-console/target/openlatch-console-1.1.0-executable.jar`.)
 
 Co-locating with observed nodes is fine (separate process). Template:
 `openlatch-console/console.properties.example` in the repo.
